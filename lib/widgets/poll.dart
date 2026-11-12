@@ -65,6 +65,10 @@ class _PollWidgetState extends State<PollWidget> {
     final zulipLocalizations = ZulipLocalizations.of(context);
     final theme = ContentTheme.of(context);
     final store = PerAccountStoreWidget.of(context);
+    // The message may be one known only from a cached fetch,
+    // as while [MessageListView.showingCachedMessages].
+    // Events don't update its poll, so a vote wouldn't show; don't take one.
+    final canVote = store.messages[widget.messageId] != null;
 
     final textStyleBold = weightVariableTextStyle(context, wght: 600);
     final textStyleVoterNames = TextStyle(
@@ -103,7 +107,7 @@ class _PollWidgetState extends State<PollWidget> {
                 color: theme.colorPollVoteCountBackground,
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
-                  onTap: () => _toggleVote(option),
+                  onTap: canVote ? () => _toggleVote(option) : null,
                   child: Padding(
                     // Inner padding preserves whitespace even when the text's
                     // width approaches the button's min-width (e.g. because

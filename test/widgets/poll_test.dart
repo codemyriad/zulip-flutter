@@ -166,4 +166,22 @@ void main() {
     await tester.pump(Duration.zero);
     checkVoteRequest(optionKey, PollVoteOp.remove);
   });
+
+  testWidgets('no voting on a message the store doesn\'t have', (tester) async {
+    // As for a message known only from a cached fetch;
+    // see [MessageListView.showingCachedMessages].
+    addTearDown(testBinding.reset);
+    await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
+    store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+    connection = store.connection as FakeApiConnection;
+    message = eg.streamMessage(sender: eg.selfUser, submessages: [
+      eg.submessage(content: eg.pollWidgetData(question: 'title', options: ['A']))]);
+    await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+      child: PollWidget(messageId: message.id, poll: message.poll!)));
+    await tester.pump();
+
+    await tester.tap(findTextAtRow('0', index: 0));
+    await tester.pump(Duration.zero);
+    check(connection.takeRequests()).isEmpty();
+  });
 }
