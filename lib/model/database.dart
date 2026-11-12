@@ -8,7 +8,6 @@ import 'package:drift/internal/versioned_schema.dart';
 import 'package:drift/remote.dart';
 import 'package:sqlite3/common.dart';
 
-import '../api/route/messages.dart';
 import '../api/route/realm.dart';
 import '../log.dart';
 import 'legacy_app_data.dart';
@@ -299,12 +298,8 @@ class ServerEventBatches extends Table {
 }
 
 /// The table of [CachedMessageFetch] records,
-/// each the result of the latest initial fetch of messages
-/// for a narrow in an account that reached the newest message,
+/// each the newest messages a message list had for a narrow in an account,
 /// for showing that narrow's messages while the server can't be reached (#477).
-///
-/// A row holds the server's response as of that fetch;
-/// it doesn't reflect events received since.
 ///
 /// Each account has a bounded number and total size of rows here;
 /// see [AppDatabase.storeCachedMessageFetch].
@@ -313,7 +308,7 @@ class CachedMessageFetches extends Table {
   Column<int> get accountId => integer()
     .references(Accounts, #id, onDelete: .cascade)();
 
-  /// A key identifying the narrow the messages were fetched for,
+  /// A key identifying the narrow the messages are in,
   /// from `messageFetchCacheKey` in lib/model/narrow.dart.
   Column<String> get narrowKey => text()();
 
@@ -323,7 +318,8 @@ class CachedMessageFetches extends Table {
   /// the ones written least recently get deleted.
   Column<int> get lastWritten => integer()();
 
-  /// The body of the server's response to [getMessages], as UTF-8 JSON.
+  /// The messages, as encoded by `encodeCachedMessages`
+  /// in lib/model/cached_messages.dart.
   // Keep this column last, so the other columns can be read
   // without reading the possibly large data.
   Column<Uint8List> get data => blob()();

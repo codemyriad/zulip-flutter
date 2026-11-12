@@ -3267,7 +3267,7 @@ class CachedMessageFetch extends DataClass
     implements Insertable<CachedMessageFetch> {
   final int accountId;
 
-  /// A key identifying the narrow the messages were fetched for,
+  /// A key identifying the narrow the messages are in,
   /// from `messageFetchCacheKey` in lib/model/narrow.dart.
   final String narrowKey;
 
@@ -3277,7 +3277,8 @@ class CachedMessageFetch extends DataClass
   /// the ones written least recently get deleted.
   final int lastWritten;
 
-  /// The body of the server's response to [getMessages], as UTF-8 JSON.
+  /// The messages, as encoded by `encodeCachedMessages`
+  /// in lib/model/cached_messages.dart.
   final Uint8List data;
   const CachedMessageFetch({
     required this.accountId,

@@ -17,6 +17,7 @@ import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/algorithms.dart';
 import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/cached_messages.dart';
 import 'package:zulip/model/connectivity.dart';
 import 'package:zulip/model/content.dart';
 import 'package:zulip/model/database.dart';
@@ -841,7 +842,16 @@ void main() {
 
     void seedCachedFetch(Narrow narrow, List<Message> messages) {
       backend.seedCachedMessageFetch(eg.selfAccount.id, messageFetchCacheKey(narrow)!,
-        json: newestResult(foundOldest: true, messages: messages).toJson());
+        messages: messages);
+    }
+
+    /// Check that the messages stored for [narrow] are [expected],
+    /// with the same data.
+    void checkCachedMessages(Narrow narrow, List<Message> expected) {
+      final data = cachedFetchOf(narrow)?.data;
+      check(data).isNotNull();
+      check(decodeCachedMessages(data!).map(deepToJson))
+        .deepEquals(expected.map(deepToJson));
     }
 
     group('store after fetchInitial', () {
@@ -850,11 +860,10 @@ void main() {
         required List<Message> messages,
       }) async {
         await prepare(narrow: narrow, anchor: anchor, stream: channel);
-        final json = newestResult(foundOldest: true, messages: messages).toJson();
-        connection.prepare(json: json);
+        connection.prepare(json:
+          newestResult(foundOldest: true, messages: messages).toJson());
         await model.fetchInitial();
-        check(cachedFetchOf(narrow)).isNotNull()
-          .data.deepEquals(utf8.encode(jsonEncode(json)));
+        checkCachedMessages(narrow, messages);
       }
 
       test('CombinedFeedNarrow', () => checkStored(const CombinedFeedNarrow(),
@@ -880,22 +889,46 @@ void main() {
         anchor: AnchorCode.firstUnread,
         messages: [eg.streamMessage(stream: channel)]));
 
-      Future<void> checkNotStored(Narrow narrow, Anchor anchor) async {
-        await prepare(narrow: narrow, anchor: anchor, stream: channel);
+      test('anchor oldest, reaching the newest message', () => checkStored(
+        const CombinedFeedNarrow(), anchor: AnchorCode.oldest,
+        messages: [eg.streamMessage(stream: channel)]));
+
+      test('numeric anchor, reaching the newest message', () => checkStored(
+        const CombinedFeedNarrow(), anchor: NumericAnchor(1),
+        messages: [eg.streamMessage(stream: channel)]));
+
+      test('only the newest kCachedMessagesMaxCount messages', () async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, anchor: AnchorCode.firstUnread, stream: channel);
+        final messages = List.generate(kCachedMessagesMaxCount + 1,
+          (_) => eg.streamMessage(stream: channel));
+        connection.prepare(json: nearResult(anchor: messages[1].id,
+          foundOldest: true, foundNewest: true, messages: messages).toJson());
+        await model.fetchInitial();
+        checkCachedMessages(narrow, messages.sublist(1));
+      });
+
+      test('visible messages only', () async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        await store.setUserTopic(channel, 'muted', UserTopicVisibilityPolicy.muted);
+        final messages = [
+          eg.streamMessage(stream: channel, topic: 'muted'),
+          eg.streamMessage(stream: channel, topic: 'visible'),
+        ];
+        connection.prepare(json:
+          newestResult(foundOldest: true, messages: messages).toJson());
+        await model.fetchInitial();
+        checkCachedMessages(narrow, [messages[1]]);
+      });
+
+      test('not for keyword search', () async {
+        await prepare(narrow: KeywordSearchNarrow('hello'), stream: channel);
         connection.prepare(json: newestResult(foundOldest: true,
           messages: [eg.streamMessage(stream: channel)]).toJson());
         await model.fetchInitial();
         check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).isEmpty();
-      }
-
-      test('not with anchor oldest', () =>
-        checkNotStored(const CombinedFeedNarrow(), AnchorCode.oldest));
-
-      test('not with numeric anchor', () =>
-        checkNotStored(const CombinedFeedNarrow(), NumericAnchor(1)));
-
-      test('not for keyword search', () =>
-        checkNotStored(KeywordSearchNarrow('hello'), AnchorCode.newest));
+      });
 
       test('not when the result stops short of the newest message', () async {
         // As for an old unread in a busy topic.
@@ -926,14 +959,13 @@ void main() {
         final narrow = ChannelNarrow(channel.streamId);
         await prepare(narrow: narrow, stream: channel);
         connection.prepare(httpException: const SocketException('failed'));
-        final json = newestResult(foundOldest: true,
-          messages: [eg.streamMessage(stream: channel)]).toJson();
-        connection.prepare(json: json);
+        final messages = [eg.streamMessage(stream: channel)];
+        connection.prepare(json:
+          newestResult(foundOldest: true, messages: messages).toJson());
         final fetchFuture = model.fetchInitial();
         async.elapse(const Duration(milliseconds: 100)); // max first backoff
         await fetchFuture;
-        check(cachedFetchOf(narrow)).isNotNull()
-          .data.deepEquals(utf8.encode(jsonEncode(json)));
+        checkCachedMessages(narrow, messages);
       }));
     });
 

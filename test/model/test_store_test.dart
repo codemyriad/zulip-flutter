@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:test/scaffolding.dart';
+import 'package:zulip/model/cached_messages.dart';
 import 'package:zulip/model/database.dart';
 
 import '../example_data.dart' as eg;
@@ -466,13 +467,13 @@ void main() {
 
     test('seed cached message fetch', () async {
       prepare();
-      final json = eg.newestGetMessagesResult(foundOldest: true,
-        messages: [eg.streamMessage()]).toJson();
-      backend.seedCachedMessageFetch(eg.selfAccount.id, 'channel:1', json: json);
+      final messages = [eg.streamMessage()];
+      backend.seedCachedMessageFetch(eg.selfAccount.id, 'channel:1',
+        messages: messages);
       backend.seedCachedMessageFetch(eg.selfAccount.id, 'channel:2',
         data: utf8.encode('not JSON'));
       check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
-        .isNotNull().deepEquals(utf8.encode(jsonEncode(json)));
+        .isNotNull().deepEquals(encodeCachedMessages(messages));
       check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:2'))
         .isNotNull().deepEquals(utf8.encode('not JSON'));
     });

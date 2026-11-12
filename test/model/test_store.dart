@@ -5,9 +5,9 @@ import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/events.dart';
-import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/api/route/realm.dart';
 import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/cached_messages.dart';
 import 'package:zulip/model/database.dart';
 import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
@@ -352,8 +352,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// Store a cached message fetch for the account,
   /// as if stored by an earlier run of the app.
   ///
-  /// The data is [json] encoded as JSON,
-  /// such as from [GetMessagesResult.toJson],
+  /// The data is [messages] encoded by [encodeCachedMessages],
   /// or else [data], for example to simulate corrupt data.
   /// Exactly one of them must be passed.
   ///
@@ -362,16 +361,16 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// on the size and number of cached message fetches,
   /// and requires the account to exist.
   void seedCachedMessageFetch(int accountId, String narrowKey, {
-    Map<String, dynamic>? json,
+    List<Message>? messages,
     Uint8List? data,
     int? lastWritten,
   }) {
-    assert((json == null) != (data == null));
+    assert((messages == null) != (data == null));
     assert(_accountIds.contains(accountId));
     _putCachedMessageFetch(accountId, narrowKey,
       lastWritten: lastWritten
         ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch,
-      data: data ?? utf8.encode(jsonEncode(json)));
+      data: data ?? encodeCachedMessages(messages!));
   }
 
   void _putCachedMessageFetch(int accountId, String narrowKey, {

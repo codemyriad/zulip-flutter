@@ -26,6 +26,7 @@ import '../notifications/ios_service.dart';
 import 'actions.dart';
 import 'autocomplete.dart';
 import 'binding.dart';
+import 'cached_messages.dart';
 import 'connectivity.dart';
 import 'database.dart';
 import 'emoji.dart';
@@ -1011,13 +1012,14 @@ class PerAccountStore extends PerAccountStoreBase with
   // End of data.
   //|//////////////////////////////////////////////////////////////
 
-  /// Store [data], the body of a [getMessages] response,
+  /// Store [data], messages encoded by [encodeCachedMessages],
   /// as this account's cached message fetch for [narrowKey]
   /// (see [messageFetchCacheKey]),
   /// replacing any previous one.
   ///
-  /// A cached message fetch is the server's response as of that fetch;
-  /// it doesn't get updated for events received after it.
+  /// A cached message fetch holds the newest messages
+  /// a message list had for the narrow;
+  /// see `MessageListView.showingCachedMessages`.
   ///
   /// The account's cached message fetches are bounded in number and size:
   /// this may delete the least recently stored ones,
@@ -1042,7 +1044,7 @@ class PerAccountStore extends PerAccountStoreBase with
   /// This doesn't throw: on an error reading the data,
   /// it logs the error and returns null.
   /// The data isn't validated, though;
-  /// it may not parse as a [GetMessagesResult].
+  /// it may not decode with [decodeCachedMessages].
   Future<Uint8List?> loadCachedMessageFetch(String narrowKey) async {
     try {
       return await _globalStore._backend.doLoadCachedMessageFetch(

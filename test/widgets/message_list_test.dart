@@ -868,9 +868,7 @@ void main() {
       await store.addMessages(storeMessages);
       if (cachedMessages != null) {
         testBinding.globalStore.backend.seedCachedMessageFetch(eg.selfAccount.id,
-          messageFetchCacheKey(narrow)!,
-          json: eg.newestGetMessagesResult(foundOldest: true,
-            messages: cachedMessages).toJson());
+          messageFetchCacheKey(narrow)!, messages: cachedMessages);
       }
 
       connection.prepare(httpException: const SocketException('failed'));
