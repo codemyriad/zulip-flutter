@@ -398,3 +398,27 @@ class KeywordSearchNarrow extends Narrow {
   @override
   int get hashCode => Object.hash('KeywordSearchNarrow', keyword);
 }
+
+/// A key identifying [narrow] among an account's cached message fetches,
+/// or null if message fetches for [narrow] aren't to be cached.
+///
+/// The key depends only on what messages the narrow contains,
+/// not on how the narrow is encoded for a given server:
+/// it's the same across server feature levels,
+/// it ignores [TopicNarrow.with_],
+/// and it treats topic names case-insensitively,
+/// as [TopicName.isSameAs] does.
+///
+/// See `AppDatabase.storeCachedMessageFetch`.
+String? messageFetchCacheKey(Narrow narrow) {
+  return switch (narrow) {
+    CombinedFeedNarrow() => 'all',
+    ChannelNarrow(:final channelId) => 'channel:$channelId',
+    TopicNarrow(:final channelId, :final topic) =>
+      'topic:$channelId:${topic.canonicalize()}',
+    DmNarrow(:final allRecipientIds) => 'dm:${allRecipientIds.join(',')}',
+    MentionsNarrow() => 'is:mentioned',
+    StarredMessagesNarrow() => 'is:starred',
+    KeywordSearchNarrow() => null,
+  };
+}

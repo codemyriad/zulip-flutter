@@ -249,4 +249,23 @@ void main() {
         eg.dmOutboxMessage(from: eg.selfUser, to: []))).isFalse();
     });
   });
+
+  group('messageFetchCacheKey', () {
+    test('each kind of narrow', () {
+      check(messageFetchCacheKey(const CombinedFeedNarrow())).equals('all');
+      check(messageFetchCacheKey(const ChannelNarrow(12))).equals('channel:12');
+      check(messageFetchCacheKey(eg.topicNarrow(12, 'Some topic')))
+        .equals('topic:12:some topic');
+      check(messageFetchCacheKey(DmNarrow(allRecipientIds: [2, 3, 5],
+        selfUserId: 3))).equals('dm:2,3,5');
+      check(messageFetchCacheKey(const MentionsNarrow())).equals('is:mentioned');
+      check(messageFetchCacheKey(const StarredMessagesNarrow())).equals('is:starred');
+      check(messageFetchCacheKey(KeywordSearchNarrow('foo'))).isNull();
+    });
+
+    test('topic key ignores with_ and topic case', () {
+      check(messageFetchCacheKey(eg.topicNarrow(12, 'Some topic', with_: 34)))
+        .equals(messageFetchCacheKey(eg.topicNarrow(12, 'some TOPIC')));
+    });
+  });
 }
