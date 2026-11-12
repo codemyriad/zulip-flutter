@@ -398,6 +398,26 @@ class Poll extends ChangeNotifier {
     }
   }
 
+  /// Construct a poll with the given state,
+  /// as found on another poll's [question] and [options].
+  ///
+  /// This is for restoring a poll saved on the device,
+  /// which doesn't keep the submessages the poll was constructed from.
+  /// So in debug mode, unlike for [Poll.fromSubmessages],
+  /// [Poll.toJson] gives no submessages for this poll,
+  /// as in release mode for any poll.
+  Poll.withState({
+    required this.messageSenderId,
+    required this.question,
+    required Iterable<PollOption> options,
+  }) {
+    for (final option in options) {
+      assert(!_options.containsKey(option.key));
+      _options[option.key] = option;
+      _existingOptionTexts.add(option.text);
+    }
+  }
+
   final int messageSenderId;
   String question;
 
@@ -425,8 +445,8 @@ class Poll extends ChangeNotifier {
     notifyListeners();
 
     if (kDebugMode) {
-      assert(_debugSubmessages != null);
-      _debugSubmessages!.add(Submessage(
+      // Null for a poll from [Poll.withState].
+      _debugSubmessages?.add(Submessage(
         senderId: event.senderId,
         msgType: event.msgType,
         content: event.content));
