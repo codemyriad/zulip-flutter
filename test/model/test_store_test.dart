@@ -176,6 +176,23 @@ void main() {
         .lastEventId.equals(11);
     }));
 
+    test('load waits for gate', () => awaitFakeAsync((async) async {
+      prepare();
+      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        queueId: 'queue1', lastEventId: 10));
+      final gate = Completer<void>();
+      backend.loadServerDataGate = gate.future;
+      ServerData? result;
+      unawaited(backend.doLoadServerData(eg.selfAccount.id)
+        .then((r) => result = r));
+      async.flushMicrotasks();
+      check(result).isNull();
+
+      gate.complete();
+      async.flushMicrotasks();
+      check(result).isNotNull().snapshot.queueId.equals('queue1');
+    }));
+
     test('seed server data', () async {
       prepare();
       final snapshotJson = eg.initialSnapshot(queueId: 'queue1', lastEventId: 10)

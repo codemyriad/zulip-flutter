@@ -146,8 +146,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
 
   /// Store server data for the account, as if stored by an earlier run of the app.
   ///
-  /// The snapshot's queue ID and last event ID are taken from [snapshotJson],
-  /// and each batch's last event ID from the ID of its last event.
+  /// The snapshot's queue ID is [queueId] if non-null,
+  /// else taken from [snapshotJson], as is its last event ID;
+  /// each batch's last event ID is the ID of its last event.
   /// The stored [ServerSnapshot.lastEventId] is [lastEventId] if non-null,
   /// else that of the last batch, if any, else that of the snapshot.
   ///
@@ -156,11 +157,12 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   void seedServerData(int accountId, {
     required Map<String, dynamic> snapshotJson,
     List<List<Map<String, dynamic>>> eventBatches = const [],
+    String? queueId,
     int? lastEventId,
     String? appVersion,
     int? timestamp,
   }) {
-    final queueId = snapshotJson['queue_id'] as String;
+    queueId ??= snapshotJson['queue_id'] as String;
     final batches = [
       for (final events in eventBatches)
         ServerEventBatch(
@@ -203,6 +205,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// If non-null, the next call to [doLoadServerData] throws this
   /// and resets it to null.
   Object? loadServerDataError;
+
+  /// If non-null, each call to [doLoadServerData] first waits for this.
+  Future<void>? loadServerDataGate;
 
   @override
   Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot) async {
@@ -271,6 +276,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   Future<ServerData?> doLoadServerData(int accountId, {
     bool includeEventBatches = true,
   }) async {
+    if (loadServerDataGate case final gate?) {
+      await gate;
+    }
     if (loadServerDataError case final error?) {
       loadServerDataError = null;
       throw error;
