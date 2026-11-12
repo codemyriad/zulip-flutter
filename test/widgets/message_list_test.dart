@@ -1034,6 +1034,22 @@ void main() {
       check(find.byType(BottomSheet)).findsOne();
     });
 
+    testWidgets('autofocus compose box if fresh fetch finds no messages', (tester) async {
+      final narrow = DmNarrow.withUser(eg.otherUser.userId,
+        selfUserId: eg.selfUser.userId);
+      await setupRetrying(tester, narrow: narrow, cachedMessages: [
+        eg.dmMessage(from: eg.otherUser, to: [eg.selfUser])]);
+      FocusNode contentFocusNode() =>
+        tester.widget<TextField>(contentInputFinder).focusNode!;
+      check(contentFocusNode()).hasFocus.isFalse();
+
+      prepareFreshFetch([]);
+      await retryFetch(tester);
+      await tester.pump();
+      check(findPlaceholder).findsOne();
+      check(contentFocusNode()).hasFocus.isTrue();
+    });
+
     testWidgets('scroll position reset when fresh messages replace cached', (tester) async {
       final messages = List.generate(30, (_) => eg.streamMessage(stream: channel));
       await setupRetrying(tester, cachedMessages: messages);

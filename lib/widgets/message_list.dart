@@ -961,6 +961,8 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     });
 
     if (!_autofocusDecided && model.fetched
+        // Cached messages may be out of date; decide on the fresh ones.
+        && !model.showingCachedMessages
         && (model.messages.isNotEmpty || (model.haveOldest && model.haveNewest))) {
       _autofocusDecided = true;
       if (model.messages.isEmpty) {
