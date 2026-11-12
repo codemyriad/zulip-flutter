@@ -845,6 +845,10 @@ void main() {
 
       group('fetchInitialFailing', () {
         test('set on first failure; unchanged on more; cleared on success', () => awaitFakeAsync((async) async {
+          // A fixed backoff, so that a short first wait and a short second wait
+          // don't add up to make the second retry come early.
+          BackoffMachine.debugDuration = const Duration(seconds: 1);
+          addTearDown(() => BackoffMachine.debugDuration = null);
           await prepare();
           prepareNetworkException();
           final fetchFuture = model.fetchInitial();
@@ -856,13 +860,13 @@ void main() {
             ..fetchInitialFailing.isTrue();
 
           prepareNetworkException();
-          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          async.elapse(const Duration(seconds: 1));
           check(connection.takeRequests()).length.equals(2);
           checkNotNotified();
           check(model).fetchInitialFailing.isTrue();
 
           prepareSuccess([eg.streamMessage()]);
-          async.elapse(const Duration(milliseconds: 200)); // max second backoff
+          async.elapse(const Duration(seconds: 1));
           checkNotifiedOnce();
           check(model)
             ..fetched.isTrue()
