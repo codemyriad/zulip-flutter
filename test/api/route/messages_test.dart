@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
@@ -240,22 +239,6 @@ void main() {
           });
       });
     });
-
-    test('rawBody', () => FakeApiConnection.with_((connection) async {
-      final body = jsonEncode({
-        ...fakeResult.toJson(),
-        'some_unknown_field': [1, 2],
-      });
-      connection.prepare(body: body);
-      final rawBody = BytesBuilder();
-      final result = await getMessages(connection,
-        narrow: const CombinedFeedNarrow().apiEncode(),
-        anchor: AnchorCode.newest, numBefore: 10, numAfter: 20,
-        allowEmptyTopicName: true,
-        rawBody: rawBody);
-      check(result.anchor).equals(12345);
-      check(rawBody.takeBytes()).deepEquals(utf8.encode(body));
-    }));
 
     test('abortTrigger', () => awaitFakeAsync((async) async {
       await FakeApiConnection.with_((connection) async {

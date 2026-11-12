@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:json_annotation/json_annotation.dart';
 
 import '../core.dart';
@@ -41,9 +39,6 @@ class GetMessageResult {
 /// https://zulip.com/api/get-messages
 ///
 /// For [abortTrigger], see [ApiConnection.get].
-///
-/// If [rawBody] is non-null, the response body's bytes are added to it;
-/// see [ApiConnection.send].
 Future<GetMessagesResult> getMessages(ApiConnection connection, {
   required ApiNarrow narrow,
   required Anchor anchor,
@@ -55,7 +50,6 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
   required bool allowEmptyTopicName,
   // bool? useFirstUnreadAnchor // omitted because deprecated
   Future<void>? abortTrigger,
-  BytesBuilder? rawBody,
 }) {
   assert(allowEmptyTopicName, '`allowEmptyTopicName` should only be true');
   return connection.get('getMessages', GetMessagesResult.fromJson, 'messages', {
@@ -67,7 +61,7 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
     'client_gravatar': ?clientGravatar,
     'apply_markdown': ?applyMarkdown,
     'allow_empty_topic_name': allowEmptyTopicName,
-  }, abortTrigger: abortTrigger, rawBody: rawBody);
+  }, abortTrigger: abortTrigger);
 }
 
 /// An anchor value for [getMessages].
