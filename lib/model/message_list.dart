@@ -248,10 +248,12 @@ mixin _MessageSequence {
   /// The messages are as of when the stored fetch was made,
   /// the last time the narrow was opened from its newest or first unread message
   /// and the fetch reached the newest message;
-  /// they don't reflect events received after that,
-  /// except for read and starred state, which come from the store.
+  /// they don't reflect events received after that.
   /// Where the store has a message, its copy is used instead,
   /// and a message the store has seen deleted is left out.
+  /// For the other messages, the read and starred state
+  /// are taken from the store at the time the cached messages are shown;
+  /// changes to that state while they're shown don't appear on them.
   ///
   /// Known limitations:
   ///  * When the store is replaced, as after the event queue expires,
