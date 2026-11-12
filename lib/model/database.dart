@@ -8,6 +8,7 @@ import 'package:drift/internal/versioned_schema.dart';
 import 'package:drift/remote.dart';
 import 'package:sqlite3/common.dart';
 
+import '../api/route/messages.dart';
 import '../api/route/realm.dart';
 import '../log.dart';
 import 'legacy_app_data.dart';
@@ -297,6 +298,40 @@ class ServerEventBatches extends Table {
   Column<Uint8List> get data => blob()();
 }
 
+/// The table of [CachedMessageFetch] records,
+/// each the result of the latest initial fetch of messages
+/// for a narrow in an account,
+/// for showing that narrow's messages while the server can't be reached (#477).
+///
+/// A row holds the server's response as of that fetch;
+/// it doesn't reflect events received since.
+///
+/// Each account has a bounded number and total size of rows here;
+/// see [AppDatabase.storeCachedMessageFetch].
+@DataClassName('CachedMessageFetch')
+class CachedMessageFetches extends Table {
+  Column<int> get accountId => integer()
+    .references(Accounts, #id, onDelete: .cascade)();
+
+  /// A key identifying the narrow the messages were fetched for,
+  /// from `messageFetchCacheKey` in lib/model/narrow.dart.
+  Column<String> get narrowKey => text()();
+
+  /// When the row was last written, in milliseconds since the Unix epoch.
+  ///
+  /// When an account has too many rows,
+  /// the ones written least recently get deleted.
+  Column<int> get lastWritten => integer()();
+
+  /// The body of the server's response to [getMessages], as UTF-8 JSON.
+  // Keep this column last, so the other columns can be read
+  // without reading the possibly large data.
+  Column<Uint8List> get data => blob()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {accountId, narrowKey};
+}
+
 class UriConverter extends TypeConverter<Uri, String> {
   const UriConverter();
   @override String toSql(Uri value) => value.toString();
@@ -307,6 +342,7 @@ const _allTables = [
   GlobalSettings, BoolGlobalSettings, IntGlobalSettings,
   Accounts, PushKeys,
   ServerSnapshots, ServerSnapshotBlobs, ServerEventBatches,
+  CachedMessageFetches,
 ];
 
 /// Configure a newly opened connection to the app's database file.
@@ -333,7 +369,7 @@ class AppDatabase extends _$AppDatabase {
   //  * Fix resulting analyzer errors; in particular,
   //    write a migration in `_migrationSteps` below.
   //  * Write tests.
-  static const int latestSchemaVersion = 17; // See note.
+  static const int latestSchemaVersion = 18; // See note.
 
   @override
   int get schemaVersion => latestSchemaVersion;
@@ -449,6 +485,9 @@ class AppDatabase extends _$AppDatabase {
       await m.createTable(schema.serverSnapshotBlobs);
       await m.createTable(schema.serverEventBatches);
       await m.createIndex(schema.idxServerEventBatchesAccountId);
+    },
+    from17To18: (m, schema) async {
+      await m.createTable(schema.cachedMessageFetches);
     },
   );
 
@@ -715,6 +754,98 @@ class AppDatabase extends _$AppDatabase {
         ..where((s) => s.accountId.equals(accountId))
       ).go();
     });
+  }
+
+  /// The largest [CachedMessageFetch.data] that [storeCachedMessageFetch]
+  /// will store, in bytes.
+  static const maxCachedMessageFetchSize = 1024 * 1024;
+
+  /// The most [CachedMessageFetch]es an account may have.
+  static const maxCachedMessageFetchesPerAccount = 100;
+
+  /// The largest total size of an account's [CachedMessageFetch.data],
+  /// in bytes.
+  static const maxCachedMessageFetchesTotalSize = 16 * 1024 * 1024;
+
+  /// Store [data] as the account's [CachedMessageFetch] for [narrowKey],
+  /// replacing any previous one.
+  ///
+  /// If [data] is larger than [maxCachedMessageFetchSize],
+  /// this instead deletes any previous one, and returns false.
+  ///
+  /// Then if the account has more than [maxCachedMessageFetchesPerAccount]
+  /// rows, or a total size more than [maxCachedMessageFetchesTotalSize],
+  /// this deletes the least recently written ones (by [lastWritten])
+  /// to get within those bounds, keeping the new one.
+  ///
+  /// Returns false, storing nothing, if the account doesn't exist.
+  Future<bool> storeCachedMessageFetch(int accountId, String narrowKey, {
+    required int lastWritten,
+    required Uint8List data,
+  }) async {
+    if (data.length > maxCachedMessageFetchSize) {
+      await deleteCachedMessageFetch(accountId, narrowKey);
+      return false;
+    }
+    return await transaction(() async {
+      final accountRow = await (selectOnly(accounts)
+        ..addColumns([accounts.id])
+        ..where(accounts.id.equals(accountId))
+      ).getSingleOrNull();
+      if (accountRow == null) return false;
+
+      await into(cachedMessageFetches).insertOnConflictUpdate(CachedMessageFetch(
+        accountId: accountId, narrowKey: narrowKey,
+        lastWritten: lastWritten, data: data));
+
+      final size = cachedMessageFetches.data.length;
+      final otherRows = await (selectOnly(cachedMessageFetches)
+        ..addColumns([cachedMessageFetches.narrowKey, size])
+        ..where(cachedMessageFetches.accountId.equals(accountId)
+          & cachedMessageFetches.narrowKey.equals(narrowKey).not())
+        ..orderBy([
+          OrderingTerm.desc(cachedMessageFetches.lastWritten),
+          OrderingTerm.asc(cachedMessageFetches.narrowKey),
+        ])
+      ).get();
+      int count = 1;
+      int totalSize = data.length;
+      final evictedKeys = <String>[];
+      for (final row in otherRows) {
+        count++;
+        totalSize += row.read(size)!;
+        if (evictedKeys.isNotEmpty
+            || count > maxCachedMessageFetchesPerAccount
+            || totalSize > maxCachedMessageFetchesTotalSize) {
+          evictedKeys.add(row.read(cachedMessageFetches.narrowKey)!);
+        }
+      }
+      if (evictedKeys.isNotEmpty) {
+        await (delete(cachedMessageFetches)
+          ..where((f) => f.accountId.equals(accountId)
+            & f.narrowKey.isIn(evictedKeys))
+        ).go();
+      }
+      return true;
+    });
+  }
+
+  /// Get the data of the account's [CachedMessageFetch] for [narrowKey],
+  /// or null if there is none.
+  Future<Uint8List?> loadCachedMessageFetch(int accountId, String narrowKey) {
+    return (selectOnly(cachedMessageFetches)
+      ..addColumns([cachedMessageFetches.data])
+      ..where(cachedMessageFetches.accountId.equals(accountId)
+        & cachedMessageFetches.narrowKey.equals(narrowKey))
+    ).map((row) => row.read(cachedMessageFetches.data)!).getSingleOrNull();
+  }
+
+  /// Delete the account's [CachedMessageFetch] for [narrowKey], if any.
+  Future<void> deleteCachedMessageFetch(int accountId, String narrowKey) {
+    return (delete(cachedMessageFetches)
+      ..where((f) => f.accountId.equals(accountId)
+        & f.narrowKey.equals(narrowKey))
+    ).go();
   }
 }
 

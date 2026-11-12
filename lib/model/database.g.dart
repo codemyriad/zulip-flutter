@@ -3124,6 +3124,349 @@ class ServerEventBatchesCompanion extends UpdateCompanion<ServerEventBatch> {
   }
 }
 
+class $CachedMessageFetchesTable extends CachedMessageFetches
+    with TableInfo<$CachedMessageFetchesTable, CachedMessageFetch> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CachedMessageFetchesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<int> accountId = GeneratedColumn<int>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES accounts (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _narrowKeyMeta = const VerificationMeta(
+    'narrowKey',
+  );
+  @override
+  late final GeneratedColumn<String> narrowKey = GeneratedColumn<String>(
+    'narrow_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastWrittenMeta = const VerificationMeta(
+    'lastWritten',
+  );
+  @override
+  late final GeneratedColumn<int> lastWritten = GeneratedColumn<int>(
+    'last_written',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dataMeta = const VerificationMeta('data');
+  @override
+  late final GeneratedColumn<Uint8List> data = GeneratedColumn<Uint8List>(
+    'data',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    accountId,
+    narrowKey,
+    lastWritten,
+    data,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'cached_message_fetches';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CachedMessageFetch> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_accountIdMeta);
+    }
+    if (data.containsKey('narrow_key')) {
+      context.handle(
+        _narrowKeyMeta,
+        narrowKey.isAcceptableOrUnknown(data['narrow_key']!, _narrowKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_narrowKeyMeta);
+    }
+    if (data.containsKey('last_written')) {
+      context.handle(
+        _lastWrittenMeta,
+        lastWritten.isAcceptableOrUnknown(
+          data['last_written']!,
+          _lastWrittenMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastWrittenMeta);
+    }
+    if (data.containsKey('data')) {
+      context.handle(
+        _dataMeta,
+        this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dataMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {accountId, narrowKey};
+  @override
+  CachedMessageFetch map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CachedMessageFetch(
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}account_id'],
+      )!,
+      narrowKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}narrow_key'],
+      )!,
+      lastWritten: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_written'],
+      )!,
+      data: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}data'],
+      )!,
+    );
+  }
+
+  @override
+  $CachedMessageFetchesTable createAlias(String alias) {
+    return $CachedMessageFetchesTable(attachedDatabase, alias);
+  }
+}
+
+class CachedMessageFetch extends DataClass
+    implements Insertable<CachedMessageFetch> {
+  final int accountId;
+
+  /// A key identifying the narrow the messages were fetched for,
+  /// from `messageFetchCacheKey` in lib/model/narrow.dart.
+  final String narrowKey;
+
+  /// When the row was last written, in milliseconds since the Unix epoch.
+  ///
+  /// When an account has too many rows,
+  /// the ones written least recently get deleted.
+  final int lastWritten;
+
+  /// The body of the server's response to [getMessages], as UTF-8 JSON.
+  final Uint8List data;
+  const CachedMessageFetch({
+    required this.accountId,
+    required this.narrowKey,
+    required this.lastWritten,
+    required this.data,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['account_id'] = Variable<int>(accountId);
+    map['narrow_key'] = Variable<String>(narrowKey);
+    map['last_written'] = Variable<int>(lastWritten);
+    map['data'] = Variable<Uint8List>(data);
+    return map;
+  }
+
+  CachedMessageFetchesCompanion toCompanion(bool nullToAbsent) {
+    return CachedMessageFetchesCompanion(
+      accountId: Value(accountId),
+      narrowKey: Value(narrowKey),
+      lastWritten: Value(lastWritten),
+      data: Value(data),
+    );
+  }
+
+  factory CachedMessageFetch.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CachedMessageFetch(
+      accountId: serializer.fromJson<int>(json['accountId']),
+      narrowKey: serializer.fromJson<String>(json['narrowKey']),
+      lastWritten: serializer.fromJson<int>(json['lastWritten']),
+      data: serializer.fromJson<Uint8List>(json['data']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'accountId': serializer.toJson<int>(accountId),
+      'narrowKey': serializer.toJson<String>(narrowKey),
+      'lastWritten': serializer.toJson<int>(lastWritten),
+      'data': serializer.toJson<Uint8List>(data),
+    };
+  }
+
+  CachedMessageFetch copyWith({
+    int? accountId,
+    String? narrowKey,
+    int? lastWritten,
+    Uint8List? data,
+  }) => CachedMessageFetch(
+    accountId: accountId ?? this.accountId,
+    narrowKey: narrowKey ?? this.narrowKey,
+    lastWritten: lastWritten ?? this.lastWritten,
+    data: data ?? this.data,
+  );
+  CachedMessageFetch copyWithCompanion(CachedMessageFetchesCompanion data) {
+    return CachedMessageFetch(
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      narrowKey: data.narrowKey.present ? data.narrowKey.value : this.narrowKey,
+      lastWritten: data.lastWritten.present
+          ? data.lastWritten.value
+          : this.lastWritten,
+      data: data.data.present ? data.data.value : this.data,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedMessageFetch(')
+          ..write('accountId: $accountId, ')
+          ..write('narrowKey: $narrowKey, ')
+          ..write('lastWritten: $lastWritten, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    accountId,
+    narrowKey,
+    lastWritten,
+    $driftBlobEquality.hash(data),
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CachedMessageFetch &&
+          other.accountId == this.accountId &&
+          other.narrowKey == this.narrowKey &&
+          other.lastWritten == this.lastWritten &&
+          $driftBlobEquality.equals(other.data, this.data));
+}
+
+class CachedMessageFetchesCompanion
+    extends UpdateCompanion<CachedMessageFetch> {
+  final Value<int> accountId;
+  final Value<String> narrowKey;
+  final Value<int> lastWritten;
+  final Value<Uint8List> data;
+  final Value<int> rowid;
+  const CachedMessageFetchesCompanion({
+    this.accountId = const Value.absent(),
+    this.narrowKey = const Value.absent(),
+    this.lastWritten = const Value.absent(),
+    this.data = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CachedMessageFetchesCompanion.insert({
+    required int accountId,
+    required String narrowKey,
+    required int lastWritten,
+    required Uint8List data,
+    this.rowid = const Value.absent(),
+  }) : accountId = Value(accountId),
+       narrowKey = Value(narrowKey),
+       lastWritten = Value(lastWritten),
+       data = Value(data);
+  static Insertable<CachedMessageFetch> custom({
+    Expression<int>? accountId,
+    Expression<String>? narrowKey,
+    Expression<int>? lastWritten,
+    Expression<Uint8List>? data,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (accountId != null) 'account_id': accountId,
+      if (narrowKey != null) 'narrow_key': narrowKey,
+      if (lastWritten != null) 'last_written': lastWritten,
+      if (data != null) 'data': data,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CachedMessageFetchesCompanion copyWith({
+    Value<int>? accountId,
+    Value<String>? narrowKey,
+    Value<int>? lastWritten,
+    Value<Uint8List>? data,
+    Value<int>? rowid,
+  }) {
+    return CachedMessageFetchesCompanion(
+      accountId: accountId ?? this.accountId,
+      narrowKey: narrowKey ?? this.narrowKey,
+      lastWritten: lastWritten ?? this.lastWritten,
+      data: data ?? this.data,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (accountId.present) {
+      map['account_id'] = Variable<int>(accountId.value);
+    }
+    if (narrowKey.present) {
+      map['narrow_key'] = Variable<String>(narrowKey.value);
+    }
+    if (lastWritten.present) {
+      map['last_written'] = Variable<int>(lastWritten.value);
+    }
+    if (data.present) {
+      map['data'] = Variable<Uint8List>(data.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedMessageFetchesCompanion(')
+          ..write('accountId: $accountId, ')
+          ..write('narrowKey: $narrowKey, ')
+          ..write('lastWritten: $lastWritten, ')
+          ..write('data: $data, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -3141,6 +3484,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $ServerSnapshotBlobsTable(this);
   late final $ServerEventBatchesTable serverEventBatches =
       $ServerEventBatchesTable(this);
+  late final $CachedMessageFetchesTable cachedMessageFetches =
+      $CachedMessageFetchesTable(this);
   late final Index idxServerEventBatchesAccountId = Index(
     'idx_server_event_batches_account_id',
     'CREATE INDEX idx_server_event_batches_account_id ON server_event_batches (account_id)',
@@ -3158,6 +3503,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     serverSnapshots,
     serverSnapshotBlobs,
     serverEventBatches,
+    cachedMessageFetches,
     idxServerEventBatchesAccountId,
   ];
   @override
@@ -3189,6 +3535,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('server_event_batches', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'accounts',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('cached_message_fetches', kind: UpdateKind.delete)],
     ),
   ]);
 }
@@ -3898,6 +4251,31 @@ final class $$AccountsTableReferences
       manager.$state.copyWith(prefetchedData: cache),
     );
   }
+
+  static MultiTypedResultKey<
+    $CachedMessageFetchesTable,
+    List<CachedMessageFetch>
+  >
+  _cachedMessageFetchesRefsTable(_$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(
+        db.cachedMessageFetches,
+        aliasName: 'accounts__id__cached_message_fetches__account_id',
+      );
+
+  $$CachedMessageFetchesTableProcessedTableManager
+  get cachedMessageFetchesRefs {
+    final manager = $$CachedMessageFetchesTableTableManager(
+      $_db,
+      $_db.cachedMessageFetches,
+    ).filter((f) => f.accountId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _cachedMessageFetchesRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
 }
 
 class $$AccountsTableFilterComposer
@@ -4062,6 +4440,31 @@ class $$AccountsTableFilterComposer
           }) => $$ServerEventBatchesTableFilterComposer(
             $db: $db,
             $table: $db.serverEventBatches,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> cachedMessageFetchesRefs(
+    Expression<bool> Function($$CachedMessageFetchesTableFilterComposer f) f,
+  ) {
+    final $$CachedMessageFetchesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.cachedMessageFetches,
+      getReferencedColumn: (t) => t.accountId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$CachedMessageFetchesTableFilterComposer(
+            $db: $db,
+            $table: $db.cachedMessageFetches,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -4296,6 +4699,32 @@ class $$AccountsTableAnnotationComposer
         );
     return f(composer);
   }
+
+  Expression<T> cachedMessageFetchesRefs<T extends Object>(
+    Expression<T> Function($$CachedMessageFetchesTableAnnotationComposer a) f,
+  ) {
+    final $$CachedMessageFetchesTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.id,
+          referencedTable: $db.cachedMessageFetches,
+          getReferencedColumn: (t) => t.accountId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$CachedMessageFetchesTableAnnotationComposer(
+                $db: $db,
+                $table: $db.cachedMessageFetches,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
 }
 
 class $$AccountsTableTableManager
@@ -4316,6 +4745,7 @@ class $$AccountsTableTableManager
             bool serverSnapshotsRefs,
             bool serverSnapshotBlobsRefs,
             bool serverEventBatchesRefs,
+            bool cachedMessageFetchesRefs,
           })
         > {
   $$AccountsTableTableManager(_$AppDatabase db, $AccountsTable table)
@@ -4399,6 +4829,7 @@ class $$AccountsTableTableManager
                 serverSnapshotsRefs = false,
                 serverSnapshotBlobsRefs = false,
                 serverEventBatchesRefs = false,
+                cachedMessageFetchesRefs = false,
               }) {
                 return PrefetchHooks(
                   db: db,
@@ -4407,6 +4838,7 @@ class $$AccountsTableTableManager
                     if (serverSnapshotsRefs) db.serverSnapshots,
                     if (serverSnapshotBlobsRefs) db.serverSnapshotBlobs,
                     if (serverEventBatchesRefs) db.serverEventBatches,
+                    if (cachedMessageFetchesRefs) db.cachedMessageFetches,
                   ],
                   addJoins: null,
                   getPrefetchedDataCallback: (items) async {
@@ -4495,6 +4927,27 @@ class $$AccountsTableTableManager
                               ),
                           typedResults: items,
                         ),
+                      if (cachedMessageFetchesRefs)
+                        await $_getPrefetchedData<
+                          Account,
+                          $AccountsTable,
+                          CachedMessageFetch
+                        >(
+                          currentTable: table,
+                          referencedTable: $$AccountsTableReferences
+                              ._cachedMessageFetchesRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$AccountsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).cachedMessageFetchesRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.accountId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
                     ];
                   },
                 );
@@ -4520,6 +4973,7 @@ typedef $$AccountsTableProcessedTableManager =
         bool serverSnapshotsRefs,
         bool serverSnapshotBlobsRefs,
         bool serverEventBatchesRefs,
+        bool cachedMessageFetchesRefs,
       })
     >;
 typedef $$PushKeysTableCreateCompanionBuilder = PushKeysCompanion Function({
@@ -5774,6 +6228,323 @@ typedef $$ServerEventBatchesTableProcessedTableManager =
       ServerEventBatch,
       PrefetchHooks Function({bool accountId})
     >;
+typedef $$CachedMessageFetchesTableCreateCompanionBuilder =
+    CachedMessageFetchesCompanion Function({
+      required int accountId,
+      required String narrowKey,
+      required int lastWritten,
+      required Uint8List data,
+      Value<int> rowid,
+    });
+typedef $$CachedMessageFetchesTableUpdateCompanionBuilder =
+    CachedMessageFetchesCompanion Function({
+      Value<int> accountId,
+      Value<String> narrowKey,
+      Value<int> lastWritten,
+      Value<Uint8List> data,
+      Value<int> rowid,
+    });
+
+final class $$CachedMessageFetchesTableReferences
+    extends
+        BaseReferences<
+          _$AppDatabase,
+          $CachedMessageFetchesTable,
+          CachedMessageFetch
+        > {
+  $$CachedMessageFetchesTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $AccountsTable _accountIdTable(_$AppDatabase db) => db.accounts
+      .createAlias('cached_message_fetches__account_id__accounts__id');
+
+  $$AccountsTableProcessedTableManager get accountId {
+    final $_column = $_itemColumn<int>('account_id')!;
+
+    final manager = $$AccountsTableTableManager(
+      $_db,
+      $_db.accounts,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_accountIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$CachedMessageFetchesTableFilterComposer
+    extends Composer<_$AppDatabase, $CachedMessageFetchesTable> {
+  $$CachedMessageFetchesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get narrowKey => $composableBuilder(
+    column: $table.narrowKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastWritten => $composableBuilder(
+    column: $table.lastWritten,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$AccountsTableFilterComposer get accountId {
+    final $$AccountsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableFilterComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$CachedMessageFetchesTableOrderingComposer
+    extends Composer<_$AppDatabase, $CachedMessageFetchesTable> {
+  $$CachedMessageFetchesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get narrowKey => $composableBuilder(
+    column: $table.narrowKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastWritten => $composableBuilder(
+    column: $table.lastWritten,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$AccountsTableOrderingComposer get accountId {
+    final $$AccountsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableOrderingComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$CachedMessageFetchesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CachedMessageFetchesTable> {
+  $$CachedMessageFetchesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get narrowKey =>
+      $composableBuilder(column: $table.narrowKey, builder: (column) => column);
+
+  GeneratedColumn<int> get lastWritten => $composableBuilder(
+    column: $table.lastWritten,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get data =>
+      $composableBuilder(column: $table.data, builder: (column) => column);
+
+  $$AccountsTableAnnotationComposer get accountId {
+    final $$AccountsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$CachedMessageFetchesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CachedMessageFetchesTable,
+          CachedMessageFetch,
+          $$CachedMessageFetchesTableFilterComposer,
+          $$CachedMessageFetchesTableOrderingComposer,
+          $$CachedMessageFetchesTableAnnotationComposer,
+          $$CachedMessageFetchesTableCreateCompanionBuilder,
+          $$CachedMessageFetchesTableUpdateCompanionBuilder,
+          (CachedMessageFetch, $$CachedMessageFetchesTableReferences),
+          CachedMessageFetch,
+          PrefetchHooks Function({bool accountId})
+        > {
+  $$CachedMessageFetchesTableTableManager(
+    _$AppDatabase db,
+    $CachedMessageFetchesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CachedMessageFetchesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CachedMessageFetchesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$CachedMessageFetchesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<int> accountId = const Value.absent(),
+                Value<String> narrowKey = const Value.absent(),
+                Value<int> lastWritten = const Value.absent(),
+                Value<Uint8List> data = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CachedMessageFetchesCompanion(
+                accountId: accountId,
+                narrowKey: narrowKey,
+                lastWritten: lastWritten,
+                data: data,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required int accountId,
+                required String narrowKey,
+                required int lastWritten,
+                required Uint8List data,
+                Value<int> rowid = const Value.absent(),
+              }) => CachedMessageFetchesCompanion.insert(
+                accountId: accountId,
+                narrowKey: narrowKey,
+                lastWritten: lastWritten,
+                data: data,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$CachedMessageFetchesTable, CachedMessageFetch>(
+                    table,
+                  ),
+                  $$CachedMessageFetchesTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({accountId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (accountId) {
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.accountId,
+                        referencedTable: $$CachedMessageFetchesTableReferences
+                            ._accountIdTable(db),
+                        referencedColumn: $$CachedMessageFetchesTableReferences
+                            ._accountIdTable(db)
+                            .id,
+                      ) as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$CachedMessageFetchesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CachedMessageFetchesTable,
+      CachedMessageFetch,
+      $$CachedMessageFetchesTableFilterComposer,
+      $$CachedMessageFetchesTableOrderingComposer,
+      $$CachedMessageFetchesTableAnnotationComposer,
+      $$CachedMessageFetchesTableCreateCompanionBuilder,
+      $$CachedMessageFetchesTableUpdateCompanionBuilder,
+      (CachedMessageFetch, $$CachedMessageFetchesTableReferences),
+      CachedMessageFetch,
+      PrefetchHooks Function({bool accountId})
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -5794,4 +6565,6 @@ class $AppDatabaseManager {
       $$ServerSnapshotBlobsTableTableManager(_db, _db.serverSnapshotBlobs);
   $$ServerEventBatchesTableTableManager get serverEventBatches =>
       $$ServerEventBatchesTableTableManager(_db, _db.serverEventBatches);
+  $$CachedMessageFetchesTableTableManager get cachedMessageFetches =>
+      $$CachedMessageFetchesTableTableManager(_db, _db.cachedMessageFetches);
 }

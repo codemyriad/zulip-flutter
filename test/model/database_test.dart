@@ -609,6 +609,144 @@ void main() {
         check(await db.select(db.serverEventBatches).get()).isEmpty();
       });
     });
+
+    group('cached message fetches', () {
+      Future<void> prepare() async {
+        await db.createAccount(eg.selfAccount.toCompanion(false));
+        await db.createAccount(eg.otherAccount.toCompanion(false));
+      }
+
+      Future<bool> store(String narrowKey, int lastWritten, {
+        Account? account,
+        String? data,
+        int? size,
+      }) {
+        assert(data == null || size == null);
+        return db.storeCachedMessageFetch(
+          (account ?? eg.selfAccount).id, narrowKey,
+          lastWritten: lastWritten,
+          data: size != null ? Uint8List(size) : utf8.encode(data ?? '{}'));
+      }
+
+      Future<Uint8List?> load(String narrowKey, {Account? account}) {
+        return db.loadCachedMessageFetch(
+          (account ?? eg.selfAccount).id, narrowKey);
+      }
+
+      Future<Set<String>> keys({Account? account}) async {
+        final rows = await (db.select(db.cachedMessageFetches)
+          ..where((f) => f.accountId.equals((account ?? eg.selfAccount).id))
+        ).get();
+        return rows.map((row) => row.narrowKey).toSet();
+      }
+
+      const maxSize = AppDatabase.maxCachedMessageFetchSize;
+
+      test('store, then load', () async {
+        await prepare();
+        check(await store('channel:1', 1000, data: '{"a":1}')).isTrue();
+        check(await load('channel:1')).isNotNull()
+          .deepEquals(utf8.encode('{"a":1}'));
+        check(await load('channel:2')).isNull();
+        check(await load('channel:1', account: eg.otherAccount)).isNull();
+      });
+
+      test('store replaces', () async {
+        await prepare();
+        await store('channel:1', 1000, data: '{"a":1}');
+        check(await store('channel:1', 2000, data: '{"a":2}')).isTrue();
+        check(await load('channel:1')).isNotNull()
+          .deepEquals(utf8.encode('{"a":2}'));
+        check(await db.select(db.cachedMessageFetches).get()).single
+          .lastWritten.equals(2000);
+      });
+
+      test('no store when account missing', () async {
+        await db.createAccount(eg.otherAccount.toCompanion(false));
+        check(await store('channel:1', 1000)).isFalse();
+        check(await db.select(db.cachedMessageFetches).get()).isEmpty();
+      });
+
+      test('no store when too big, and delete previous', () async {
+        await prepare();
+        check(await store('channel:1', 1000, size: maxSize)).isTrue();
+        check(await store('channel:2', 1000, size: maxSize)).isTrue();
+        check(await store('channel:1', 2000, size: maxSize + 1)).isFalse();
+        check(await keys()).deepEquals({'channel:2'});
+      });
+
+      test('delete', () async {
+        await prepare();
+        await store('channel:1', 1000);
+        await store('channel:2', 1000);
+        await store('channel:1', 1000, account: eg.otherAccount);
+        await db.deleteCachedMessageFetch(eg.selfAccount.id, 'channel:1');
+        check(await keys()).deepEquals({'channel:2'});
+        check(await keys(account: eg.otherAccount)).deepEquals({'channel:1'});
+
+        // Deleting again is a no-op.
+        await db.deleteCachedMessageFetch(eg.selfAccount.id, 'channel:1');
+        check(await keys()).deepEquals({'channel:2'});
+      });
+
+      test('evict least recently written, when too many', () async {
+        await prepare();
+        const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+        for (int i = 0; i < maxRows; i++) {
+          await store('channel:$i', 1000 + i);
+        }
+        await store('channel:0', 1000 + maxRows); // rewrite the oldest
+        check(await keys()).length.equals(maxRows);
+
+        await store('channel:new', 1000 + maxRows + 1);
+        check(await keys())
+          ..length.equals(maxRows)
+          ..contains('channel:0')
+          ..contains('channel:new')
+          ..not((it) => it.contains('channel:1'));
+      });
+
+      test('evict least recently written, when too big', () async {
+        await prepare();
+        const halfSize = maxSize ~/ 2;
+        const n = AppDatabase.maxCachedMessageFetchesTotalSize ~/ halfSize;
+        for (int i = 0; i < n; i++) {
+          await store('channel:$i', 1000 + i, size: halfSize);
+        }
+        check(await keys()).length.equals(n);
+
+        // Evict as many as needed to fit, oldest first.
+        await store('channel:1', 1000 + n, size: 10);
+        await store('channel:new', 1000 + n + 1, size: maxSize);
+        check(await keys())
+          ..length.equals(n - 1)
+          ..not((it) => it.contains('channel:0'))
+          ..contains('channel:1')
+          ..not((it) => it.contains('channel:2'))
+          ..contains('channel:3')
+          ..contains('channel:new');
+      });
+
+      test('eviction is per account', () async {
+        await prepare();
+        const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+        for (int i = 0; i < maxRows; i++) {
+          await store('channel:$i', 1000 + i, account: eg.otherAccount);
+        }
+        await store('channel:new', 2000);
+        check(await keys(account: eg.otherAccount)).length.equals(maxRows);
+      });
+
+      test('delete account cascades to cached message fetches', () async {
+        await prepare();
+        await store('channel:1', 1000);
+        await store('channel:1', 1000, account: eg.otherAccount);
+        await (db.delete(db.accounts)..where((a) => a.id.equals(eg.selfAccount.id)))
+          .go();
+        check(await keys()).isEmpty();
+        check(await keys(account: eg.otherAccount)).deepEquals({'channel:1'});
+      });
+    });
   });
 
   group('migrations', () {
@@ -826,6 +964,8 @@ void main() {
     // v16 covered by "existing Account row" above
 
     // v17 only adds new tables; the "migrate without data" test covers it
+
+    // v18 only adds a new table; the "migrate without data" test covers it
   });
 }
 

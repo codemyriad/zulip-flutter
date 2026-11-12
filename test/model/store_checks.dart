@@ -61,6 +61,13 @@ extension ServerEventBatchChecks on Subject<ServerEventBatch> {
   Subject<Uint8List> get data => has((x) => x.data, 'data');
 }
 
+extension CachedMessageFetchChecks on Subject<CachedMessageFetch> {
+  Subject<int> get accountId => has((x) => x.accountId, 'accountId');
+  Subject<String> get narrowKey => has((x) => x.narrowKey, 'narrowKey');
+  Subject<int> get lastWritten => has((x) => x.lastWritten, 'lastWritten');
+  Subject<Uint8List> get data => has((x) => x.data, 'data');
+}
+
 extension ServerDataChecks on Subject<ServerData> {
   Subject<ServerSnapshot> get snapshot => has((x) => x.snapshot, 'snapshot');
   Subject<Uint8List> get snapshotData => has((x) => x.snapshotData, 'snapshotData');
