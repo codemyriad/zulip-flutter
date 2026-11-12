@@ -33,6 +33,7 @@ import 'package:zulip/widgets/banner.dart';
 import 'package:zulip/widgets/color.dart';
 import 'package:zulip/widgets/compose_box.dart';
 import 'package:zulip/widgets/content.dart';
+import 'package:zulip/widgets/emoji_reaction.dart';
 import 'package:zulip/widgets/icons.dart';
 import 'package:zulip/widgets/image.dart';
 import 'package:zulip/widgets/message_list.dart';
@@ -940,6 +941,29 @@ void main() {
       await store.handleEvent(UpdateMessageFlagsAddEvent(id: 1,
         flag: MessageFlag.read, messages: [message.id], all: false));
       await tester.pump(const Duration(seconds: 2)); // mark-read debounce
+    });
+
+    testWidgets('no action sheet or reaction toggling on cache-only messages', (tester) async {
+      final storeMessage = eg.streamMessage(stream: channel,
+        content: '<p>store message</p>');
+      final cacheOnlyMessage = eg.streamMessage(stream: channel,
+        content: '<p>cache-only message</p>',
+        reactions: [eg.unicodeEmojiReaction]);
+      await setupCached(tester, storeMessages: [storeMessage],
+        cachedMessages: [storeMessage, cacheOnlyMessage]);
+
+      await tester.longPress(find.text('cache-only message'));
+      await tester.pump(const Duration(milliseconds: 250)); // bottom-sheet animation
+      check(find.byType(BottomSheet)).findsNothing();
+
+      await tester.tap(find.byType(ReactionChip), warnIfMissed: false);
+      await tester.pump(Duration.zero);
+      check(connection.takeRequests()).isEmpty();
+
+      // A message the store has works as usual.
+      await tester.longPress(find.text('store message'));
+      await tester.pump(const Duration(milliseconds: 250)); // bottom-sheet animation
+      check(find.byType(BottomSheet)).findsOne();
     });
   });
 

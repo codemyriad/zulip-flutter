@@ -2415,6 +2415,11 @@ class MessageWithPossibleSender extends StatelessWidget {
       && !MessageListPage.maybeRevealedMutedMessagesOf(context)!
                          .isMutedMessageRevealed(message.id);
 
+    // The message list can show messages from a stored earlier fetch
+    // that the store doesn't have; see [MessageListView.showingCachedMessages].
+    // Actions on a message expect the store to have it, so don't offer them.
+    final isCacheOnly = store.messages[message.id] == null;
+
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onTap: tapOpensConversation
@@ -2426,7 +2431,9 @@ class MessageWithPossibleSender extends StatelessWidget {
         : null,
       onLongPress: showAsMuted
         ? null // TODO write a test for this
-        : () => showMessageActionSheet(context: context, message: message),
+        : isCacheOnly
+          ? null
+          : () => showMessageActionSheet(context: context, message: message),
       child: Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Column(children: [
@@ -2455,7 +2462,9 @@ class MessageWithPossibleSender extends StatelessWidget {
                     children: [
                       content,
                       if ((message.reactions?.total ?? 0) > 0)
-                        ReactionChipsList(messageId: message.id, reactions: message.reactions!),
+                        IgnorePointer(ignoring: isCacheOnly,
+                          child: ReactionChipsList(messageId: message.id,
+                            reactions: message.reactions!)),
                       if (editMessageErrorStatus != null)
                         _EditMessageStatusRow(messageId: message.id, status: editMessageErrorStatus)
                       else if (editStateText != null)
