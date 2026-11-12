@@ -338,12 +338,11 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
 
   /// The cached message fetches, by account ID and then narrow key,
   /// each account's in the order they were last stored, oldest first.
-  final Map<int, Map<String, ({int lastWritten, Uint8List data})>>
-    _cachedMessageFetches = {};
+  final Map<int, Map<String, CachedMessageFetch>> _cachedMessageFetches = {};
 
-  /// The data of the account's cached message fetch for [narrowKey], if any.
-  Uint8List? cachedMessageFetchOf(int accountId, String narrowKey) =>
-    _cachedMessageFetches[accountId]?[narrowKey]?.data;
+  /// The account's stored [CachedMessageFetch] for [narrowKey], if any.
+  CachedMessageFetch? cachedMessageFetchOf(int accountId, String narrowKey) =>
+    _cachedMessageFetches[accountId]?[narrowKey];
 
   /// The narrow keys of the account's cached message fetches,
   /// in the order they were last stored, oldest first.
@@ -381,7 +380,8 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   }) {
     final fetches = _cachedMessageFetches[accountId] ??= {};
     fetches.remove(narrowKey);
-    fetches[narrowKey] = (lastWritten: lastWritten, data: data);
+    fetches[narrowKey] = CachedMessageFetch(accountId: accountId,
+      narrowKey: narrowKey, lastWritten: lastWritten, data: data);
   }
 
   /// If non-null, the next call to [doStoreCachedMessageFetch] throws this

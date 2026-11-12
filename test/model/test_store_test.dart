@@ -318,16 +318,18 @@ void main() {
         .isNull();
       check(await backend.doLoadCachedMessageFetch(eg.otherAccount.id, 'channel:1'))
         .isNull();
-      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1'))
-        .isNotNull().deepEquals(utf8.encode('{"a":1}'));
+      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1')).isNotNull()
+        ..lastWritten.equals(1000)
+        ..data.deepEquals(utf8.encode('{"a":1}'));
     });
 
     test('store replaces', () async {
       prepare();
       await store('channel:1', 1000, data: '{"a":1}');
       check(await store('channel:1', 2000, data: '{"a":2}')).isTrue();
-      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1'))
-        .isNotNull().deepEquals(utf8.encode('{"a":2}'));
+      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1')).isNotNull()
+        ..lastWritten.equals(2000)
+        ..data.deepEquals(utf8.encode('{"a":2}'));
     });
 
     test('no store when account missing', () async {

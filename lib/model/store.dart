@@ -31,6 +31,7 @@ import 'database.dart';
 import 'emoji.dart';
 import 'localizations.dart';
 import 'message.dart';
+import 'narrow.dart';
 import 'presence.dart';
 import 'push_device.dart';
 import 'push_key.dart';
@@ -1001,6 +1002,61 @@ class PerAccountStore extends PerAccountStoreBase with
 
   // End of data.
   //|//////////////////////////////////////////////////////////////
+
+  /// Store [data], the body of a [getMessages] response,
+  /// as this account's cached message fetch for [narrowKey]
+  /// (see [messageFetchCacheKey]),
+  /// replacing any previous one.
+  ///
+  /// A cached message fetch is the server's response as of that fetch;
+  /// it doesn't get updated for events received after it.
+  ///
+  /// The account's cached message fetches are bounded in number and size:
+  /// this may delete the least recently stored ones,
+  /// and if [data] is too big, it isn't stored
+  /// and the previous one for [narrowKey] is deleted.
+  /// See [AppDatabase.storeCachedMessageFetch].
+  ///
+  /// This is best-effort: it doesn't throw, and errors are only logged.
+  Future<void> storeCachedMessageFetch(String narrowKey, Uint8List data) async {
+    final lastWritten = ZulipBinding.instance.utcNow().millisecondsSinceEpoch;
+    try {
+      await _globalStore._backend.doStoreCachedMessageFetch(accountId, narrowKey,
+        lastWritten: lastWritten, data: data);
+    } catch (e) {
+      assert(debugLog('Error storing cached message fetch: $e')); // TODO(log)
+    }
+  }
+
+  /// Get the data stored by [storeCachedMessageFetch] for [narrowKey],
+  /// or null if there is none.
+  ///
+  /// This doesn't throw: on an error reading the data,
+  /// it logs the error and returns null.
+  /// The data isn't validated, though;
+  /// it may not parse as a [GetMessagesResult].
+  Future<Uint8List?> loadCachedMessageFetch(String narrowKey) async {
+    try {
+      return await _globalStore._backend.doLoadCachedMessageFetch(
+        accountId, narrowKey);
+    } catch (e) {
+      assert(debugLog('Error loading cached message fetch: $e')); // TODO(log)
+      return null;
+    }
+  }
+
+  /// Delete the data stored by [storeCachedMessageFetch] for [narrowKey],
+  /// if any.
+  ///
+  /// This is best-effort: it doesn't throw, and errors are only logged.
+  Future<void> deleteCachedMessageFetch(String narrowKey) async {
+    try {
+      await _globalStore._backend.doDeleteCachedMessageFetch(
+        accountId, narrowKey);
+    } catch (e) {
+      assert(debugLog('Error deleting cached message fetch: $e')); // TODO(log)
+    }
+  }
 
   /// Called when the app is reassembled during debugging, e.g. for hot reload.
   ///

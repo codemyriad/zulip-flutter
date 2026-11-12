@@ -609,6 +609,52 @@ void main() {
     check(store).disposed.isTrue();
   });
 
+  group('PerAccountStore cached message fetches', () {
+    late TestGlobalStoreBackend backend;
+    late PerAccountStore store;
+
+    void prepare() {
+      final globalStore = eg.globalStore(accounts: [eg.selfAccount]);
+      backend = globalStore.backend;
+      store = eg.store(globalStore: globalStore);
+    }
+
+    test('store, then load', () => awaitFakeAsync((async) async {
+      prepare();
+      final data = utf8.encode('{"a":1}');
+      await store.storeCachedMessageFetch('channel:1', data);
+      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1')).isNotNull()
+        ..lastWritten.equals(testBinding.utcNow().millisecondsSinceEpoch)
+        ..data.deepEquals(data);
+      check(await store.loadCachedMessageFetch('channel:1')).isNotNull()
+        .deepEquals(data);
+      check(await store.loadCachedMessageFetch('channel:2')).isNull();
+    }));
+
+    test('delete', () async {
+      prepare();
+      await store.storeCachedMessageFetch('channel:1', utf8.encode('{}'));
+      await store.deleteCachedMessageFetch('channel:1');
+      check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).isEmpty();
+    });
+
+    test('errors are not thrown', () async {
+      prepare();
+      backend.storeCachedMessageFetchError = Exception('oops');
+      await store.storeCachedMessageFetch('channel:1', utf8.encode('{}'));
+      check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).isEmpty();
+
+      await store.storeCachedMessageFetch('channel:1', utf8.encode('{}'));
+      backend.loadCachedMessageFetchError = Exception('oops');
+      check(await store.loadCachedMessageFetch('channel:1')).isNull();
+
+      backend.deleteCachedMessageFetchError = Exception('oops');
+      await store.deleteCachedMessageFetch('channel:1');
+      check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id))
+        .deepEquals(['channel:1']);
+    });
+  });
+
   group('PerAccountStore.handleEvent', () {
     // Mostly this method just dispatches to ChannelStore and MessageStore etc.,
     // and so its tests generally live in the test files for those
