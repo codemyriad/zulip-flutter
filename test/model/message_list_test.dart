@@ -1487,6 +1487,48 @@ void main() {
           await fetchFuture;
         }));
 
+        test('messages learned from another fetch: adopt the store\'s copies', () => awaitFakeAsync((async) async {
+          final narrow = ChannelNarrow(channel.streamId);
+          final otherChannel = eg.stream();
+          final cached = List.generate(3, (i) => eg.streamMessage(
+            stream: channel, content: '<p>old</p>'));
+          await prepare(narrow: narrow, stream: channel);
+          seedCachedFetch(narrow, cached);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached(cached);
+
+          // Another view's fetch teaches the store about two of the messages:
+          // one edited since it was cached, one moved out of this narrow.
+          final edited = eg.streamMessage(id: cached[1].id,
+            stream: channel, content: '<p>new</p>');
+          final moved = eg.streamMessage(id: cached[2].id, stream: otherChannel);
+          final otherView = MessageListView.init(store: store,
+            narrow: const CombinedFeedNarrow(), anchor: NumericAnchor(edited.id));
+          connection.prepare(json: nearResult(anchor: edited.id,
+            foundOldest: false, foundNewest: false,
+            messages: [edited, moved]).toJson());
+          await otherView.fetchInitial();
+          checkNotifiedOnce();
+          checkShowingCached([cached[0], edited]);
+          check(model.messages[1]).identicalTo(store.messages[edited.id]!);
+          check(model.contents[1]).isA<ZulipContent>()
+            .equalsNode(parseContent('<p>new</p>'));
+
+          // Events on the store's copy reach this view.
+          await store.handleEvent(eg.reactionEvent(
+            eg.unicodeEmojiReaction, ReactionOp.add, edited.id));
+          checkNotifiedOnce();
+          check(model.messages[1].reactions).isNotNull()
+            .total.equals(1);
+
+          otherView.dispose();
+          model.dispose();
+          await fetchFuture;
+        }));
+
         test('MessageEvent: new message not added', () => awaitFakeAsync((async) async {
           final (fetchFuture, cached) = await prepareFailingWithCache();
           async.elapse(Duration.zero);

@@ -1570,7 +1570,29 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// because the client can't tell which messages belong in it
   /// (see [Narrow.containsMessage]).
   /// So such a view can keep claiming [haveNewest] when it's stale.
+  ///
+  /// While [showingCachedMessages], this instead replaces any cache-only
+  /// copies of the messages with the store's,
+  /// which events keep up to date,
+  /// and drops any of them that no longer belong in this view.
   void handleMessagesLearnedFromFetch(List<Message> newlyLearned) {
+    if (showingCachedMessages) {
+      bool replaced = false;
+      for (final message in newlyLearned) {
+        final index = _findMessageWithId(message.id);
+        if (index == -1) continue;
+        _replaceMessage(index, message);
+        replaced = true;
+      }
+      if (!replaced) return;
+      // The store's copy may show the message has moved since it was cached.
+      final removed = _removeMessagesWhere(
+        (message) => !_messageBelongsHere(message));
+      if (!removed) _reprocessAll();
+      notifyListeners();
+      return;
+    }
+
     if (!haveNewest) return;
     final anchorId = newestFetchedMessageId;
     if (anchorId == null) {
