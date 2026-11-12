@@ -1786,11 +1786,12 @@ void main() {
       Future<void> prepareStored({
         Narrow narrow = const CombinedFeedNarrow(),
         List<Message>? messages,
+        bool foundOldest = true,
       }) async {
         await prepare(narrow: narrow, stream: channel);
         messages ??= List.generate(3, (_) =>
           eg.streamMessage(stream: channel, topic: 'topic'));
-        await prepareMessages(foundOldest: true, messages: messages);
+        await prepareMessages(foundOldest: foundOldest, messages: messages);
         checkCachedMessages(narrow, model.messages);
       }
 
@@ -2017,15 +2018,34 @@ void main() {
         check(model.messages).length.equals(2);
       }));
 
+      test('fetchOlder within the stored messages: store', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepareStored(narrow: narrow, foundOldest: false,
+          messages: List.generate(kCachedMessagesMaxCount - 1,
+            (_) => eg.streamMessage(stream: channel)));
+        final olderMessage = eg.streamMessage(id: 1, stream: channel);
+        connection.prepare(json: olderResult(anchor: model.oldestFetchedMessageId!,
+          foundOldest: true, messages: [olderMessage]).toJson());
+        await model.fetchOlder();
+        check(model.messages)
+          ..length.equals(kCachedMessagesMaxCount)
+          ..first.id.equals(olderMessage.id);
+        checkStoredAfterDelay(async, narrow: narrow);
+      }));
+
       test('fetchOlder beyond the stored messages: no write', () => awaitFakeAsync((async) async {
         const narrow = CombinedFeedNarrow();
-        await prepareStored(narrow: narrow, messages: List.generate(
-          kCachedMessagesMaxCount, (_) => eg.streamMessage(stream: channel)));
+        await prepareStored(narrow: narrow, foundOldest: false,
+          messages: List.generate(kCachedMessagesMaxCount,
+            (_) => eg.streamMessage(stream: channel)));
         final storedData = cachedFetchOf(narrow)!.data;
+        final olderMessage = eg.streamMessage(id: 1, stream: channel);
         connection.prepare(json: olderResult(anchor: model.oldestFetchedMessageId!,
-          foundOldest: true,
-          messages: [eg.streamMessage(id: 1, stream: channel)]).toJson());
+          foundOldest: true, messages: [olderMessage]).toJson());
         await model.fetchOlder();
+        check(model.messages)
+          ..length.equals(kCachedMessagesMaxCount + 1)
+          ..first.id.equals(olderMessage.id);
         checkStoredUnchanged(storedData, async: async);
       }));
 
