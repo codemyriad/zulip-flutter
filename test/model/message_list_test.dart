@@ -1352,6 +1352,21 @@ void main() {
           await fetchFuture;
         }));
 
+        test('message deleted', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final cached = [eg.streamMessage(stream: channel),
+                          eg.streamMessage(stream: channel)];
+          await prepareCached(narrow, cached);
+          await store.handleEvent(eg.deleteMessageEvent([cached.first]));
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached([cached.last]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
         test('message moved out of the narrow', () => awaitFakeAsync((async) async {
           final narrow = ChannelNarrow(channel.streamId);
           final otherChannel = eg.stream();

@@ -219,7 +219,8 @@ mixin _MessageSequence {
   /// and the fetch reached the newest message;
   /// they don't reflect events received after that,
   /// except for read and starred state, which come from the store.
-  /// Where the store has a message, its copy is used instead.
+  /// Where the store has a message, its copy is used instead,
+  /// and a message the store has seen deleted is left out.
   ///
   /// Known limitations:
   ///  * Outbox messages aren't shown meanwhile,
@@ -1207,8 +1208,9 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// while [fetchInitial] keeps trying.
   ///
   /// The messages are filtered by what the store knows now:
-  /// for example a message moved out of [narrow], into a muted topic,
-  /// or into a channel the user can no longer access, is left out.
+  /// for example a message that was deleted, or moved out of [narrow],
+  /// into a muted topic, or into a channel the user can no longer access,
+  /// is left out.
   /// If no messages are left, this leaves the view as it is.
   ///
   /// See [showingCachedMessages].
@@ -1221,8 +1223,12 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       // Prefer the store's copy, which events have kept up to date.
       // Leave the store alone otherwise: this data may be stale,
       // and no event would come to correct it.
-      final message = store.messages[cachedMessage.id]
-        ?? _updateCachedMessageFlags(cachedMessage);
+      final storeMessage = store.messages[cachedMessage.id];
+      if (storeMessage == null
+          && store.isKnownDeletedMessage(cachedMessage.id)) {
+        continue;
+      }
+      final message = storeMessage ?? _updateCachedMessageFlags(cachedMessage);
       if (message is StreamMessage) {
         final channel = store.streams[message.streamId];
         if (channel == null || !store.selfHasContentAccess(channel)) continue;

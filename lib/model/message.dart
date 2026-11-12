@@ -27,6 +27,14 @@ mixin MessageStore on ChannelStore {
   /// All starred messages, as message IDs.
   Set<int> get starredMessages;
 
+  /// Whether a [DeleteMessageEvent] for [messageId] has been handled
+  /// by this store.
+  ///
+  /// Such a message won't be in [messages],
+  /// and shouldn't be shown from some other copy,
+  /// like one in a cached message fetch.
+  bool isKnownDeletedMessage(int messageId);
+
   /// [OutboxMessage]s sent by the user, indexed by [OutboxMessage.localMessageId].
   Map<int, OutboxMessage> get outboxMessages;
 
@@ -213,6 +221,9 @@ mixin ProxyMessageStore on MessageStore {
   @override
   Set<int> get starredMessages => messageStore.starredMessages;
   @override
+  bool isKnownDeletedMessage(int messageId) =>
+    messageStore.isKnownDeletedMessage(messageId);
+  @override
   Map<int, OutboxMessage> get outboxMessages => messageStore.outboxMessages;
   @override
   void registerMessageList(MessageListView view) =>
@@ -281,6 +292,12 @@ class MessageStoreImpl extends HasChannelStore with MessageStore, _OutboxMessage
 
   @override
   final Set<int> starredMessages;
+
+  final Set<int> _deletedMessageIds = {};
+
+  @override
+  bool isKnownDeletedMessage(int messageId) =>
+    _deletedMessageIds.contains(messageId);
 
   @override
   final Set<MessageListView> _messageListViews = {};
@@ -787,6 +804,7 @@ class MessageStoreImpl extends HasChannelStore with MessageStore, _OutboxMessage
     bool perAccountStoreShouldNotify = false;
     for (final messageId in event.messageIds) {
       messages.remove(messageId);
+      _deletedMessageIds.add(messageId);
       perAccountStoreShouldNotify |= starredMessages.remove(messageId);
       _maybeStaleChannelMessages.remove(messageId);
       _editMessageRequests.remove(messageId);

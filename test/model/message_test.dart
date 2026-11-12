@@ -1860,6 +1860,18 @@ void main() {
       check(store).messages.values.single.id.equals(message1.id);
     });
 
+    test('isKnownDeletedMessage', () async {
+      final message1 = eg.streamMessage();
+      final message2 = eg.streamMessage();
+      final message3 = eg.streamMessage();
+      await prepare();
+      await prepareMessages([message1, message2]);
+      await store.handleEvent(eg.deleteMessageEvent([message2, message3]));
+      check(store.isKnownDeletedMessage(message1.id)).isFalse();
+      check(store.isKnownDeletedMessage(message2.id)).isTrue();
+      check(store.isKnownDeletedMessage(message3.id)).isTrue();
+    });
+
     test('delete a starred message', () async {
       final message = eg.streamMessage(flags: [MessageFlag.starred]);
       await prepare(starredMessages: [message.id]);
