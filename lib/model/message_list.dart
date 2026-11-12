@@ -13,6 +13,7 @@ import '../api/route/messages.dart';
 import '../log.dart';
 import 'algorithms.dart';
 import 'channel.dart';
+import 'connectivity.dart';
 import 'content.dart';
 import 'message.dart';
 import 'narrow.dart';
@@ -116,6 +117,36 @@ enum FetchingStatus {
 
   /// The model is in a backoff period from a failed request.
   backoff,
+}
+
+/// A request in the retry loop of [MessageListView.fetchInitial].
+class _FetchInitialAttempt {
+  _FetchInitialAttempt({
+    required this.sentWhileRecovering,
+    required this.connectivityCount,
+  });
+
+  /// Whether [PerAccountStore.isRecoveringEventStream] was true
+  /// when the request was sent.
+  final bool sentWhileRecovering;
+
+  /// The value of [ConnectivityMonitor.updateCount]
+  /// when the request was sent.
+  final int connectivityCount;
+
+  /// Whether, if the request fails, to retry it at once
+  /// rather than after a backoff wait.
+  bool retryPromptly = false;
+
+  /// The abort trigger for the request; see [abort].
+  Future<void> get abortTrigger => _abortCompleter.future;
+  final Completer<void> _abortCompleter = Completer();
+
+  /// Abort the request, if it hasn't already completed.
+  void abort() {
+    if (_abortCompleter.isCompleted) return;
+    _abortCompleter.complete();
+  }
 }
 
 /// The sequence of messages in a message list, and how to display them.
@@ -266,12 +297,16 @@ mixin _MessageSequence {
 
   BackoffMachine? _fetchBackoffMachine;
 
-  /// Completed to stop the request or backoff wait in progress, if any,
+  /// Completed to stop the backoff wait in progress, if any,
   /// in the retry loop of [MessageListView.fetchInitial],
   /// when the loop is no longer wanted.
   ///
   /// See [_cancelFetchInitial].
   Completer<void>? _fetchInitialAbort;
+
+  /// The request in flight, if any,
+  /// in the retry loop of [MessageListView.fetchInitial].
+  _FetchInitialAttempt? _fetchInitialAttempt;
 
   /// The timer after which [MessageListView.fetchInitial]
   /// shows cached messages if its request hasn't completed;
@@ -293,6 +328,9 @@ mixin _MessageSequence {
     final abort = _fetchInitialAbort;
     _fetchInitialAbort = null;
     abort?.complete();
+    final attempt = _fetchInitialAttempt;
+    _fetchInitialAttempt = null;
+    attempt?.abort();
     _cancelShowCachedMessagesTimer();
   }
 
@@ -821,12 +859,17 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
   void _register() {
     store.registerMessageList(this);
+    _retrySignalSubscription = store.connectivityMonitor.retrySignals
+      .listen(_handleConnectivityRetrySignal);
   }
+
+  StreamSubscription<void>? _retrySignalSubscription;
 
   @override
   void dispose() {
     assert(!_disposed);
     store.unregisterMessageList(this);
+    _retrySignalSubscription?.cancel();
     // Fetches in progress check this when they resume, so that they
     // don't act on, or notify listeners of, this disposed object.
     _disposed = true;
@@ -1089,6 +1132,10 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     BytesBuilder? rawBody;
     while (true) {
       rawBody = useCache ? BytesBuilder(copy: false) : null;
+      assert(_fetchInitialAttempt == null);
+      final attempt = _fetchInitialAttempt = _FetchInitialAttempt(
+        sentWhileRecovering: store.isRecoveringEventStream,
+        connectivityCount: store.connectivityMonitor.updateCount);
       try {
         result = await getMessages(store.connection,
           narrow: narrow.apiEncode(),
@@ -1096,7 +1143,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           numBefore: kMessageListFetchBatchSize,
           numAfter: kMessageListFetchBatchSize,
           allowEmptyTopicName: true,
-          abortTrigger: abort.future,
+          abortTrigger: attempt.abortTrigger,
           rawBody: rawBody,
         );
         break;
@@ -1120,8 +1167,17 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         }
         shouldShowCached = true;
         maybeShowCached();
+      } finally {
+        if (identical(_fetchInitialAttempt, attempt)) _fetchInitialAttempt = null;
       }
       // TODO(log) the error
+      if (attempt.retryPromptly) {
+        // The network is probably working again, or is a new one;
+        // see [handleEventStreamRecovered] and [_handleConnectivityRetrySignal].
+        // Retry now, and if that fails too, start backoff over small.
+        backoffMachine = null;
+        continue;
+      }
       final wake = _fetchInitialBackoffWake = Completer<void>();
       await (backoffMachine ??= BackoffMachine())
         .wait(abortTrigger: Future.any([abort.future, wake.future]));
@@ -1289,10 +1345,40 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   ///
   /// If [fetchInitial] is waiting to retry, this makes it retry now,
   /// because the network is probably working again.
+  ///
+  /// If [fetchInitial] has a request in flight
+  /// that was sent while the event stream was recovering,
+  /// the request may be stuck on a dead connection;
+  /// this aborts it, so that [fetchInitial] retries now.
+  /// If the request in flight was sent otherwise,
+  /// and goes on to fail, [fetchInitial] retries without waiting.
   void handleEventStreamRecovered() {
+    if (_fetchInitialAttempt case final attempt?) {
+      attempt.retryPromptly = true;
+      if (attempt.sentWhileRecovering) attempt.abort();
+    }
     final wake = _fetchInitialBackoffWake;
     _fetchInitialBackoffWake = null;
     wake?.complete();
+  }
+
+  /// Handle a [ConnectivityMonitor.retrySignals] event:
+  /// the network changed.
+  ///
+  /// A [fetchInitial] request sent before the change
+  /// may be stuck on a dead connection; abort it,
+  /// so that [fetchInitial] retries now on the new network.
+  ///
+  /// Compare [UpdateMachine]'s handling of the same signal.
+  void _handleConnectivityRetrySignal(void _) {
+    final attempt = _fetchInitialAttempt;
+    if (attempt == null) return;
+    if (attempt.connectivityCount == store.connectivityMonitor.updateCount) {
+      // The request was sent after the change.
+      return;
+    }
+    attempt.retryPromptly = true;
+    attempt.abort();
   }
 
   /// Whether [fetchInitial] should retry after its request failed with [error].

@@ -655,6 +655,9 @@ abstract class PerAccountStoreBase {
 
   GlobalStore get _globalStore => core._globalStore;
 
+  /// The app-wide [GlobalStore.connectivityMonitor].
+  ConnectivityMonitor get connectivityMonitor => _globalStore.connectivityMonitor;
+
   ApiConnection get connection => core.connection;
 
   String get queueId => core.queueId;

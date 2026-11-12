@@ -16,6 +16,8 @@ import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/algorithms.dart';
+import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/connectivity.dart';
 import 'package:zulip/model/content.dart';
 import 'package:zulip/model/database.dart';
 import 'package:zulip/model/message.dart';
@@ -679,6 +681,101 @@ void main() {
         check(model).fetched.isTrue();
         await fetchFuture;
       }));
+
+      group('request maybe stuck on a dead connection', () {
+        // A request that would never complete on its own.
+        void prepareStuck() {
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: const Duration(minutes: 15));
+        }
+
+        test('sent while event stream recovering: abort on recovery, and retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          store.isRecoveringEventStream = true;
+          prepareStuck();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          async.elapse(const Duration(seconds: 30));
+          check(connection.takeRequests()).isEmpty();
+
+          final message = eg.streamMessage();
+          prepareSuccess([message]);
+          store.isRecoveringEventStream = false;
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).messages.single.id.equals(message.id);
+          await fetchFuture;
+        }));
+
+        test('sent before network change: abort on retry signal, and retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          prepareStuck();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          prepareSuccess([eg.streamMessage()]);
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+
+        test('sent after network change: no abort on retry signal', () => awaitFakeAsync((async) async {
+          await prepare();
+          async.elapse(Duration.zero); // connectivity baseline
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.elapse(Duration.zero);
+          // A change during the cooldown is signaled when the cooldown ends.
+          testBinding.notifyConnectivityChanged([ConnectivityResult.wifi]);
+          async.elapse(Duration.zero);
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: ConnectivityMonitor.retrySignalCooldown * 2);
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          async.elapse(ConnectivityMonitor.retrySignalCooldown);
+          check(connection.takeRequests()).isEmpty();
+          check(model).fetched.isFalse();
+
+          async.elapse(ConnectivityMonitor.retrySignalCooldown);
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          check(connection.takeRequests()).isEmpty();
+          await fetchFuture;
+        }));
+
+        test('not sent while recovering: no abort on recovery; if it fails, retry at once', () => awaitFakeAsync((async) async {
+          BackoffMachine.debugDuration = const Duration(seconds: 10);
+          addTearDown(() => BackoffMachine.debugDuration = null);
+          await prepare();
+          connection.prepare(httpException: const SocketException('failed'),
+            delay: const Duration(seconds: 5));
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          store.isRecoveringEventStream = true;
+          store.isRecoveringEventStream = false;
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).isEmpty();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(seconds: 5));
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+      });
 
       test('renarrowAndFetch during backoff: old loop stops', () => awaitFakeAsync((async) async {
         final channel = eg.stream();
