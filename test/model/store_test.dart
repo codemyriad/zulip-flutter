@@ -18,6 +18,7 @@ import 'package:zulip/api/route/realm.dart';
 import 'package:zulip/log.dart';
 import 'package:zulip/model/actions.dart';
 import 'package:zulip/model/connectivity.dart';
+import 'package:zulip/model/database.dart';
 import 'package:zulip/model/presence.dart';
 import 'package:zulip/model/server_support.dart';
 import 'package:zulip/model/store.dart';
@@ -317,6 +318,8 @@ void main() {
           ..['queue_id'] = null);
     };
     await check(globalStore.perAccount(eg.selfAccount.id)).throws();
+    await pumpEventQueue();
+    check(globalStore.backend.serverSnapshotOf(eg.selfAccount.id)).isNull();
   });
 
   // TODO test insertAccount
@@ -1740,6 +1743,295 @@ void main() {
       async.flushTimers();
       // Reload never succeeds and there are no unhandled errors.
       check(globalStore.perAccountSync(eg.selfAccount.id)).isNull();
+    }));
+  });
+
+  group('UpdateMachine stores server data', () {
+    late UpdateMachineTestGlobalStore globalStore;
+    late PerAccountStore store;
+    late UpdateMachine updateMachine;
+    late FakeApiConnection connection;
+    String? lastReportedError;
+
+    ServerSnapshot? storedSnapshot() =>
+      globalStore.backend.serverSnapshotOf(eg.selfAccount.id);
+    List<ServerEventBatch> storedEventBatches() =>
+      globalStore.backend.serverEventBatchesOf(eg.selfAccount.id);
+
+    String registerQueueBody({required String queueId}) =>
+      jsonEncode(eg.initialSnapshot(queueId: queueId, lastEventId: 1));
+
+    /// Load the store, with an event queue 'queue1' at last event ID 1.
+    ///
+    /// The first poll request gets a heartbeat event with ID 2;
+    /// unless [handleFirstPoll] is false, that's handled before this returns.
+    Future<void> prepare(FakeAsync async, {
+      void Function(FakeApiConnection)? prepareRegisterQueueResponse,
+      Object? storeServerSnapshotError,
+      bool handleFirstPoll = true,
+    }) async {
+      addTearDown(testBinding.reset);
+      lastReportedError = null;
+      reportErrorToUserBriefly = (message, {details}) async {
+        if (message == null) return;
+        lastReportedError = message;
+      };
+      addTearDown(() => reportErrorToUserBriefly = defaultReportErrorToUserBriefly);
+
+      globalStore = UpdateMachineTestGlobalStore(accounts: [eg.selfAccount]);
+      globalStore.backend.storeServerSnapshotError = storeServerSnapshotError;
+      globalStore.prepareRegisterQueueResponse = prepareRegisterQueueResponse
+        ?? (connection) => connection.prepare(body: registerQueueBody(queueId: 'queue1'));
+      store = await globalStore.perAccount(eg.selfAccount.id);
+      updateMachine = store.updateMachine!;
+      connection = store.connection as FakeApiConnection;
+      connection.takeRequests();
+      async.flushMicrotasks();
+      if (handleFirstPoll) {
+        async.elapse(Duration.zero);
+        check(updateMachine.lastEventId).equals(2);
+      }
+    }
+
+    Map<String, dynamic> rawEvent(Event event) =>
+      jsonDecode(jsonEncode(event)) as Map<String, dynamic>;
+
+    List<Object?> decodeEvents(ServerEventBatch batch) =>
+      jsonDecode(utf8.decode(batch.data)) as List<Object?>;
+
+    void preparePollResponse(List<Map<String, dynamic>> rawEvents) {
+      connection.prepare(json: {'events': rawEvents, 'queue_id': 'queue1'});
+    }
+
+    /// Let the poll loop make a request, and handle the response.
+    void advancePoll(FakeAsync async) {
+      updateMachine.debugAdvanceLoop();
+      async.elapse(Duration.zero);
+    }
+
+    void checkPollRequest({required int lastEventId}) {
+      check(connection.takeRequests()).single.isA<http.Request>()
+        ..method.equals('GET')
+        ..url.path.equals('/api/v1/events')
+        ..url.queryParameters['last_event_id'].equals(lastEventId.toString());
+    }
+
+    void checkPollingContinues(FakeAsync async, {required int lastEventId}) {
+      preparePollResponse([rawEvent(HeartbeatEvent(id: lastEventId + 1))]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: lastEventId);
+      check(updateMachine.lastEventId).equals(lastEventId + 1);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).identicalTo(store);
+      check(store).isRecoveringEventStream.isFalse();
+      check(lastReportedError).isNull();
+    }
+
+    final messageEvent = {
+      ...rawEvent(eg.messageEvent(eg.dmMessage(id: 1003,
+        from: eg.otherUser, to: [eg.selfUser]))),
+      'id': 3,
+      'some_unknown_field': [1, 2],
+    };
+
+    final now = DateTime.utc(2026, 11, 12, 10, 30);
+
+    test('store register response', () => awaitFakeAsync(initialTime: now, (async) async {
+      testBinding.packageInfoResult = eg.packageInfo(
+        version: '2.3.4', buildNumber: '567');
+      final body = jsonEncode({
+        ...eg.initialSnapshot(queueId: 'queue1', lastEventId: 1).toJson(),
+        'some_unknown_field': [1, 2],
+      });
+      await prepare(async, handleFirstPoll: false,
+        prepareRegisterQueueResponse: (connection) => connection.prepare(body: body));
+      check(storedSnapshot()).isNotNull()
+        ..accountId.equals(eg.selfAccount.id)
+        ..queueId.equals('queue1')
+        ..lastEventId.equals(1)
+        ..appVersion.equals('2.3.4+567')
+        ..timestamp.equals(now.millisecondsSinceEpoch ~/ 1000)
+        ..data.deepEquals(utf8.encode(body));
+      check(storedEventBatches()).isEmpty();
+    }));
+
+    test('store response of successful register attempt only', () => awaitFakeAsync((async) async {
+      final body = registerQueueBody(queueId: 'queue1');
+      await prepare(async, handleFirstPoll: false,
+        prepareRegisterQueueResponse: (connection) => connection
+          ..prepare(body: body.substring(0, 100),
+            bodyException: http.ClientException('connection reset'))
+          ..prepare(body: body));
+      check(storedSnapshot()).isNotNull().data.deepEquals(utf8.encode(body));
+    }));
+
+    test('nothing stored when app version unknown', () => awaitFakeAsync((async) async {
+      testBinding.packageInfoResult = null;
+      await prepare(async);
+      check(storedSnapshot()).isNull();
+
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(storedSnapshot()).isNull();
+      check(storedEventBatches()).isEmpty();
+      checkPollingContinues(async, lastEventId: 3);
+    }));
+
+    test('heartbeat advances ack point, without storing batch', () => awaitFakeAsync((async) async {
+      await prepare(async, handleFirstPoll: false);
+      check(storedSnapshot()!).lastEventId.equals(1);
+
+      async.elapse(Duration.zero);
+      check(updateMachine.lastEventId).equals(2);
+      check(storedSnapshot()!).lastEventId.equals(2);
+      check(storedEventBatches()).isEmpty();
+    }));
+
+    test('append each batch, without ephemeral events', () => awaitFakeAsync((async) async {
+      await prepare(async);
+
+      preparePollResponse([
+        messageEvent,
+        {'id': 4, 'type': 'typing', 'op': 'start', 'message_type': 'direct',
+          'sender': {'user_id': eg.otherUser.userId, 'email': eg.otherUser.email},
+          'recipients': [eg.selfUser, eg.otherUser].map((user) =>
+            {'user_id': user.userId, 'email': user.email}).toList()},
+        rawEvent(PresenceEvent(id: 5, userId: eg.otherUser.userId,
+          serverTimestamp: 1000,
+          presence: {'website': PerClientPresence(client: 'website',
+            status: PresenceStatus.active, timestamp: 1000, pushable: false)})),
+      ]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(storedEventBatches()).single
+        ..queueId.equals('queue1')
+        ..lastEventId.equals(5)
+        ..has(decodeEvents, 'events').deepEquals([messageEvent]);
+      check(storedSnapshot()!).lastEventId.equals(5);
+
+      final settingsEvent = rawEvent(UserSettingsUpdateEvent(id: 6,
+        property: UserSettingName.twentyFourHourTime, value: true));
+      preparePollResponse([settingsEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 5);
+      check(storedEventBatches()).deepEquals(<Condition<Object?>>[
+        (it) => it.isA<ServerEventBatch>().lastEventId.equals(5),
+        (it) => it.isA<ServerEventBatch>()
+          ..lastEventId.equals(6)
+          ..has(decodeEvents, 'events').deepEquals([settingsEvent]),
+      ]);
+      check(storedSnapshot()!).lastEventId.equals(6);
+    }));
+
+    test('append completes before next poll request', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      final gate = Completer<void>();
+      globalStore.backend.appendServerEventsGate = gate.future;
+
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      updateMachine.debugAdvanceLoop();
+      async.elapse(Duration.zero);
+      check(connection.takeRequests()).isEmpty();
+      check(updateMachine.lastEventId).equals(2);
+      check(storedEventBatches()).isEmpty();
+
+      preparePollResponse([rawEvent(HeartbeatEvent(id: 4))]);
+      gate.complete();
+      async.flushMicrotasks();
+      check(storedEventBatches()).single.lastEventId.equals(3);
+      checkPollRequest(lastEventId: 3);
+    }));
+
+    test('nothing appended when handling event fails', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      final channel = eg.stream();
+      await store.addStream(channel);
+      // Break an invariant, so that handling the event throws;
+      // compare `prepareHandleEventError` above.
+      store.streamsByName.remove(channel.name);
+      globalStore.clearCachedApiConnections();
+
+      preparePollResponse([
+        messageEvent,
+        rawEvent(ChannelDeleteEvent(id: 4, channelIds: [channel.streamId])),
+      ]);
+      advancePoll(async);
+      check(store).isRecoveringEventStream.isTrue();
+      check(storedEventBatches()).isEmpty();
+      check(storedSnapshot()!)
+        ..queueId.equals('queue1')
+        ..lastEventId.equals(2);
+    }));
+
+    test('reload replaces snapshot and drops batches', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      check(storedEventBatches()).length.equals(1);
+
+      connection.prepare(apiException: eg.apiExceptionBadEventQueueId(
+        queueId: store.queueId));
+      globalStore.prepareRegisterQueueResponse = (connection) {
+        connection.prepare(body: registerQueueBody(queueId: 'queue2'));
+      };
+      globalStore.clearCachedApiConnections();
+      advancePoll(async);
+      async.flushMicrotasks();
+      check(globalStore.perAccountSync(eg.selfAccount.id))
+        .isNotNull().not((it) => it.identicalTo(store));
+      check(storedSnapshot()).isNotNull().queueId.equals('queue2');
+      check(storedEventBatches()).isEmpty();
+    }));
+
+    test('snapshot not stored; load succeeds, nothing appended', () => awaitFakeAsync((async) async {
+      await prepare(async, storeServerSnapshotError: Exception('disk full'));
+      check(storedSnapshot()).isNull();
+
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(storedSnapshot()).isNull();
+      check(storedEventBatches()).isEmpty();
+      checkPollingContinues(async, lastEventId: 3);
+    }));
+
+    test('append fails; data cleared, polling continues', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      check(storedSnapshot()).isNotNull();
+
+      globalStore.backend.appendServerEventsError = Exception('disk full');
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(storedSnapshot()).isNull();
+      check(storedEventBatches()).isEmpty();
+      check(updateMachine.lastEventId).equals(3);
+      checkPollingContinues(async, lastEventId: 3);
+    }));
+
+    test('logout while append pending', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      final gate = Completer<void>();
+      globalStore.backend.appendServerEventsGate = gate.future;
+
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      updateMachine.debugAdvanceLoop();
+
+      globalStore.clearCachedApiConnections();
+      await logOutAccount(globalStore, eg.selfAccount.id);
+      async.elapse(TestGlobalStore.removeAccountDuration);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).isNull();
+
+      gate.complete();
+      async.flushMicrotasks();
+      check(updateMachine.lastEventId).equals(2);
+      check(connection.takeRequests()).isEmpty();
+      check(storedSnapshot()).isNull();
+      check(storedEventBatches()).isEmpty();
     }));
   });
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
@@ -1534,9 +1535,11 @@ class UpdateMachine {
     }
 
     final stopwatch = Stopwatch()..start();
+    final rawInitialSnapshot = BytesBuilder();
     InitialSnapshot? initialSnapshot;
     try {
       initialSnapshot = await _registerQueueWithRetry(connection,
+        rawBody: rawInitialSnapshot,
         stopAndThrowIfNoAccount: stopAndThrowIfNoAccount);
     } on ServerVersionNotAllowedException catch (e) {
       // `!` is OK because _registerQueueWithRetry would have thrown a
@@ -1572,6 +1575,8 @@ class UpdateMachine {
     );
     final updateMachine = UpdateMachine.fromInitialSnapshot(
       store: store, initialSnapshot: initialSnapshot);
+    updateMachine._startStoringServerSnapshot(rawInitialSnapshot.takeBytes(),
+      lastEventId: initialSnapshot.lastEventId);
     updateMachine.poll();
     unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
     store.presence.start();
@@ -1585,16 +1590,21 @@ class UpdateMachine {
 
   /// Make the register-queue request, with retries.
   ///
+  /// On success, [rawBody] holds the body of the successful response.
+  ///
   /// After each async gap, calls [stopAndThrowIfNoAccount].
   static Future<InitialSnapshot> _registerQueueWithRetry(
     ApiConnection connection, {
+    required BytesBuilder rawBody,
     required void Function() stopAndThrowIfNoAccount,
   }) async {
     BackoffMachine? backoffMachine;
     while (true) {
       InitialSnapshot? result;
+      rawBody.clear();
       try {
-        result = await registerQueue(connection, idleQueueTimeout: .mobile);
+        result = await registerQueue(connection, idleQueueTimeout: .mobile,
+          rawBody: rawBody);
       } catch (e, stackTrace) {
         stopAndThrowIfNoAccount();
         // TODO(#890): tell user if initial-fetch errors persist, or look non-transient
@@ -1792,6 +1802,10 @@ class UpdateMachine {
           }
         }
         if (events.isNotEmpty) {
+          if (_serverSnapshotStored != null) {
+            await _appendServerEvents(result);
+            if (_disposed) return;
+          }
           lastEventId = events.last.id;
         }
       }
@@ -1800,6 +1814,81 @@ class UpdateMachine {
       await _handlePollError(e, stackTrace);
       assert(_disposed);
       return;
+    }
+  }
+
+  /// Completes with whether the [ServerSnapshot] for this event queue
+  /// was stored, so that the events received on the queue should be too;
+  /// or null if they shouldn't be.
+  ///
+  /// Storing this data is best-effort:
+  /// a failure stops it for this [UpdateMachine],
+  /// but doesn't affect polling.
+  ///
+  /// See [_startStoringServerSnapshot] and [_appendServerEvents].
+  Future<bool>? _serverSnapshotStored;
+
+  static String _appVersion(PackageInfo packageInfo) =>
+    '${packageInfo.version}+${packageInfo.buildNumber}';
+
+  /// Start storing the given `/register` response body
+  /// as the account's [ServerSnapshot].
+  ///
+  /// Nothing is stored if the app version is unknown.
+  void _startStoringServerSnapshot(Uint8List data, {required int lastEventId}) {
+    assert(_serverSnapshotStored == null);
+    final timestamp = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
+    _serverSnapshotStored = () async {
+      try {
+        final packageInfo = await ZulipBinding.instance.packageInfo;
+        if (packageInfo == null) return false;
+        return await store._globalStore._backend.doStoreServerSnapshot(ServerSnapshot(
+          accountId: store.accountId,
+          queueId: store.queueId,
+          lastEventId: lastEventId,
+          appVersion: _appVersion(packageInfo),
+          timestamp: timestamp,
+          data: data));
+      } catch (e) {
+        assert(debugLog('Error storing server snapshot: $e')); // TODO(log)
+        return false;
+      }
+    }();
+  }
+
+  /// Event types not worth storing, because the data they carry
+  /// will be stale anyway by the time stored events are used.
+  static const _ephemeralEventTypes = {'heartbeat', 'typing', 'presence'};
+
+  /// Record the events in [result], received on this event queue,
+  /// following the stored [ServerSnapshot].
+  ///
+  /// This must complete before the next poll request acks these events.
+  /// It doesn't throw.
+  Future<void> _appendServerEvents(GetEventsResult result) async {
+    if (!await _serverSnapshotStored!) {
+      _serverSnapshotStored = null;
+      return;
+    }
+    final backend = store._globalStore._backend;
+    final rawEvents = result.rawEvents!
+      .where((event) => !_ephemeralEventTypes.contains(event['type']))
+      .toList();
+    try {
+      final appended = await backend.doAppendServerEvents(store.accountId,
+        queueId: store.queueId,
+        lastEventId: result.events.last.id,
+        data: rawEvents.isEmpty ? null : utf8.encode(jsonEncode(rawEvents)));
+      if (!appended) _serverSnapshotStored = null;
+    } catch (e) {
+      assert(debugLog('Error storing server events: $e')); // TODO(log)
+      _serverSnapshotStored = null;
+      // The stored data lacks these events, which the server will now forget.
+      try {
+        await backend.doClearServerData(store.accountId);
+      } catch (e) {
+        assert(debugLog('Error clearing server data: $e')); // TODO(log)
+      }
     }
   }
 
