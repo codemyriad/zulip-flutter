@@ -224,11 +224,12 @@ class ServerSnapshots extends Table {
   /// This corresponds to [InitialSnapshot.queueId].
   Column<String> get queueId => text()();
 
-  /// The ID of the last event received on the queue and stored,
+  /// The ID of the last event received on the queue and recorded here,
   /// i.e. the event-queue position to resume from.
   ///
   /// This starts out as [InitialSnapshot.lastEventId],
-  /// and advances as batches of events are received.
+  /// and advances as batches of events are received,
+  /// whether or not they're stored (see [eventLogTruncated]).
   Column<int> get lastEventId => integer()();
 
   /// The app version that stored the snapshot,
@@ -237,6 +238,17 @@ class ServerSnapshots extends Table {
 
   /// When the snapshot was registered, in seconds since the Unix epoch.
   Column<int> get timestamp => integer()();
+
+  /// Whether events received on the queue have been left out
+  /// of [ServerEventBatches], because there were too many to be worth replaying.
+  ///
+  /// When true, the account has no [ServerEventBatch]es,
+  /// and the snapshot is usable only without the events since it.
+  /// The [lastEventId] still advances as events are received.
+  ///
+  /// See [AppDatabase.truncateServerEventLog].
+  Column<bool> get eventLogTruncated => boolean()
+    .withDefault(const Constant(false))();
 
   @override
   Set<Column<Object>> get primaryKey => {accountId};
@@ -589,6 +601,35 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
+  /// Record that events received on the account's stored event queue
+  /// are being left out of the stored event log.
+  ///
+  /// This advances [ServerSnapshot.lastEventId] to [lastEventId],
+  /// sets [ServerSnapshot.eventLogTruncated],
+  /// and deletes the account's [ServerEventBatch]es.
+  /// After this, [appendServerEvents] should be called without data.
+  ///
+  /// Returns false, storing nothing, if there is no [ServerSnapshot]
+  /// for the account with the given [queueId].
+  Future<bool> truncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  }) {
+    return transaction(() async {
+      final rowsAffected = await (update(serverSnapshots)
+        ..where((s) => s.accountId.equals(accountId) & s.queueId.equals(queueId))
+      ).write(ServerSnapshotsCompanion(
+        lastEventId: Value(lastEventId),
+        eventLogTruncated: const Value(true)));
+      if (rowsAffected == 0) return false;
+
+      await (delete(serverEventBatches)
+        ..where((b) => b.accountId.equals(accountId))
+      ).go();
+      return true;
+    });
+  }
+
   /// Get the metadata of the account's [ServerSnapshot] and its event batches,
   /// without reading their data.
   ///
@@ -619,6 +660,7 @@ class AppDatabase extends _$AppDatabase {
         lastEventId: snapshot.lastEventId,
         appVersion: snapshot.appVersion,
         timestamp: snapshot.timestamp,
+        eventLogTruncated: snapshot.eventLogTruncated,
         snapshotSize: snapshotBlobRow.read(snapshotSize)!,
         eventBatchesSize: eventBatchesRow.read(eventBatchesSize) ?? 0,
       );
@@ -691,6 +733,7 @@ typedef ServerSnapshotInfo = ({
   int lastEventId,
   String appVersion,
   int timestamp,
+  bool eventLogTruncated,
   int snapshotSize,
   int eventBatchesSize,
 });

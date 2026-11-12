@@ -166,6 +166,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     int? lastEventId,
     String? appVersion,
     int? timestamp,
+    bool eventLogTruncated = false,
   }) {
     queueId ??= snapshotJson['queue_id'] as String;
     final batches = [
@@ -187,7 +188,8 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
       appVersion: appVersion
         ?? '${packageInfo.version}+${packageInfo.buildNumber}',
       timestamp: timestamp
-        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000);
+        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000,
+      eventLogTruncated: eventLogTruncated);
     _serverSnapshotData[accountId] = utf8.encode(jsonEncode(snapshotJson));
     _serverEventBatches[accountId] = batches;
   }
@@ -256,6 +258,19 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     return true;
   }
 
+  @override
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  }) async {
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null || snapshot.queueId != queueId) return false;
+    _serverSnapshots[accountId] = snapshot.copyWith(
+      lastEventId: lastEventId, eventLogTruncated: true);
+    _serverEventBatches.remove(accountId);
+    return true;
+  }
+
   Iterable<ServerEventBatch> _serverEventBatchesOnQueue(ServerSnapshot snapshot) {
     return (_serverEventBatches[snapshot.accountId] ?? [])
       .where((batch) => batch.queueId == snapshot.queueId);
@@ -274,6 +289,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
       lastEventId: snapshot.lastEventId,
       appVersion: snapshot.appVersion,
       timestamp: snapshot.timestamp,
+      eventLogTruncated: snapshot.eventLogTruncated,
       snapshotSize: _serverSnapshotData[accountId]!.length,
       eventBatchesSize: _serverEventBatchesOnQueue(snapshot)
         .fold(0, (sum, batch) => sum + batch.data.length),

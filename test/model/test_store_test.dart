@@ -75,6 +75,32 @@ void main() {
         ..data.deepEquals(utf8.encode('[{"id":11}]'));
     });
 
+    test('truncate event log', () async {
+      prepare();
+      final snapshot = eg.serverSnapshot(account: eg.selfAccount,
+        queueId: 'queue1', lastEventId: 10);
+      await storeSnapshot(snapshot);
+      await append(11, '[{"id":11}]');
+
+      check(await backend.doTruncateServerEventLog(eg.selfAccount.id,
+        queueId: 'queue0', lastEventId: 12)).isFalse();
+      check(backend.serverSnapshotOf(eg.selfAccount.id)!).lastEventId.equals(11);
+      check(backend.serverEventBatchesOf(eg.selfAccount.id)).length.equals(1);
+
+      check(await backend.doTruncateServerEventLog(eg.selfAccount.id,
+        queueId: 'queue1', lastEventId: 12)).isTrue();
+      check(backend.serverSnapshotOf(eg.selfAccount.id)).equals(
+        snapshot.copyWith(lastEventId: 12, eventLogTruncated: true));
+      check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
+      check(await backend.doLoadServerSnapshotInfo(eg.selfAccount.id)).isNotNull()
+        .has((x) => x.eventLogTruncated, 'eventLogTruncated').isTrue();
+
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        queueId: 'queue2', lastEventId: 20));
+      check(backend.serverSnapshotOf(eg.selfAccount.id)!)
+        .eventLogTruncated.isFalse();
+    });
+
     test('no append events without snapshot', () async {
       prepare();
       check(await append(11, '[{"id":11}]')).isFalse();
@@ -95,6 +121,7 @@ void main() {
       check(await backend.doLoadServerSnapshotInfo(eg.selfAccount.id)).equals((
         queueId: 'queue1', lastEventId: 14,
         appVersion: '2.0.0+3', timestamp: 1771389742,
+        eventLogTruncated: false,
         snapshotSize: 40, eventBatchesSize: 11 + 21,
       ));
       check(await backend.doLoadServerData(eg.selfAccount.id)).isNotNull()

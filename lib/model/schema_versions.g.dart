@@ -1570,7 +1570,14 @@ final class Schema17 extends i0.VersionedSchema {
       withoutRowId: false,
       isStrict: false,
       tableConstraints: ['PRIMARY KEY(account_id)'],
-      columns: [_column_39, _column_43, _column_44, _column_45, _column_46],
+      columns: [
+        _column_39,
+        _column_43,
+        _column_44,
+        _column_45,
+        _column_46,
+        _column_47,
+      ],
       attachedDatabase: database,
     ),
     alias: null,
@@ -1581,7 +1588,7 @@ final class Schema17 extends i0.VersionedSchema {
       withoutRowId: false,
       isStrict: false,
       tableConstraints: ['PRIMARY KEY(account_id)'],
-      columns: [_column_39, _column_47],
+      columns: [_column_39, _column_48],
       attachedDatabase: database,
     ),
     alias: null,
@@ -1592,7 +1599,7 @@ final class Schema17 extends i0.VersionedSchema {
       withoutRowId: false,
       isStrict: false,
       tableConstraints: [],
-      columns: [_column_25, _column_39, _column_43, _column_44, _column_47],
+      columns: [_column_25, _column_39, _column_43, _column_44, _column_48],
       attachedDatabase: database,
     ),
     alias: null,
@@ -1615,6 +1622,8 @@ class Shape13 extends i0.VersionedTable {
       columnsByName['app_version']! as i1.GeneratedColumn<String>;
   i1.GeneratedColumn<int> get timestamp =>
       columnsByName['timestamp']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get eventLogTruncated =>
+      columnsByName['event_log_truncated']! as i1.GeneratedColumn<int>;
 }
 
 i1.GeneratedColumn<String> _column_43(String aliasedName) =>
@@ -1649,6 +1658,16 @@ i1.GeneratedColumn<int> _column_46(String aliasedName) =>
       type: i1.DriftSqlType.int,
       $customConstraints: 'NOT NULL',
     );
+i1.GeneratedColumn<int> _column_47(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'event_log_truncated',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints:
+          'NOT NULL DEFAULT 0 CHECK (event_log_truncated IN (0, 1))',
+      defaultValue: const i1.CustomExpression('0'),
+    );
 
 class Shape14 extends i0.VersionedTable {
   Shape14({required super.source, required super.alias}) : super.aliased();
@@ -1658,7 +1677,7 @@ class Shape14 extends i0.VersionedTable {
       columnsByName['data']! as i1.GeneratedColumn<i2.Uint8List>;
 }
 
-i1.GeneratedColumn<i2.Uint8List> _column_47(String aliasedName) =>
+i1.GeneratedColumn<i2.Uint8List> _column_48(String aliasedName) =>
     i1.GeneratedColumn<i2.Uint8List>(
       'data',
       aliasedName,

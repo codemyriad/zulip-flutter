@@ -2024,6 +2024,104 @@ void main() {
       checkPollingContinues(async, lastEventId: 3);
     }));
 
+    Map<String, dynamic> settingsEvent(int id) => rawEvent(
+      UserSettingsUpdateEvent(id: id,
+        property: UserSettingName.twentyFourHourTime, value: true));
+
+    test('stop storing event log once too long', () => awaitFakeAsync((async) async {
+      UpdateMachine.debugMaxStoredEventCount = 3;
+      addTearDown(() => UpdateMachine.debugMaxStoredEventCount = null);
+      await prepare(async); // snapshot at event 1; heartbeat 2
+      preparePollResponse([messageEvent]); // event 3
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      preparePollResponse([settingsEvent(4)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 3);
+      check(storedEventBatches()).length.equals(2);
+      check(storedSnapshot()!)
+        ..lastEventId.equals(4)
+        ..eventLogTruncated.isFalse();
+
+      preparePollResponse([settingsEvent(5)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 4);
+      check(storedEventBatches()).isEmpty();
+      check(storedSnapshot()!)
+        ..lastEventId.equals(5)
+        ..eventLogTruncated.isTrue();
+
+      preparePollResponse([settingsEvent(6)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 5);
+      check(storedEventBatches()).isEmpty();
+      check(storedSnapshot()!).lastEventId.equals(6);
+      checkPollingContinues(async, lastEventId: 6);
+    }));
+
+    test('stop storing event log once too big, and bigger than snapshot', () => awaitFakeAsync((async) async {
+      UpdateMachine.debugMaxStoredEventBatchesSize = 10;
+      addTearDown(() => UpdateMachine.debugMaxStoredEventBatchesSize = null);
+      final snapshotSize = utf8.encode(registerQueueBody(queueId: 'queue1')).length;
+      // Each of these is a bit more than half the size of the snapshot.
+      Map<String, dynamic> bigEvent(int id) =>
+        rawEvent(AlertWordsEvent(id: id, alertWords: ['x' * (snapshotSize ~/ 2)]));
+      await prepare(async);
+      // Bigger than the limit, but not the snapshot.
+      preparePollResponse([bigEvent(3)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(storedEventBatches()).single.lastEventId.equals(3);
+      check(storedSnapshot()!).eventLogTruncated.isFalse();
+
+      preparePollResponse([bigEvent(4)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 3);
+      check(storedEventBatches()).isEmpty();
+      check(storedSnapshot()!)
+        ..lastEventId.equals(4)
+        ..eventLogTruncated.isTrue();
+
+      preparePollResponse([{...messageEvent, 'id': 5}]);
+      advancePoll(async);
+      check(storedEventBatches()).isEmpty();
+      check(storedSnapshot()!).lastEventId.equals(5);
+    }));
+
+    test('fresh register stores event log again', () => awaitFakeAsync((async) async {
+      UpdateMachine.debugMaxStoredEventCount = 2;
+      addTearDown(() => UpdateMachine.debugMaxStoredEventCount = null);
+      await prepare(async); // snapshot at event 1; heartbeat 2
+      preparePollResponse([messageEvent]); // event 3
+      advancePoll(async);
+      preparePollResponse([settingsEvent(4)]);
+      advancePoll(async);
+      check(storedSnapshot()!).eventLogTruncated.isTrue();
+
+      connection.prepare(apiException: eg.apiExceptionBadEventQueueId(
+        queueId: store.queueId));
+      globalStore.prepareRegisterQueueResponse = (connection) {
+        connection.prepare(body: registerQueueBody(queueId: 'queue2'));
+      };
+      globalStore.clearCachedApiConnections();
+      advancePoll(async);
+      async.elapse(Duration.zero);
+      final newStore = globalStore.perAccountSync(eg.selfAccount.id)!;
+      check(newStore).queueId.equals('queue2');
+      check(newStore.updateMachine!.lastEventId).equals(2);
+      check(storedSnapshot()!)
+        ..queueId.equals('queue2')
+        ..eventLogTruncated.isFalse();
+
+      (newStore.connection as FakeApiConnection).prepare(json: {
+        'events': [messageEvent], 'queue_id': 'queue2'});
+      newStore.updateMachine!.debugAdvanceLoop();
+      async.elapse(Duration.zero);
+      check(storedEventBatches()).single
+        ..queueId.equals('queue2')
+        ..lastEventId.equals(3);
+    }));
+
     test('logout while append pending', () => awaitFakeAsync((async) async {
       await prepare(async);
       final gate = Completer<void>();
@@ -2102,13 +2200,15 @@ void main() {
       int? lastEventId,
       String? appVersion,
       int? timestamp,
+      bool eventLogTruncated = false,
     }) {
       globalStore.backend.seedServerData(eg.selfAccount.id,
         snapshotJson: snapshot ?? snapshotJson(),
         eventBatches: [for (final batch in eventBatches) batch.map(rawJson).toList()],
         lastEventId: lastEventId,
         appVersion: appVersion,
-        timestamp: timestamp);
+        timestamp: timestamp,
+        eventLogTruncated: eventLogTruncated);
     }
 
     void seedRaw(List<List<Map<String, dynamic>>> eventBatches) {
@@ -2607,6 +2707,13 @@ void main() {
           ]));
       });
 
+      test('stored event log truncated', () {
+        // A truncated log has no batches; but if it did, they'd be skipped.
+        checkReplacedImmediately(expectReplayed: false, () =>
+          seed(eventBatches: [[channelCreateEvent]], lastEventId: 20,
+            eventLogTruncated: true));
+      });
+
       test('stored snapshot too old', () {
         checkReplacedImmediately(expectReplayed: true, () {
           final now = testBinding.utcNow();
@@ -2653,6 +2760,68 @@ void main() {
       check(globalStore.perAccountSync(eg.selfAccount.id)).identicalTo(store);
       checkNoErrorReported();
     }));
+
+    group('bound stored event log, continuing from stored data', () {
+      test('by length', () => awaitFakeAsync((async) async {
+        UpdateMachine.debugMaxStoredEventCount = 3;
+        addTearDown(() => UpdateMachine.debugMaxStoredEventCount = null);
+        prepare(expectedLoad: ExpectedLoad.persisted);
+        globalStore.prepareResumedPollResponse = (connection) =>
+          prepareCatchUpEvents(connection, [rawJson(settingsEvent(13))]);
+        seed(eventBatches: [[settingsEvent(11)], [settingsEvent(12)]]);
+        await load();
+        async.elapse(Duration.zero);
+        final backend = globalStore.backend;
+        check(backend.serverEventBatchesOf(eg.selfAccount.id)).length.equals(3);
+        check(backend.serverSnapshotOf(eg.selfAccount.id)!)
+          .eventLogTruncated.isFalse();
+
+        connection.prepare(json: {
+          'events': [rawJson(settingsEvent(14))], 'queue_id': queueId});
+        updateMachine.debugAdvanceLoop();
+        async.elapse(Duration.zero);
+        check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
+        check(backend.serverSnapshotOf(eg.selfAccount.id)!)
+          ..lastEventId.equals(14)
+          ..eventLogTruncated.isTrue();
+      }));
+
+      test('by size', () => awaitFakeAsync((async) async {
+        final snapshotSize = utf8.encode(jsonEncode(snapshotJson())).length;
+        UpdateMachine.debugMaxStoredEventBatchesSize = 2 * snapshotSize;
+        addTearDown(() => UpdateMachine.debugMaxStoredEventBatchesSize = null);
+        // Each of these is a bit bigger than the snapshot.
+        AlertWordsEvent bigEvent(int id) =>
+          AlertWordsEvent(id: id, alertWords: ['x' * snapshotSize]);
+        prepare(expectedLoad: ExpectedLoad.persisted);
+        globalStore.prepareResumedPollResponse = (connection) =>
+          prepareCatchUpEvents(connection, [rawJson(bigEvent(12))]);
+        seed(eventBatches: [[bigEvent(11)]]);
+        await load();
+        check(updateMachine.lastEventId).equals(11);
+        async.elapse(Duration.zero);
+        final backend = globalStore.backend;
+        check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
+        check(backend.serverSnapshotOf(eg.selfAccount.id)!)
+          ..lastEventId.equals(12)
+          ..eventLogTruncated.isTrue();
+      }));
+
+      test('by size, but not while smaller than snapshot', () => awaitFakeAsync((async) async {
+        UpdateMachine.debugMaxStoredEventBatchesSize = 10;
+        addTearDown(() => UpdateMachine.debugMaxStoredEventBatchesSize = null);
+        prepare(expectedLoad: ExpectedLoad.persisted);
+        globalStore.prepareResumedPollResponse = (connection) =>
+          prepareCatchUpEvents(connection, [rawJson(settingsEvent(12))]);
+        seed(eventBatches: [[settingsEvent(11)]]);
+        await load();
+        async.elapse(Duration.zero);
+        check(globalStore.backend.serverEventBatchesOf(eg.selfAccount.id))
+          .length.equals(2);
+        check(globalStore.backend.serverSnapshotOf(eg.selfAccount.id)!)
+          .eventLogTruncated.isFalse();
+      }));
+    });
 
     test('round trip: load from network, then from stored data', () => awaitFakeAsync((async) async {
       prepare(expectedLoad: ExpectedLoad.network);

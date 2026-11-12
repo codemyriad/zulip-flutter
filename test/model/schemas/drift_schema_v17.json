@@ -493,6 +493,20 @@
             "default_dart": null,
             "default_client_dart": null,
             "dsl_features": []
+          },
+          {
+            "name": "event_log_truncated",
+            "getter_name": "eventLogTruncated",
+            "moor_type": "bool",
+            "nullable": false,
+            "customConstraints": null,
+            "defaultConstraints": "CHECK (\"event_log_truncated\" IN (0, 1))",
+            "dialectAwareDefaultConstraints": {
+              "sqlite": "CHECK (\"event_log_truncated\" IN (0, 1))"
+            },
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
           }
         ],
         "is_virtual": false,
@@ -717,7 +731,7 @@
       "sql": [
         {
           "dialect": "sqlite",
-          "sql": "CREATE TABLE IF NOT EXISTS \"server_snapshots\" (\"account_id\" INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE, \"queue_id\" TEXT NOT NULL, \"last_event_id\" INTEGER NOT NULL, \"app_version\" TEXT NOT NULL, \"timestamp\" INTEGER NOT NULL, PRIMARY KEY (\"account_id\"));"
+          "sql": "CREATE TABLE IF NOT EXISTS \"server_snapshots\" (\"account_id\" INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE, \"queue_id\" TEXT NOT NULL, \"last_event_id\" INTEGER NOT NULL, \"app_version\" TEXT NOT NULL, \"timestamp\" INTEGER NOT NULL, \"event_log_truncated\" INTEGER NOT NULL DEFAULT 0 CHECK (\"event_log_truncated\" IN (0, 1)), PRIMARY KEY (\"account_id\"));"
         }
       ]
     },

@@ -479,6 +479,7 @@ ServerSnapshot serverSnapshot({
   int? lastEventId,
   String? appVersion,
   int? timestamp,
+  bool? eventLogTruncated,
 }) {
   return ServerSnapshot(
     accountId: account.id,
@@ -486,6 +487,7 @@ ServerSnapshot serverSnapshot({
     lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
     appVersion: appVersion ?? '1.0.0+1',
     timestamp: timestamp ?? 1771389742,
+    eventLogTruncated: eventLogTruncated ?? false,
   );
 }
 

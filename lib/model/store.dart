@@ -111,6 +111,19 @@ abstract class GlobalStoreBackend {
     required Uint8List? data,
   });
 
+  /// Record that events received on the account's stored event queue
+  /// are being left out of the stored event log,
+  /// deleting the stored events.
+  ///
+  /// Returns false, storing nothing, if the account has no [ServerSnapshot]
+  /// with the given [queueId].
+  ///
+  /// See [AppDatabase.truncateServerEventLog].
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  });
+
   /// Get the metadata of the account's stored server data,
   /// without reading the data itself,
   /// or null if there is none.
@@ -1270,6 +1283,15 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
   }
 
   @override
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  }) {
+    return _db.truncateServerEventLog(accountId,
+      queueId: queueId, lastEventId: lastEventId);
+  }
+
+  @override
   Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId) {
     return _db.loadServerSnapshotInfo(accountId);
   }
@@ -1678,8 +1700,9 @@ class UpdateMachine {
 
       // If the event log is big, it'd take a while to read and replay,
       // so leave it out, and get a fresh snapshot as soon as possible.
-      bool skipEventLog = info.eventBatchesSize > info.snapshotSize
-        && info.eventBatchesSize > (debugMaxStoredEventBatchesSize ?? _maxStoredEventBatchesSize);
+      // Same if it was cut off for being big; see [_appendServerEvents].
+      bool skipEventLog = info.eventLogTruncated
+        || _isEventLogTooBig(info.eventBatchesSize, snapshotSize: info.snapshotSize);
       // If the data is old, it'd likely take a lot of events to catch up,
       // or the event queue is gone already; so get a fresh snapshot.
       final now = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
@@ -1702,8 +1725,7 @@ class UpdateMachine {
         throw _UnusableServerDataException('server version mismatch');
       }
 
-      if (data.snapshot.lastEventId - initialSnapshot.lastEventId
-          > (debugMaxStoredEventCount ?? _maxStoredEventCount)) {
+      if (_isEventLogTooLong(data.snapshot.lastEventId - initialSnapshot.lastEventId)) {
         skipEventLog = true;
         replaceImmediately = true;
       }
@@ -1743,7 +1765,12 @@ class UpdateMachine {
       final updateMachine = UpdateMachine._(store: store,
         lastEventId: skipEventLog
           ? initialSnapshot.lastEventId : data.snapshot.lastEventId);
-      updateMachine._serverSnapshotStored = Future.value(true);
+      updateMachine
+        .._serverSnapshotStored = Future.value(true)
+        .._storedSnapshotLastEventId = initialSnapshot.lastEventId
+        .._storedSnapshotSize = info.snapshotSize
+        .._storedEventBatchesSize = info.eventBatchesSize
+        .._storedEventLogTruncated = info.eventLogTruncated;
       if (replaceImmediately) {
         updateMachine._replaceStoreImmediately = true;
       } else {
@@ -1801,12 +1828,35 @@ class UpdateMachine {
     });
   }
 
-  /// If the stored event log has more events than this,
-  /// we skip it; see [load].
+  /// Whether a stored event log with this many events
+  /// is too long to be worth replaying.
+  ///
+  /// The count is by event ID: the last event ID logged,
+  /// minus the snapshot's own last event ID.
+  ///
+  /// [_appendServerEvents] stops storing the log before it gets this long,
+  /// and [_loadPersisted] skips it if it is.
+  static bool _isEventLogTooLong(int eventCount) {
+    return eventCount > (debugMaxStoredEventCount ?? _maxStoredEventCount);
+  }
+
+  /// Whether a stored event log of this many bytes,
+  /// following a snapshot of [snapshotSize] bytes,
+  /// is too big to be worth replaying.
+  ///
+  /// [_appendServerEvents] stops storing the log before it gets this big,
+  /// and [_loadPersisted] skips it if it is.
+  static bool _isEventLogTooBig(int size, {required int snapshotSize}) {
+    return size > snapshotSize
+      && size > (debugMaxStoredEventBatchesSize ?? _maxStoredEventBatchesSize);
+  }
+
+  /// The limit on the length of the stored event log;
+  /// see [_isEventLogTooLong].
   static const _maxStoredEventCount = 10000;
 
-  /// In debug mode, overrides the limit on stored events
-  /// that [load] will replay.
+  /// In debug mode, overrides the limit on the length of the stored event log;
+  /// see [_isEventLogTooLong].
   ///
   /// Outside of debug mode, this is always `null` and the setter has no effect.
   static int? get debugMaxStoredEventCount {
@@ -1825,12 +1875,12 @@ class UpdateMachine {
     }());
   }
 
-  /// If the stored event log has more bytes than this,
-  /// and than the stored snapshot, we skip it; see [load].
+  /// The limit on the size of the stored event log,
+  /// unless the snapshot is bigger; see [_isEventLogTooBig].
   static const _maxStoredEventBatchesSize = 1 << 20;
 
-  /// In debug mode, overrides the limit on the size of the stored event log
-  /// that [load] will replay.
+  /// In debug mode, overrides the limit on the size of the stored event log;
+  /// see [_isEventLogTooBig].
   ///
   /// Outside of debug mode, this is always `null` and the setter has no effect.
   static int? get debugMaxStoredEventBatchesSize {
@@ -2141,12 +2191,33 @@ class UpdateMachine {
   static String _appVersion(PackageInfo packageInfo) =>
     '${packageInfo.version}+${packageInfo.buildNumber}';
 
+  /// The stored snapshot's own last event ID,
+  /// as opposed to [ServerSnapshot.lastEventId],
+  /// for bounding the stored event log; see [_appendServerEvents].
+  int _storedSnapshotLastEventId = 0;
+
+  /// The size of the stored snapshot's data, in bytes;
+  /// see [_appendServerEvents].
+  int _storedSnapshotSize = 0;
+
+  /// The total size of the stored [ServerEventBatch]es' data, in bytes;
+  /// see [_appendServerEvents].
+  int _storedEventBatchesSize = 0;
+
+  /// Whether the stored event log was cut off for getting too big,
+  /// so that events are no longer stored; see [_appendServerEvents].
+  bool _storedEventLogTruncated = false;
+
   /// Start storing the given `/register` response body
   /// as the account's [ServerSnapshot].
   ///
   /// Nothing is stored if the app version is unknown.
   void _startStoringServerSnapshot(Uint8List data, {required int lastEventId}) {
     assert(_serverSnapshotStored == null);
+    _storedSnapshotLastEventId = lastEventId;
+    _storedSnapshotSize = data.length;
+    _storedEventBatchesSize = 0;
+    _storedEventLogTruncated = false;
     final timestamp = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
     _serverSnapshotStored = () async {
       try {
@@ -2157,7 +2228,8 @@ class UpdateMachine {
           queueId: store.queueId,
           lastEventId: lastEventId,
           appVersion: _appVersion(packageInfo),
-          timestamp: timestamp);
+          timestamp: timestamp,
+          eventLogTruncated: false);
         return await store._globalStore._backend.doStoreServerSnapshot(snapshot,
           data: data);
       } catch (e) {
@@ -2174,6 +2246,11 @@ class UpdateMachine {
   /// Record the events in [result], received on this event queue,
   /// following the stored [ServerSnapshot].
   ///
+  /// If the stored event log would get too long or too big to be worth
+  /// replaying (see [_isEventLogTooLong] and [_isEventLogTooBig]),
+  /// this instead deletes it, and from then on stores just the ack point
+  /// (see [ServerSnapshot.eventLogTruncated]).
+  ///
   /// This must complete before the next poll request acks these events.
   /// It doesn't throw.
   Future<void> _appendServerEvents(GetEventsResult result) async {
@@ -2182,15 +2259,33 @@ class UpdateMachine {
       return;
     }
     final backend = store._globalStore._backend;
-    final rawEvents = result.rawEvents!
-      .where((event) => !_ephemeralEventTypes.contains(event['type']))
-      .toList();
+    final lastEventId = result.events.last.id;
+    Uint8List? data;
+    if (!_storedEventLogTruncated) {
+      final rawEvents = result.rawEvents!
+        .where((event) => !_ephemeralEventTypes.contains(event['type']))
+        .toList();
+      if (rawEvents.isNotEmpty) data = utf8.encode(jsonEncode(rawEvents));
+    }
+    final truncate = !_storedEventLogTruncated
+      && (_isEventLogTooLong(lastEventId - _storedSnapshotLastEventId)
+          || _isEventLogTooBig(_storedEventBatchesSize + (data?.length ?? 0),
+               snapshotSize: _storedSnapshotSize));
     try {
-      final appended = await backend.doAppendServerEvents(store.accountId,
-        queueId: store.queueId,
-        lastEventId: result.events.last.id,
-        data: rawEvents.isEmpty ? null : utf8.encode(jsonEncode(rawEvents)));
-      if (!appended) _serverSnapshotStored = null;
+      final bool stored;
+      if (truncate) {
+        stored = await backend.doTruncateServerEventLog(store.accountId,
+          queueId: store.queueId, lastEventId: lastEventId);
+        if (stored) {
+          _storedEventLogTruncated = true;
+          _storedEventBatchesSize = 0;
+        }
+      } else {
+        stored = await backend.doAppendServerEvents(store.accountId,
+          queueId: store.queueId, lastEventId: lastEventId, data: data);
+        if (stored) _storedEventBatchesSize += data?.length ?? 0;
+      }
+      if (!stored) _serverSnapshotStored = null;
     } catch (e) {
       assert(debugLog('Error storing server events: $e')); // TODO(log)
       _serverSnapshotStored = null;

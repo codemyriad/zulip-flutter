@@ -1715,6 +1715,16 @@ class ServerSnapshots extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  late final GeneratedColumn<int> eventLogTruncated = GeneratedColumn<int>(
+    'event_log_truncated',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints:
+        'NOT NULL DEFAULT 0 CHECK (event_log_truncated IN (0, 1))',
+    defaultValue: const CustomExpression('0'),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     accountId,
@@ -1722,6 +1732,7 @@ class ServerSnapshots extends Table
     lastEventId,
     appVersion,
     timestamp,
+    eventLogTruncated,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1754,6 +1765,10 @@ class ServerSnapshots extends Table
         DriftSqlType.int,
         data['${effectivePrefix}timestamp'],
       )!,
+      eventLogTruncated: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}event_log_truncated'],
+      )!,
     );
   }
 
@@ -1775,12 +1790,14 @@ class ServerSnapshotsData extends DataClass
   final int lastEventId;
   final String appVersion;
   final int timestamp;
+  final int eventLogTruncated;
   const ServerSnapshotsData({
     required this.accountId,
     required this.queueId,
     required this.lastEventId,
     required this.appVersion,
     required this.timestamp,
+    required this.eventLogTruncated,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1790,6 +1807,7 @@ class ServerSnapshotsData extends DataClass
     map['last_event_id'] = Variable<int>(lastEventId);
     map['app_version'] = Variable<String>(appVersion);
     map['timestamp'] = Variable<int>(timestamp);
+    map['event_log_truncated'] = Variable<int>(eventLogTruncated);
     return map;
   }
 
@@ -1800,6 +1818,7 @@ class ServerSnapshotsData extends DataClass
       lastEventId: Value(lastEventId),
       appVersion: Value(appVersion),
       timestamp: Value(timestamp),
+      eventLogTruncated: Value(eventLogTruncated),
     );
   }
 
@@ -1814,6 +1833,7 @@ class ServerSnapshotsData extends DataClass
       lastEventId: serializer.fromJson<int>(json['lastEventId']),
       appVersion: serializer.fromJson<String>(json['appVersion']),
       timestamp: serializer.fromJson<int>(json['timestamp']),
+      eventLogTruncated: serializer.fromJson<int>(json['eventLogTruncated']),
     );
   }
   @override
@@ -1825,6 +1845,7 @@ class ServerSnapshotsData extends DataClass
       'lastEventId': serializer.toJson<int>(lastEventId),
       'appVersion': serializer.toJson<String>(appVersion),
       'timestamp': serializer.toJson<int>(timestamp),
+      'eventLogTruncated': serializer.toJson<int>(eventLogTruncated),
     };
   }
 
@@ -1834,12 +1855,14 @@ class ServerSnapshotsData extends DataClass
     int? lastEventId,
     String? appVersion,
     int? timestamp,
+    int? eventLogTruncated,
   }) => ServerSnapshotsData(
     accountId: accountId ?? this.accountId,
     queueId: queueId ?? this.queueId,
     lastEventId: lastEventId ?? this.lastEventId,
     appVersion: appVersion ?? this.appVersion,
     timestamp: timestamp ?? this.timestamp,
+    eventLogTruncated: eventLogTruncated ?? this.eventLogTruncated,
   );
   ServerSnapshotsData copyWithCompanion(ServerSnapshotsCompanion data) {
     return ServerSnapshotsData(
@@ -1852,6 +1875,9 @@ class ServerSnapshotsData extends DataClass
           ? data.appVersion.value
           : this.appVersion,
       timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
+      eventLogTruncated: data.eventLogTruncated.present
+          ? data.eventLogTruncated.value
+          : this.eventLogTruncated,
     );
   }
 
@@ -1862,14 +1888,21 @@ class ServerSnapshotsData extends DataClass
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp')
+          ..write('timestamp: $timestamp, ')
+          ..write('eventLogTruncated: $eventLogTruncated')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(accountId, queueId, lastEventId, appVersion, timestamp);
+  int get hashCode => Object.hash(
+    accountId,
+    queueId,
+    lastEventId,
+    appVersion,
+    timestamp,
+    eventLogTruncated,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1878,7 +1911,8 @@ class ServerSnapshotsData extends DataClass
           other.queueId == this.queueId &&
           other.lastEventId == this.lastEventId &&
           other.appVersion == this.appVersion &&
-          other.timestamp == this.timestamp);
+          other.timestamp == this.timestamp &&
+          other.eventLogTruncated == this.eventLogTruncated);
 }
 
 class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
@@ -1887,12 +1921,14 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
   final Value<int> lastEventId;
   final Value<String> appVersion;
   final Value<int> timestamp;
+  final Value<int> eventLogTruncated;
   const ServerSnapshotsCompanion({
     this.accountId = const Value.absent(),
     this.queueId = const Value.absent(),
     this.lastEventId = const Value.absent(),
     this.appVersion = const Value.absent(),
     this.timestamp = const Value.absent(),
+    this.eventLogTruncated = const Value.absent(),
   });
   ServerSnapshotsCompanion.insert({
     this.accountId = const Value.absent(),
@@ -1900,6 +1936,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     required int lastEventId,
     required String appVersion,
     required int timestamp,
+    this.eventLogTruncated = const Value.absent(),
   }) : queueId = Value(queueId),
        lastEventId = Value(lastEventId),
        appVersion = Value(appVersion),
@@ -1910,6 +1947,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     Expression<int>? lastEventId,
     Expression<String>? appVersion,
     Expression<int>? timestamp,
+    Expression<int>? eventLogTruncated,
   }) {
     return RawValuesInsertable({
       if (accountId != null) 'account_id': accountId,
@@ -1917,6 +1955,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
       if (lastEventId != null) 'last_event_id': lastEventId,
       if (appVersion != null) 'app_version': appVersion,
       if (timestamp != null) 'timestamp': timestamp,
+      if (eventLogTruncated != null) 'event_log_truncated': eventLogTruncated,
     });
   }
 
@@ -1926,6 +1965,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     Value<int>? lastEventId,
     Value<String>? appVersion,
     Value<int>? timestamp,
+    Value<int>? eventLogTruncated,
   }) {
     return ServerSnapshotsCompanion(
       accountId: accountId ?? this.accountId,
@@ -1933,6 +1973,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
       lastEventId: lastEventId ?? this.lastEventId,
       appVersion: appVersion ?? this.appVersion,
       timestamp: timestamp ?? this.timestamp,
+      eventLogTruncated: eventLogTruncated ?? this.eventLogTruncated,
     );
   }
 
@@ -1954,6 +1995,9 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     if (timestamp.present) {
       map['timestamp'] = Variable<int>(timestamp.value);
     }
+    if (eventLogTruncated.present) {
+      map['event_log_truncated'] = Variable<int>(eventLogTruncated.value);
+    }
     return map;
   }
 
@@ -1964,7 +2008,8 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp')
+          ..write('timestamp: $timestamp, ')
+          ..write('eventLogTruncated: $eventLogTruncated')
           ..write(')'))
         .toString();
   }

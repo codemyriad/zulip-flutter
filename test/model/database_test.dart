@@ -426,6 +426,60 @@ void main() {
         check(await db.select(db.serverEventBatches).get()).isEmpty();
       });
 
+      test('truncate event log', () async {
+        await prepare();
+        final snapshot = eg.serverSnapshot(account: eg.selfAccount,
+          queueId: 'queue1', lastEventId: 10);
+        await storeSnapshot(snapshot);
+        await append(eg.selfAccount, 11, '[{"id":11}]');
+        await storeSnapshot(eg.serverSnapshot(account: eg.otherAccount,
+          queueId: 'queue1', lastEventId: 10));
+        await append(eg.otherAccount, 11, '[{"id":11}]');
+
+        check(await db.truncateServerEventLog(eg.selfAccount.id,
+          queueId: 'queue1', lastEventId: 12)).isTrue();
+        check(await load(eg.selfAccount)).isNotNull()
+          ..snapshot.equals(snapshot.copyWith(
+              lastEventId: 12, eventLogTruncated: true))
+          ..eventBatches.isEmpty();
+        check(await db.select(db.serverEventBatches).get())
+          .single.accountId.equals(eg.otherAccount.id);
+
+        // Appending then just advances lastEventId.
+        check(await append(eg.selfAccount, 13, null)).isTrue();
+        check(await load(eg.selfAccount)).isNotNull().snapshot
+          ..lastEventId.equals(13)
+          ..eventLogTruncated.isTrue();
+
+        // A fresh snapshot starts with a fresh event log.
+        final newSnapshot = eg.serverSnapshot(account: eg.selfAccount,
+          queueId: 'queue2', lastEventId: 20, eventLogTruncated: false);
+        await storeSnapshot(newSnapshot);
+        check(await load(eg.selfAccount)).isNotNull()
+          .snapshot.equals(newSnapshot);
+      });
+
+      test('no truncate event log for another queue', () async {
+        await prepare();
+        final snapshot = eg.serverSnapshot(account: eg.selfAccount,
+          queueId: 'queue1', lastEventId: 10);
+        await storeSnapshot(snapshot);
+        await append(eg.selfAccount, 11, '[{"id":11}]');
+
+        check(await db.truncateServerEventLog(eg.selfAccount.id,
+          queueId: 'queue0', lastEventId: 12)).isFalse();
+        check(await load(eg.selfAccount)).isNotNull()
+          ..snapshot.equals(snapshot.copyWith(lastEventId: 11))
+          ..eventBatches.deepEquals([isBatch(11, '[{"id":11}]')]);
+      });
+
+      test('no truncate event log without snapshot', () async {
+        await prepare();
+        check(await db.truncateServerEventLog(eg.selfAccount.id,
+          queueId: 'queue1', lastEventId: 12)).isFalse();
+        check(await db.select(db.serverSnapshots).get()).isEmpty();
+      });
+
       test('load data gives event batches in order', () async {
         await prepare();
         await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
@@ -484,6 +538,7 @@ void main() {
         check(await db.loadServerSnapshotInfo(eg.selfAccount.id)).equals((
           queueId: 'queue1', lastEventId: 10,
           appVersion: '2.0.0+3', timestamp: 1771389742,
+          eventLogTruncated: false,
           snapshotSize: 40, eventBatchesSize: 0,
         ));
 
@@ -493,7 +548,17 @@ void main() {
         check(await db.loadServerSnapshotInfo(eg.selfAccount.id)).equals((
           queueId: 'queue1', lastEventId: 14,
           appVersion: '2.0.0+3', timestamp: 1771389742,
+          eventLogTruncated: false,
           snapshotSize: 40, eventBatchesSize: 11 + 21,
+        ));
+
+        await db.truncateServerEventLog(eg.selfAccount.id,
+          queueId: 'queue1', lastEventId: 15);
+        check(await db.loadServerSnapshotInfo(eg.selfAccount.id)).equals((
+          queueId: 'queue1', lastEventId: 15,
+          appVersion: '2.0.0+3', timestamp: 1771389742,
+          eventLogTruncated: true,
+          snapshotSize: 40, eventBatchesSize: 0,
         ));
       });
 

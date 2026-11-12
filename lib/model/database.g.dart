@@ -2160,6 +2160,21 @@ class $ServerSnapshotsTable extends ServerSnapshots
     type: DriftSqlType.int,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _eventLogTruncatedMeta = const VerificationMeta(
+    'eventLogTruncated',
+  );
+  @override
+  late final GeneratedColumn<bool> eventLogTruncated = GeneratedColumn<bool>(
+    'event_log_truncated',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("event_log_truncated" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     accountId,
@@ -2167,6 +2182,7 @@ class $ServerSnapshotsTable extends ServerSnapshots
     lastEventId,
     appVersion,
     timestamp,
+    eventLogTruncated,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -2221,6 +2237,15 @@ class $ServerSnapshotsTable extends ServerSnapshots
     } else if (isInserting) {
       context.missing(_timestampMeta);
     }
+    if (data.containsKey('event_log_truncated')) {
+      context.handle(
+        _eventLogTruncatedMeta,
+        eventLogTruncated.isAcceptableOrUnknown(
+          data['event_log_truncated']!,
+          _eventLogTruncatedMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -2250,6 +2275,10 @@ class $ServerSnapshotsTable extends ServerSnapshots
         DriftSqlType.int,
         data['${effectivePrefix}timestamp'],
       )!,
+      eventLogTruncated: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}event_log_truncated'],
+      )!,
     );
   }
 
@@ -2267,11 +2296,12 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
   /// This corresponds to [InitialSnapshot.queueId].
   final String queueId;
 
-  /// The ID of the last event received on the queue and stored,
+  /// The ID of the last event received on the queue and recorded here,
   /// i.e. the event-queue position to resume from.
   ///
   /// This starts out as [InitialSnapshot.lastEventId],
-  /// and advances as batches of events are received.
+  /// and advances as batches of events are received,
+  /// whether or not they're stored (see [eventLogTruncated]).
   final int lastEventId;
 
   /// The app version that stored the snapshot,
@@ -2280,12 +2310,23 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
 
   /// When the snapshot was registered, in seconds since the Unix epoch.
   final int timestamp;
+
+  /// Whether events received on the queue have been left out
+  /// of [ServerEventBatches], because there were too many to be worth replaying.
+  ///
+  /// When true, the account has no [ServerEventBatch]es,
+  /// and the snapshot is usable only without the events since it.
+  /// The [lastEventId] still advances as events are received.
+  ///
+  /// See [AppDatabase.truncateServerEventLog].
+  final bool eventLogTruncated;
   const ServerSnapshot({
     required this.accountId,
     required this.queueId,
     required this.lastEventId,
     required this.appVersion,
     required this.timestamp,
+    required this.eventLogTruncated,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -2295,6 +2336,7 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
     map['last_event_id'] = Variable<int>(lastEventId);
     map['app_version'] = Variable<String>(appVersion);
     map['timestamp'] = Variable<int>(timestamp);
+    map['event_log_truncated'] = Variable<bool>(eventLogTruncated);
     return map;
   }
 
@@ -2305,6 +2347,7 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       lastEventId: Value(lastEventId),
       appVersion: Value(appVersion),
       timestamp: Value(timestamp),
+      eventLogTruncated: Value(eventLogTruncated),
     );
   }
 
@@ -2319,6 +2362,7 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       lastEventId: serializer.fromJson<int>(json['lastEventId']),
       appVersion: serializer.fromJson<String>(json['appVersion']),
       timestamp: serializer.fromJson<int>(json['timestamp']),
+      eventLogTruncated: serializer.fromJson<bool>(json['eventLogTruncated']),
     );
   }
   @override
@@ -2330,6 +2374,7 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       'lastEventId': serializer.toJson<int>(lastEventId),
       'appVersion': serializer.toJson<String>(appVersion),
       'timestamp': serializer.toJson<int>(timestamp),
+      'eventLogTruncated': serializer.toJson<bool>(eventLogTruncated),
     };
   }
 
@@ -2339,12 +2384,14 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
     int? lastEventId,
     String? appVersion,
     int? timestamp,
+    bool? eventLogTruncated,
   }) => ServerSnapshot(
     accountId: accountId ?? this.accountId,
     queueId: queueId ?? this.queueId,
     lastEventId: lastEventId ?? this.lastEventId,
     appVersion: appVersion ?? this.appVersion,
     timestamp: timestamp ?? this.timestamp,
+    eventLogTruncated: eventLogTruncated ?? this.eventLogTruncated,
   );
   ServerSnapshot copyWithCompanion(ServerSnapshotsCompanion data) {
     return ServerSnapshot(
@@ -2357,6 +2404,9 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           ? data.appVersion.value
           : this.appVersion,
       timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
+      eventLogTruncated: data.eventLogTruncated.present
+          ? data.eventLogTruncated.value
+          : this.eventLogTruncated,
     );
   }
 
@@ -2367,14 +2417,21 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp')
+          ..write('timestamp: $timestamp, ')
+          ..write('eventLogTruncated: $eventLogTruncated')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(accountId, queueId, lastEventId, appVersion, timestamp);
+  int get hashCode => Object.hash(
+    accountId,
+    queueId,
+    lastEventId,
+    appVersion,
+    timestamp,
+    eventLogTruncated,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -2383,7 +2440,8 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           other.queueId == this.queueId &&
           other.lastEventId == this.lastEventId &&
           other.appVersion == this.appVersion &&
-          other.timestamp == this.timestamp);
+          other.timestamp == this.timestamp &&
+          other.eventLogTruncated == this.eventLogTruncated);
 }
 
 class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
@@ -2392,12 +2450,14 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
   final Value<int> lastEventId;
   final Value<String> appVersion;
   final Value<int> timestamp;
+  final Value<bool> eventLogTruncated;
   const ServerSnapshotsCompanion({
     this.accountId = const Value.absent(),
     this.queueId = const Value.absent(),
     this.lastEventId = const Value.absent(),
     this.appVersion = const Value.absent(),
     this.timestamp = const Value.absent(),
+    this.eventLogTruncated = const Value.absent(),
   });
   ServerSnapshotsCompanion.insert({
     this.accountId = const Value.absent(),
@@ -2405,6 +2465,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     required int lastEventId,
     required String appVersion,
     required int timestamp,
+    this.eventLogTruncated = const Value.absent(),
   }) : queueId = Value(queueId),
        lastEventId = Value(lastEventId),
        appVersion = Value(appVersion),
@@ -2415,6 +2476,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     Expression<int>? lastEventId,
     Expression<String>? appVersion,
     Expression<int>? timestamp,
+    Expression<bool>? eventLogTruncated,
   }) {
     return RawValuesInsertable({
       if (accountId != null) 'account_id': accountId,
@@ -2422,6 +2484,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
       if (lastEventId != null) 'last_event_id': lastEventId,
       if (appVersion != null) 'app_version': appVersion,
       if (timestamp != null) 'timestamp': timestamp,
+      if (eventLogTruncated != null) 'event_log_truncated': eventLogTruncated,
     });
   }
 
@@ -2431,6 +2494,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     Value<int>? lastEventId,
     Value<String>? appVersion,
     Value<int>? timestamp,
+    Value<bool>? eventLogTruncated,
   }) {
     return ServerSnapshotsCompanion(
       accountId: accountId ?? this.accountId,
@@ -2438,6 +2502,7 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
       lastEventId: lastEventId ?? this.lastEventId,
       appVersion: appVersion ?? this.appVersion,
       timestamp: timestamp ?? this.timestamp,
+      eventLogTruncated: eventLogTruncated ?? this.eventLogTruncated,
     );
   }
 
@@ -2459,6 +2524,9 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     if (timestamp.present) {
       map['timestamp'] = Variable<int>(timestamp.value);
     }
+    if (eventLogTruncated.present) {
+      map['event_log_truncated'] = Variable<bool>(eventLogTruncated.value);
+    }
     return map;
   }
 
@@ -2469,7 +2537,8 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp')
+          ..write('timestamp: $timestamp, ')
+          ..write('eventLogTruncated: $eventLogTruncated')
           ..write(')'))
         .toString();
   }
@@ -4777,6 +4846,7 @@ typedef $$ServerSnapshotsTableCreateCompanionBuilder =
       required int lastEventId,
       required String appVersion,
       required int timestamp,
+      Value<bool> eventLogTruncated,
     });
 typedef $$ServerSnapshotsTableUpdateCompanionBuilder =
     ServerSnapshotsCompanion Function({
@@ -4785,6 +4855,7 @@ typedef $$ServerSnapshotsTableUpdateCompanionBuilder =
       Value<int> lastEventId,
       Value<String> appVersion,
       Value<int> timestamp,
+      Value<bool> eventLogTruncated,
     });
 
 final class $$ServerSnapshotsTableReferences
@@ -4843,6 +4914,11 @@ class $$ServerSnapshotsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<bool> get eventLogTruncated => $composableBuilder(
+    column: $table.eventLogTruncated,
+    builder: (column) => ColumnFilters(column),
+  );
+
   $$AccountsTableFilterComposer get accountId {
     final $$AccountsTableFilterComposer composer = $composerBuilder(
       composer: this,
@@ -4896,6 +4972,11 @@ class $$ServerSnapshotsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get eventLogTruncated => $composableBuilder(
+    column: $table.eventLogTruncated,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$AccountsTableOrderingComposer get accountId {
     final $$AccountsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -4944,6 +5025,11 @@ class $$ServerSnapshotsTableAnnotationComposer
 
   GeneratedColumn<int> get timestamp =>
       $composableBuilder(column: $table.timestamp, builder: (column) => column);
+
+  GeneratedColumn<bool> get eventLogTruncated => $composableBuilder(
+    column: $table.eventLogTruncated,
+    builder: (column) => column,
+  );
 
   $$AccountsTableAnnotationComposer get accountId {
     final $$AccountsTableAnnotationComposer composer = $composerBuilder(
@@ -5004,12 +5090,14 @@ class $$ServerSnapshotsTableTableManager
                 Value<int> lastEventId = const Value.absent(),
                 Value<String> appVersion = const Value.absent(),
                 Value<int> timestamp = const Value.absent(),
+                Value<bool> eventLogTruncated = const Value.absent(),
               }) => ServerSnapshotsCompanion(
                 accountId: accountId,
                 queueId: queueId,
                 lastEventId: lastEventId,
                 appVersion: appVersion,
                 timestamp: timestamp,
+                eventLogTruncated: eventLogTruncated,
               ),
           createCompanionCallback:
               ({
@@ -5018,12 +5106,14 @@ class $$ServerSnapshotsTableTableManager
                 required int lastEventId,
                 required String appVersion,
                 required int timestamp,
+                Value<bool> eventLogTruncated = const Value.absent(),
               }) => ServerSnapshotsCompanion.insert(
                 accountId: accountId,
                 queueId: queueId,
                 lastEventId: lastEventId,
                 appVersion: appVersion,
                 timestamp: timestamp,
+                eventLogTruncated: eventLogTruncated,
               ),
           withReferenceMapper: (p0) => p0
               .map(

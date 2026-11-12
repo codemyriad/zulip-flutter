@@ -46,6 +46,7 @@ extension ServerSnapshotChecks on Subject<ServerSnapshot> {
   Subject<int> get lastEventId => has((x) => x.lastEventId, 'lastEventId');
   Subject<String> get appVersion => has((x) => x.appVersion, 'appVersion');
   Subject<int> get timestamp => has((x) => x.timestamp, 'timestamp');
+  Subject<bool> get eventLogTruncated => has((x) => x.eventLogTruncated, 'eventLogTruncated');
 }
 
 extension ServerSnapshotBlobChecks on Subject<ServerSnapshotBlob> {
