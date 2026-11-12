@@ -2076,6 +2076,11 @@ class UpdateMachine {
 
         final events = result.events;
         for (final event in events) {
+          if (_eventQueueUnconfirmed && event is TypingEvent) {
+            // This may be from long ago, while the app wasn't running;
+            // showing it as current would be misleading.
+            continue;
+          }
           try {
             await store.handleEvent(event);
             if (_disposed) return;

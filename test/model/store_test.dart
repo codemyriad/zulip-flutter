@@ -20,6 +20,7 @@ import 'package:zulip/log.dart';
 import 'package:zulip/model/actions.dart';
 import 'package:zulip/model/connectivity.dart';
 import 'package:zulip/model/database.dart';
+import 'package:zulip/model/narrow.dart';
 import 'package:zulip/model/presence.dart';
 import 'package:zulip/model/server_support.dart';
 import 'package:zulip/model/store.dart';
@@ -2340,6 +2341,38 @@ void main() {
       check(connection.takeRequests().whereType<http.Request>()
         .where((request) => request.url.path == '/api/v1/register')).isEmpty();
       checkNoErrorReported();
+    }));
+
+    test('skip typing events from resumed queue\'s catch-up', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      final narrow = DmNarrow.withUser(eg.otherUser.userId,
+        selfUserId: eg.selfUser.userId);
+      Map<String, dynamic> typingStartEvent(int id) => {
+        'id': id, 'type': 'typing', 'op': 'start', 'message_type': 'direct',
+        'sender': {'user_id': eg.otherUser.userId, 'email': eg.otherUser.email},
+        'recipients': [eg.selfUser, eg.otherUser].map((user) =>
+          {'user_id': user.userId, 'email': user.email}).toList()};
+      globalStore.prepareResumedPollResponse = (connection) =>
+        prepareCatchUpEvents(connection, [
+          typingStartEvent(11),
+          rawJson(settingsEvent(12)),
+        ]);
+      seed();
+      await load();
+      async.elapse(Duration.zero);
+      check(store.typingStatus.typistIdsInNarrow(narrow)).isEmpty();
+      check(store.userSettings.twentyFourHourTime)
+        .equals(TwentyFourHourTimeMode.twentyFourHour);
+      check(updateMachine.lastEventId).equals(12);
+      check(globalStore.backend.serverSnapshotOf(eg.selfAccount.id)!)
+        .lastEventId.equals(12);
+
+      // Later typing events are current, and get handled.
+      prepareCatchUpEvents(connection, [typingStartEvent(13)]);
+      updateMachine.debugAdvanceLoop();
+      async.elapse(Duration.zero);
+      check(store.typingStatus.typistIdsInNarrow(narrow))
+        .single.equals(eg.otherUser.userId);
     }));
 
     test('BAD_REQUEST after a first successful poll is unexpected', () => awaitFakeAsync((async) async {
