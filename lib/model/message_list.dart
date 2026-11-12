@@ -5,10 +5,12 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
 import '../api/backoff.dart';
+import '../api/core.dart';
 import '../api/exception.dart';
 import '../api/model/events.dart';
 import '../api/model/model.dart';
 import '../api/route/messages.dart';
+import '../log.dart';
 import 'algorithms.dart';
 import 'channel.dart';
 import 'content.dart';
@@ -21,6 +23,12 @@ export '../api/route/messages.dart' show Anchor, AnchorCode, NumericAnchor;
 
 /// The number of messages to fetch in each request.
 const kMessageListFetchBatchSize = 100; // TODO tune
+
+/// How long [MessageListView.fetchInitial] waits on its request
+/// before showing cached messages, if any.
+///
+/// See [MessageListView.showingCachedMessages].
+const kShowCachedMessagesDelay = Duration(seconds: 1);
 
 /// A message, or one of its siblings shown in the message list.
 ///
@@ -92,6 +100,12 @@ enum FetchingStatus {
 
   /// The model has made a `fetchInitial` request, which hasn't succeeded.
   fetchInitial,
+
+  /// Like [fetchInitial], but meanwhile the model is showing messages
+  /// from an earlier fetch of the narrow, stored on the device.
+  ///
+  /// See [MessageListView.showingCachedMessages].
+  fetchInitialShowingCached,
 
   /// The model made a successful `fetchInitial` request,
   /// and has no outstanding requests or backoff.
@@ -178,10 +192,35 @@ mixin _MessageSequence {
   ///
   /// This allows the UI to distinguish "still working on fetching messages"
   /// from "there are in fact no messages here".
+  ///
+  /// This is also true while [showingCachedMessages],
+  /// when the results are those of an earlier fetch.
   bool get fetched => switch (_status) {
     FetchingStatus.unstarted || FetchingStatus.fetchInitial => false,
     _ => true,
   };
+
+  /// Whether [messages] are from an earlier fetch of [narrow],
+  /// stored on the device, while the initial fetch is still being retried.
+  ///
+  /// This happens when the initial fetch fails in a way that may be temporary,
+  /// for example because the device is offline, or is slow to complete.
+  /// See [MessageListView.fetchInitial].
+  /// When the fetch succeeds, its results replace these messages.
+  ///
+  /// While this is true, [fetched] and [busyFetchingMore] are true,
+  /// and [haveOldest] and [haveNewest] are false,
+  /// so no further fetches are made;
+  /// [oldestFetchedMessageId] and [newestFetchedMessageId] are null;
+  /// and there are no [outboxMessages].
+  ///
+  /// The messages are as of when the stored fetch was made,
+  /// the last time the narrow was opened from its newest or first unread message;
+  /// they don't reflect events received after that,
+  /// except for read and starred state, which come from the store.
+  /// Where the store has a message, its copy is used instead.
+  bool get showingCachedMessages =>
+    _status == FetchingStatus.fetchInitialShowingCached;
 
   /// Whether we know we have the oldest messages for this narrow.
   ///
@@ -203,8 +242,13 @@ mixin _MessageSequence {
   /// as a result of an existing recent request.
   /// This is true both when the recent request is still outstanding,
   /// and when it failed and the backoff from that is still in progress.
+  ///
+  /// This is also true while [showingCachedMessages],
+  /// because the initial fetch is still in progress.
   bool get busyFetchingMore => switch (_status) {
-    FetchingStatus.fetchingMore || FetchingStatus.backoff => true,
+    FetchingStatus.fetchingMore
+      || FetchingStatus.backoff
+      || FetchingStatus.fetchInitialShowingCached => true,
     _ => false,
   };
 
@@ -219,8 +263,19 @@ mixin _MessageSequence {
   /// See [_cancelFetchInitial].
   Completer<void>? _fetchInitialAbort;
 
+  /// The timer after which [MessageListView.fetchInitial]
+  /// shows cached messages if its request hasn't completed;
+  /// see [kShowCachedMessagesDelay].
+  Timer? _showCachedMessagesTimer;
+
+  void _cancelShowCachedMessagesTimer() {
+    _showCachedMessagesTimer?.cancel();
+    _showCachedMessagesTimer = null;
+  }
+
   /// Stop the retry loop of [MessageListView.fetchInitial], if running,
-  /// from waiting further on its request or backoff.
+  /// from waiting further on its request or backoff,
+  /// and cancel its timer for showing cached messages.
   ///
   /// The loop also needs to see, when it resumes, that it should stop;
   /// for example because [generation] has changed.
@@ -228,6 +283,7 @@ mixin _MessageSequence {
     final abort = _fetchInitialAbort;
     _fetchInitialAbort = null;
     abort?.complete();
+    _cancelShowCachedMessagesTimer();
   }
 
   /// The parsed message contents, as a list parallel to [messages].
@@ -940,6 +996,15 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// or the store is disposed.
   /// See [_isRetryableFetchInitialError].
   /// On other errors, this throws.
+  ///
+  /// Meanwhile, if the request has failed, or has taken longer than
+  /// [kShowCachedMessagesDelay], or the event stream is recovering,
+  /// this shows the messages from the narrow's stored earlier fetch, if any.
+  /// See [showingCachedMessages].
+  /// A fetch is stored after it succeeds, if [narrow] isn't a keyword search
+  /// (see [messageFetchCacheKey]) and [anchor] is
+  /// [AnchorCode.newest] or [AnchorCode.firstUnread];
+  /// a stored fetch is shown only for those anchors too.
   Future<void> fetchInitial() async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
@@ -967,16 +1032,50 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // will want to see again on opening this narrow again later,
     // so keep a copy, to show if the fetch then fails or is slow.
     final cacheKey = messageFetchCacheKey(narrow);
-    final shouldStoreFetch = cacheKey != null && switch (anchor) {
+    final useCache = cacheKey != null && switch (anchor) {
       AnchorCode.newest || AnchorCode.firstUnread => true,
       _ => false,
     };
+
+    // Meanwhile, read any stored fetch, in parallel with the request.
+    GetMessagesResult? cachedResult;
+    bool mayShowCached = useCache;
+    bool shouldShowCached = false;
+    void maybeShowCached() {
+      if (isStale() || !mayShowCached || !shouldShowCached) return;
+      final result = cachedResult;
+      if (result == null) return;
+      assert(_status == FetchingStatus.fetchInitial);
+      mayShowCached = false;
+      _showCachedMessages(result);
+    }
+    if (useCache) {
+      assert(_showCachedMessagesTimer == null);
+      _showCachedMessagesTimer = Timer(kShowCachedMessagesDelay, () {
+        _showCachedMessagesTimer = null;
+        shouldShowCached = true;
+        maybeShowCached();
+      });
+      unawaited(_loadCachedMessageFetch(cacheKey).then((result) {
+        if (isStale()) return;
+        if (result == null) {
+          mayShowCached = false;
+          _cancelShowCachedMessagesTimer();
+          return;
+        }
+        cachedResult = result;
+        // When the event stream is having trouble,
+        // this request probably is too; don't wait for it.
+        if (store.isRecoveringEventStream) shouldShowCached = true;
+        maybeShowCached();
+      }));
+    }
 
     BackoffMachine? backoffMachine;
     GetMessagesResult result;
     BytesBuilder? rawBody;
     while (true) {
-      rawBody = shouldStoreFetch ? BytesBuilder(copy: false) : null;
+      rawBody = useCache ? BytesBuilder(copy: false) : null;
       try {
         result = await getMessages(store.connection,
           narrow: narrow.apiEncode(),
@@ -992,13 +1091,22 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         if (isStale()) return;
         if (!_isRetryableFetchInitialError(e)) {
           _fetchInitialAbort = null;
+          mayShowCached = false;
+          _cancelShowCachedMessagesTimer();
           if (cacheKey != null && e is ZulipApiException) {
             // The narrow may be gone, or no longer accessible to the user;
             // in any case, don't keep showing its stored messages.
             unawaited(store.deleteCachedMessageFetch(cacheKey));
           }
+          if (showingCachedMessages) {
+            _clearContents();
+            _status = FetchingStatus.fetchInitial;
+            notifyListeners(); // [_setStatus] wouldn't, as [fetched] is now false
+          }
           rethrow;
         }
+        shouldShowCached = true;
+        maybeShowCached();
       }
       // TODO(log) the error
       final wake = _fetchInitialBackoffWake = Completer<void>();
@@ -1014,6 +1122,12 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
     if (isStale()) return;
     _fetchInitialAbort = null;
+    mayShowCached = false;
+    _cancelShowCachedMessagesTimer();
+    if (showingCachedMessages) {
+      // Replace the cached messages with the fresh ones.
+      _clearContents();
+    }
 
     _oldestFetchedMessageId = result.messages.firstOrNull?.id;
     _newestFetchedMessageId = result.messages.lastOrNull?.id;
@@ -1055,7 +1169,94 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       }
     }
 
-    _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+    assert(_status == FetchingStatus.fetchInitial
+      || _status == FetchingStatus.fetchInitialShowingCached);
+    _setStatus(FetchingStatus.idle);
+  }
+
+  /// Read and parse the stored fetch for [cacheKey], if any.
+  ///
+  /// If the stored data doesn't parse, this deletes it and returns null.
+  Future<GetMessagesResult?> _loadCachedMessageFetch(String cacheKey) async {
+    final data = await store.loadCachedMessageFetch(cacheKey);
+    if (data == null) return null;
+    try {
+      return GetMessagesResult.fromJson(
+        jsonUtf8Decoder.convert(data) as Map<String, dynamic>);
+    } catch (e) {
+      assert(debugLog('Error parsing cached message fetch: $e')); // TODO(log)
+      unawaited(store.deleteCachedMessageFetch(cacheKey));
+      return null;
+    }
+  }
+
+  /// Show the messages of [cached], a stored earlier fetch of [narrow],
+  /// while [fetchInitial] keeps trying.
+  ///
+  /// The messages are filtered by what the store knows now:
+  /// for example a message moved out of [narrow], into a muted topic,
+  /// or into a channel the user can no longer access, is left out.
+  /// If no messages are left, this leaves the view as it is.
+  ///
+  /// See [showingCachedMessages].
+  void _showCachedMessages(GetMessagesResult cached) {
+    assert(_status == FetchingStatus.fetchInitial);
+    assert(messages.isEmpty && outboxMessages.isEmpty);
+
+    final toShow = <Message>[];
+    for (final cachedMessage in cached.messages) {
+      // Prefer the store's copy, which events have kept up to date.
+      // Leave the store alone otherwise: this data may be stale,
+      // and no event would come to correct it.
+      final message = store.messages[cachedMessage.id]
+        ?? _updateCachedMessageFlags(cachedMessage);
+      if (message is StreamMessage) {
+        final channel = store.streams[message.streamId];
+        if (channel == null || !store.selfHasContentAccess(channel)) continue;
+      }
+      if (!_messageBelongsHere(message)) continue;
+      toShow.add(message);
+    }
+    if (toShow.isEmpty) return;
+
+    // The bottom slice will start at the anchor message, as in [fetchInitial].
+    // Find that from [anchor] and the current unread state;
+    // the stored result's own anchor is as of the earlier fetch.
+    final anchorId = switch (anchor) {
+      AnchorCode.firstUnread => toShow.firstWhereOrNull(
+        (message) => !message.flags.contains(MessageFlag.read))?.id,
+      _ => null,
+    } ?? toShow.last.id;
+    bool reachedAnchor = false;
+    for (final message in toShow) {
+      if (!reachedAnchor) {
+        // Push the previous message into the top slice.
+        middleMessage = messages.length;
+        reachedAnchor = message.id >= anchorId;
+      }
+      _addMessage(message);
+    }
+    _setStatus(FetchingStatus.fetchInitialShowingCached,
+      was: FetchingStatus.fetchInitial);
+  }
+
+  /// Update the read and starred flags of [message], from a stored fetch,
+  /// to the store's current knowledge, which events have kept up to date.
+  ///
+  /// The [message] must not be one in the store; this mutates it.
+  Message _updateCachedMessageFlags(Message message) {
+    assert(!identical(store.messages[message.id], message));
+    final flags = message.flags;
+    final isUnread = store.unreads.isUnread(message.id);
+    if (isUnread != null) { // if unknown, keep the stored flag
+      flags.remove(MessageFlag.read);
+      if (!isUnread) flags.add(MessageFlag.read);
+    }
+    flags.remove(MessageFlag.starred);
+    if (store.starredMessages.contains(message.id)) {
+      flags.add(MessageFlag.starred);
+    }
+    return message;
   }
 
   /// Completed to cut short the backoff wait in progress, if any,

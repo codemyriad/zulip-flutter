@@ -11,6 +11,7 @@ import 'package:test/scaffolding.dart';
 import 'package:zulip/api/backoff.dart';
 import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/events.dart';
+import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
@@ -88,6 +89,7 @@ void main() {
     Narrow narrow = const CombinedFeedNarrow(),
     Anchor anchor = AnchorCode.newest,
     List<int>? starredMessages,
+    UnreadMessagesSnapshot? unreadMsgs,
     ZulipStream? stream,
     List<User>? users,
     List<int>? mutedUserIds,
@@ -97,7 +99,8 @@ void main() {
     final globalStore = eg.globalStore(accounts: [eg.selfAccount]);
     backend = globalStore.backend;
     store = eg.store(globalStore: globalStore,
-      initialSnapshot: eg.initialSnapshot(starredMessages: starredMessages));
+      initialSnapshot: eg.initialSnapshot(
+        starredMessages: starredMessages, unreadMsgs: unreadMsgs));
     await store.addStream(stream);
     await store.addSubscription(subscription);
     await store.addUsers([...?users, eg.selfUser]);
@@ -838,6 +841,620 @@ void main() {
         model.dispose();
         await fetchFuture;
       }));
+    });
+
+    group('show while fetchInitial retries', () {
+      void prepareNetworkException() {
+        connection.prepare(httpException: const SocketException('failed'));
+      }
+
+      void prepareSuccess(List<Message> messages, {Duration delay = Duration.zero}) {
+        connection.prepare(delay: delay,
+          json: newestResult(foundOldest: true, messages: messages).toJson());
+      }
+
+      void checkShowingCached(List<Message> messages) {
+        check(model)
+          ..showingCachedMessages.isTrue()
+          ..fetched.isTrue()
+          ..haveOldest.isFalse()
+          ..haveNewest.isFalse()
+          ..busyFetchingMore.isTrue();
+        checkHasMessages(messages);
+      }
+
+      void checkWaiting() {
+        check(model)
+          ..showingCachedMessages.isFalse()
+          ..fetched.isFalse();
+      }
+
+      /// Set up a [CombinedFeedNarrow] view with a stored fetch
+      /// of some messages in [channel], and start [MessageListView.fetchInitial]
+      /// with the request failing.
+      ///
+      /// The cached messages appear once the cache read finishes.
+      Future<(Future<void>, List<Message>)> prepareFailingWithCache({
+        Future<void>? loadGate,
+      }) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        backend.loadCachedMessageFetchGate = loadGate;
+        final cached = List.generate(3, (i) => eg.streamMessage(stream: channel));
+        seedCachedFetch(narrow, cached);
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        return (fetchFuture, cached);
+      }
+
+      test('show when request fails; replace when retry succeeds', () => awaitFakeAsync((async) async {
+        final (fetchFuture, cached) = await prepareFailingWithCache();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+        check(model)
+          ..oldestFetchedMessageId.isNull()
+          ..newestFetchedMessageId.isNull();
+        // The store doesn't learn of the cached messages.
+        check(store.messages).isEmpty();
+
+        final fresh = [cached.last, eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh);
+        async.elapse(const Duration(milliseconds: 100)); // max first backoff
+        checkNotifiedOnce();
+        check(model)
+          ..showingCachedMessages.isFalse()
+          ..haveOldest.isTrue()
+          ..haveNewest.isTrue()
+          ..busyFetchingMore.isFalse();
+        checkHasMessages(fresh);
+        check(store.messages.keys).unorderedEquals(fresh.map((m) => m.id));
+        await fetchFuture;
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('fetchOlder and fetchNewer do nothing while showing cached', () => awaitFakeAsync((async) async {
+        final (fetchFuture, cached) = await prepareFailingWithCache();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+        connection.takeRequests();
+
+        await model.fetchOlder();
+        await model.fetchNewer();
+        checkNotNotified();
+        check(connection.takeRequests()).isEmpty();
+
+        model.dispose();
+        await fetchFuture;
+      }));
+
+      test('show after kShowCachedMessagesDelay while request is pending', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, cached);
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay * 2);
+        final fetchFuture = model.fetchInitial();
+
+        async.elapse(kShowCachedMessagesDelay - const Duration(milliseconds: 1));
+        checkNotNotified();
+        checkWaiting();
+
+        async.elapse(const Duration(milliseconds: 1));
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotifiedOnce();
+        check(model).showingCachedMessages.isFalse();
+        checkHasMessages(fresh);
+        await fetchFuture;
+      }));
+
+      test('not shown when request succeeds sooner', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay ~/ 2);
+        final fetchFuture = model.fetchInitial();
+
+        async.elapse(kShowCachedMessagesDelay ~/ 2);
+        checkNotifiedOnce();
+        checkHasMessages(fresh);
+        await fetchFuture;
+        check(async.pendingTimers).isEmpty();
+
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotNotified();
+        check(model).showingCachedMessages.isFalse();
+      }));
+
+      test('show at once while event stream is recovering', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, cached);
+        store.isRecoveringEventStream = true;
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay * 2);
+        final fetchFuture = model.fetchInitial();
+
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(kShowCachedMessagesDelay * 2);
+        checkNotifiedOnce();
+        checkHasMessages(fresh);
+        await fetchFuture;
+      }));
+
+      test('cache read finishes after request fails', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        final (fetchFuture, cached) = await prepareFailingWithCache(loadGate: gate.future);
+        async.elapse(Duration.zero);
+        checkNotNotified();
+        checkWaiting();
+
+        gate.complete();
+        async.flushMicrotasks();
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        model.dispose();
+        await fetchFuture;
+      }));
+
+      test('cache read finishes after request succeeds: not shown', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        backend.loadCachedMessageFetchGate = gate.future;
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        store.isRecoveringEventStream = true;
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh);
+        await model.fetchInitial();
+        checkNotifiedOnce();
+
+        gate.complete();
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotNotified();
+        check(model).showingCachedMessages.isFalse();
+        checkHasMessages(fresh);
+      }));
+
+      test('disposed during cache read', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
+        async.elapse(Duration.zero);
+
+        model.dispose();
+        gate.complete();
+        async.flushMicrotasks();
+        await fetchFuture;
+        checkNotNotified();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('store disposed during cache read', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
+        async.elapse(Duration.zero);
+
+        store.dispose();
+        gate.complete();
+        async.elapse(kShowCachedMessagesDelay);
+        await fetchFuture;
+        checkNotNotified();
+        checkWaiting();
+      }));
+
+      test('renarrowAndFetch during cache read', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
+        async.elapse(Duration.zero);
+
+        final newNarrow = ChannelNarrow(channel.streamId);
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh);
+        model.renarrowAndFetch(newNarrow, AnchorCode.newest);
+        checkNotifiedOnce();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkHasMessages(fresh);
+
+        gate.complete();
+        async.elapse(kShowCachedMessagesDelay);
+        await fetchFuture;
+        checkNotNotified();
+        check(model).showingCachedMessages.isFalse();
+        checkHasMessages(fresh);
+      }));
+
+      test('renarrowAndFetch during cache read: new view shows its cache on time', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        await prepare(narrow: const CombinedFeedNarrow(), stream: channel);
+        backend.loadCachedMessageFetchGate = gate.future;
+        connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson(),
+          delay: const Duration(minutes: 1));
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+
+        final newNarrow = ChannelNarrow(channel.streamId);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(newNarrow, cached);
+        prepareSuccess([], delay: const Duration(minutes: 1));
+        model.renarrowAndFetch(newNarrow, AnchorCode.newest);
+        checkNotifiedOnce();
+        await fetchFuture;
+
+        // The old view's read finds nothing; the new view's finds its cache.
+        gate.complete();
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        model.dispose();
+      }));
+
+      test('disposed before kShowCachedMessagesDelay: timer canceled', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        prepareSuccess([], delay: const Duration(minutes: 1));
+        final fetchFuture = model.fetchInitial();
+        async.flushMicrotasks();
+        // The fake request's delay, and the timer to show cached messages.
+        check(async.pendingTimers).length.equals(2);
+
+        model.dispose();
+        async.flushMicrotasks();
+        check(async.pendingTimers).single
+          .has((timer) => timer.duration, 'duration').equals(const Duration(minutes: 1));
+        await fetchFuture;
+        checkNotNotified();
+      }));
+
+      test('corrupt data: not shown, and deleted', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        backend.seedCachedMessageFetch(eg.selfAccount.id, messageFetchCacheKey(narrow)!,
+          data: utf8.encode('{"messages": "nonsense"'));
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        checkNotNotified();
+        checkWaiting();
+        check(cachedFetchOf(narrow)).isNull();
+
+        model.dispose();
+        await fetchFuture;
+      }));
+
+      test('not used with numeric anchor', () => awaitFakeAsync((async) async {
+        BackoffMachine.debugDuration = const Duration(seconds: 10);
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        const narrow = CombinedFeedNarrow();
+        final cached = [eg.streamMessage(stream: channel)];
+        await prepare(narrow: narrow, anchor: NumericAnchor(cached.single.id),
+          stream: channel);
+        seedCachedFetch(narrow, cached);
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotNotified();
+        checkWaiting();
+
+        model.dispose();
+        await fetchFuture;
+      }));
+
+      test('error not to retry: clear cached messages', () => awaitFakeAsync((async) async {
+        final (fetchFuture, cached) = await prepareFailingWithCache();
+        final throwsCheck = check(fetchFuture).throws<ZulipApiException>();
+        connection.prepare(apiException: eg.apiBadRequest());
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(const Duration(milliseconds: 100)); // max first backoff
+        await throwsCheck;
+        checkNotifiedOnce();
+        checkWaiting();
+        check(model).messages.isEmpty();
+        check(cachedFetchOf(const CombinedFeedNarrow())).isNull();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('error not to retry, before cache read finishes: not shown', () => awaitFakeAsync((async) async {
+        final gate = Completer<void>();
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        backend.loadCachedMessageFetchGate = gate.future;
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        store.isRecoveringEventStream = true;
+        // Keep the stored fetch, so the read finds it.
+        backend.deleteCachedMessageFetchError = Exception('failed');
+        connection.prepare(apiException: eg.apiBadRequest());
+        await check(model.fetchInitial()).throws<ZulipApiException>();
+        check(cachedFetchOf(narrow)).isNotNull();
+
+        gate.complete();
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotNotified();
+        checkWaiting();
+      }));
+
+      group('position', () {
+        Future<void> checkPosition({
+          required Anchor anchor,
+          required UnreadMessagesSnapshot unreadMsgs,
+          required List<Message> cached,
+          required int expectedMiddleMessage,
+        }) async {
+          const narrow = CombinedFeedNarrow();
+          await prepare(narrow: narrow, anchor: anchor, unreadMsgs: unreadMsgs,
+            stream: channel);
+          seedCachedFetch(narrow, cached);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          await Future<void>.delayed(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached(cached);
+          check(model).middleMessage.equals(expectedMiddleMessage);
+
+          model.dispose();
+          await fetchFuture;
+        }
+
+        UnreadMessagesSnapshot unreadMsgsFor(List<StreamMessage> messages) {
+          return eg.unreadMsgs(channels: [eg.unreadChannelMsgs(
+            streamId: channel.streamId, topic: messages.first.topic.apiName,
+            unreadMessageIds: messages.map((m) => m.id).toList())]);
+        }
+
+        test('anchor newest: at end', () => awaitFakeAsync((async) async {
+          final cached = List.generate(4, (i) => eg.streamMessage(stream: channel));
+          await checkPosition(anchor: AnchorCode.newest,
+            unreadMsgs: unreadMsgsFor(cached.sublist(1)),
+            cached: cached, expectedMiddleMessage: 3);
+        }));
+
+        test('anchor firstUnread: at first message unread now', () => awaitFakeAsync((async) async {
+          // As stored, all are unread; now the first two are read.
+          final cached = List.generate(4, (i) => eg.streamMessage(stream: channel));
+          await checkPosition(anchor: AnchorCode.firstUnread,
+            unreadMsgs: unreadMsgsFor(cached.sublist(2)),
+            cached: cached, expectedMiddleMessage: 2);
+        }));
+
+        test('anchor firstUnread, none unread: at end', () => awaitFakeAsync((async) async {
+          final cached = List.generate(4, (i) => eg.streamMessage(stream: channel));
+          await checkPosition(anchor: AnchorCode.firstUnread,
+            unreadMsgs: eg.unreadMsgs(),
+            cached: cached, expectedMiddleMessage: 3);
+        }));
+      });
+
+      group('flags', () {
+        test('read and starred state from store', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final wasUnreadNowRead = eg.streamMessage(stream: channel, flags: []);
+          final wasReadNowUnread = eg.streamMessage(stream: channel,
+            flags: [MessageFlag.read]);
+          final wasStarredNowNot = eg.streamMessage(stream: channel,
+            flags: [MessageFlag.read, MessageFlag.starred]);
+          final wasNotStarredNowStarred = eg.streamMessage(stream: channel,
+            flags: [MessageFlag.read]);
+          await prepare(narrow: narrow, stream: channel,
+            starredMessages: [wasNotStarredNowStarred.id],
+            unreadMsgs: eg.unreadMsgs(channels: [eg.unreadChannelMsgs(
+              streamId: channel.streamId, topic: wasReadNowUnread.topic.apiName,
+              unreadMessageIds: [wasReadNowUnread.id])]));
+          seedCachedFetch(narrow, [wasUnreadNowRead, wasReadNowUnread,
+            wasStarredNowNot, wasNotStarredNowStarred]);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model.messages.map((m) => m.flags)).deepEquals([
+            [MessageFlag.read],
+            <MessageFlag>[],
+            [MessageFlag.read],
+            [MessageFlag.read, MessageFlag.starred],
+          ]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('read state unknown: keep stored state', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final storedUnread = eg.streamMessage(stream: channel, flags: []);
+          final storedRead = eg.streamMessage(stream: channel, flags: [MessageFlag.read]);
+          await prepare(narrow: narrow, stream: channel,
+            unreadMsgs: eg.unreadMsgs(oldUnreadsMissing: true));
+          seedCachedFetch(narrow, [storedUnread, storedRead]);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model.messages.map((m) => m.flags)).deepEquals([
+            <MessageFlag>[],
+            [MessageFlag.read],
+          ]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+      });
+
+      group('filter', () {
+        Future<void> prepareCached(Narrow narrow, List<Message> cached, {
+          List<int>? starredMessages,
+        }) async {
+          await prepare(narrow: narrow, stream: channel,
+            starredMessages: starredMessages);
+          seedCachedFetch(narrow, cached);
+          prepareNetworkException();
+        }
+
+        test('use the store\'s copy, if any', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final cached = [eg.streamMessage(stream: channel, content: '<p>old</p>'),
+                          eg.streamMessage(stream: channel)];
+          await prepareCached(narrow, cached);
+          final fetchFuture = model.fetchInitial();
+          final storeCopy = eg.streamMessage(id: cached.first.id, stream: channel,
+            content: '<p>edited</p>');
+          await store.addMessage(storeCopy);
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached(cached);
+          check(model.messages.first).identicalTo(storeCopy);
+          check(store.messages.keys).deepEquals([storeCopy.id]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('message moved out of the narrow', () => awaitFakeAsync((async) async {
+          final narrow = ChannelNarrow(channel.streamId);
+          final otherChannel = eg.stream();
+          final cached = [eg.streamMessage(stream: channel),
+                          eg.streamMessage(stream: channel)];
+          await prepareCached(narrow, cached);
+          final fetchFuture = model.fetchInitial();
+          await store.addMessage(eg.streamMessage(id: cached.first.id,
+            stream: otherChannel));
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached([cached.last]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('message in muted topic', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final cached = [eg.streamMessage(stream: channel, topic: 'muted'),
+                          eg.streamMessage(stream: channel, topic: 'other')];
+          await prepareCached(narrow, cached);
+          final fetchFuture = model.fetchInitial();
+          await store.setUserTopic(channel, 'muted', UserTopicVisibilityPolicy.muted);
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached([cached.last]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('message in unknown channel, or one without content access', () => awaitFakeAsync((async) async {
+          const narrow = CombinedFeedNarrow();
+          final unknownChannel = eg.stream();
+          final privateChannel = eg.stream(inviteOnly: true);
+          final cached = [eg.streamMessage(stream: unknownChannel),
+                          eg.streamMessage(stream: privateChannel),
+                          eg.streamMessage(stream: channel)];
+          await prepareCached(narrow, cached);
+          final fetchFuture = model.fetchInitial();
+          await store.addStream(privateChannel);
+          check(store.selfHasContentAccess(privateChannel)).isFalse();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached([cached.last]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('message no longer starred, in starred-messages view', () => awaitFakeAsync((async) async {
+          const narrow = StarredMessagesNarrow();
+          final cached = [
+            eg.streamMessage(stream: channel, flags: [MessageFlag.starred]),
+            eg.streamMessage(stream: channel, flags: [MessageFlag.starred]),
+          ];
+          await prepareCached(narrow, cached,
+            starredMessages: [cached.last.id]);
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          checkShowingCached([cached.last]);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('no messages left: keep waiting', () => awaitFakeAsync((async) async {
+          final unknownChannel = eg.stream();
+          final narrow = ChannelNarrow(unknownChannel.streamId);
+          await prepareCached(narrow,
+            [eg.streamMessage(stream: unknownChannel)]);
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotNotified();
+          checkWaiting();
+
+          model.dispose();
+          await fetchFuture;
+        }));
+      });
+
+      test('topic permalink: keep "with" until fetch succeeds', () => awaitFakeAsync((async) async {
+        final cached = [eg.streamMessage(stream: channel, topic: 'topic')];
+        final narrow = TopicNarrow(channel.streamId, eg.t('topic'),
+          with_: cached.single.id);
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, cached);
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+        check(model).narrow.equals(narrow);
+
+        final fresh = [eg.streamMessage(id: cached.single.id,
+          stream: channel, topic: 'topic')];
+        prepareSuccess(fresh);
+        async.elapse(const Duration(milliseconds: 100)); // max first backoff
+        checkNotifiedOnce();
+        check(model).narrow.equals(narrow.sansWith());
+        await fetchFuture;
+      }));
+
+      group('events', () {
+        test('DeleteMessageEvent removes cached message', () => awaitFakeAsync((async) async {
+          final (fetchFuture, cached) = await prepareFailingWithCache();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+
+          await store.handleEvent(
+            eg.deleteMessageEvent([cached.first as StreamMessage]));
+          checkNotifiedOnce();
+          checkShowingCached(cached.sublist(1));
+
+          model.dispose();
+          await fetchFuture;
+        }));
+
+        test('MessageEvent: new message not added', () => awaitFakeAsync((async) async {
+          final (fetchFuture, cached) = await prepareFailingWithCache();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+
+          await store.addMessage(eg.streamMessage(stream: channel));
+          checkNotNotified();
+          checkShowingCached(cached);
+
+          model.dispose();
+          await fetchFuture;
+        }));
+      });
     });
   });
 
@@ -2626,6 +3243,12 @@ void main() {
       }
       if (messages != null) {
         await prepareMessages(foundOldest: false, messages: messages);
+        // These tests aren't about cached messages; keep refetches
+        // (which some delay past [kShowCachedMessagesDelay])
+        // from showing the fetch just stored.
+        if (messageFetchCacheKey(narrow) case final key?) {
+          await store.deleteCachedMessageFetch(key);
+        }
       }
       checkHasMessages(messages ?? []);
     }
@@ -2683,6 +3306,8 @@ void main() {
           // The fetch includes all messages; _messageVisible filters by muting.
           await prepareMessages(foundOldest: false,
             messages: notMovedMessages + movedMessages);
+          // Keep the refetch from showing the fetch just stored.
+          await store.deleteCachedMessageFetch(messageFetchCacheKey(narrow)!);
 
           final postMoveMessages = <StreamMessage>[];
           if (expected == .refetched) {
@@ -4500,10 +5125,12 @@ void main() {
 MessageListView? _lastModel;
 List<Message>? _lastMessages;
 int? _lastMiddleMessage;
+bool? _lastShowingCachedMessages;
 
 void checkInvariants(MessageListView model) {
   if (!model.fetched) {
     check(model)
+      ..showingCachedMessages.isFalse()
       ..messages.isEmpty()
       ..outboxMessages.isEmpty()
       ..oldestFetchedMessageId.isNull()
@@ -4512,11 +5139,25 @@ void checkInvariants(MessageListView model) {
       ..haveNewest.isFalse()
       ..busyFetchingMore.isFalse();
   }
+  if (model.showingCachedMessages) {
+    check(model)
+      ..fetched.isTrue()
+      ..outboxMessages.isEmpty()
+      ..oldestFetchedMessageId.isNull()
+      ..newestFetchedMessageId.isNull()
+      ..haveOldest.isFalse()
+      ..haveNewest.isFalse()
+      ..busyFetchingMore.isTrue();
+  }
   if (model.haveOldest && model.haveNewest) {
     check(model).busyFetchingMore.isFalse();
   }
 
   for (final message in model.messages) {
+    if (model.showingCachedMessages && model.store.messages[message.id] == null) {
+      // A message known only from the cache.
+      continue;
+    }
     check(model.store.messages)[message.id].isNotNull().identicalTo(message);
   }
   if (model.outboxMessages.isNotEmpty) {
@@ -4570,7 +5211,7 @@ void checkInvariants(MessageListView model) {
   check(isSortedWithoutDuplicates(model.outboxMessages.map((m) => m.localMessageId).toList()))
     .isTrue();
 
-  if (model.messages.isNotEmpty) {
+  if (model.messages.isNotEmpty && !model.showingCachedMessages) {
     check(model).oldestFetchedMessageId.isNotNull()
       .isLessOrEqual(model.messages.first.id);
     check(model).newestFetchedMessageId.isNotNull()
@@ -4582,7 +5223,9 @@ void checkInvariants(MessageListView model) {
     ..isLessOrEqual(model.messages.length);
 
   if (identical(model, _lastModel)
-      && model.generation == _lastModel!.generation) {
+      && model.generation == _lastModel!.generation
+      // When fresh messages replace cached ones, the slices start over.
+      && model.showingCachedMessages == _lastShowingCachedMessages) {
     // All messages that were present, and still are, should be on the same side
     // of `middleMessage` (still top or bottom slice respectively) as they were.
     _checkNoIntersection(ListSlice(model.messages, 0, model.middleMessage),
@@ -4595,6 +5238,7 @@ void checkInvariants(MessageListView model) {
   _lastModel = model;
   _lastMessages = model.messages.toList();
   _lastMiddleMessage = model.middleMessage;
+  _lastShowingCachedMessages = model.showingCachedMessages;
 
   check(model).contents.length.equals(model.messages.length);
   for (int i = 0; i < model.contents.length; i++) {
@@ -4703,6 +5347,7 @@ extension MessageListViewChecks on Subject<MessageListView> {
   Subject<List<MessageListItem>> get items => has((x) => x.items, 'items');
   Subject<int> get middleItem => has((x) => x.middleItem, 'middleItem');
   Subject<bool> get fetched => has((x) => x.fetched, 'fetched');
+  Subject<bool> get showingCachedMessages => has((x) => x.showingCachedMessages, 'showingCachedMessages');
   Subject<int?> get oldestFetchedMessageId => has((x) => x.oldestFetchedMessageId, 'oldestFetchedMessageId');
   Subject<int?> get newestFetchedMessageId => has((x) => x.newestFetchedMessageId, 'newestFetchedMessageId');
   Subject<bool> get haveOldest => has((x) => x.haveOldest, 'haveOldest');
