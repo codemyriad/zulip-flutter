@@ -1497,6 +1497,11 @@ class ScrollToBottomButton extends StatelessWidget {
       // so scrolling back there -- at top speed -- shouldn't take too long.
       // Go for it.
       scrollController.position.scrollToEnd();
+    } else if (model.showingCachedMessages) {
+      // The initial fetch is still being retried. Jumping to the end
+      // would start it over, and likely just show these messages again.
+      // Instead, scroll to the end of the cached messages.
+      scrollController.position.scrollToEnd();
     } else {
       // This message list doesn't have the messages for the bottom of history.
       // There could be quite a lot of history between here and there --

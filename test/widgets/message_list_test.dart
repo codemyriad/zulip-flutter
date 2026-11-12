@@ -893,6 +893,22 @@ void main() {
       check(find.text('cached message')).findsNothing();
       check(findBanner).findsNothing();
     });
+
+    testWidgets('scroll-to-bottom button scrolls, without refetching', (tester) async {
+      await setupCached(tester, cachedMessages: List.generate(30,
+        (_) => eg.streamMessage(stream: channel)));
+      final controller = findMessageListScrollController(tester)!;
+      controller.jumpTo(-600);
+      await tester.pump();
+      check(controller.position).extentAfter.isGreaterOrEqual(600);
+
+      await tester.tap(find.byType(ScrollToBottomButton));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      check(controller.position).extentAfter.equals(0);
+      check(connection.takeRequests()).isEmpty();
+      check(store.debugMessageListViews.single.showingCachedMessages).isTrue();
+    });
   });
 
   group('fetch older messages on scroll', () {
