@@ -477,6 +477,19 @@ mixin _MessageSequence {
   /// Reset all [_MessageSequence] data, and cancel any active fetches.
   void _reset() {
     generation += 1;
+    _clearContents();
+    _status = FetchingStatus.unstarted;
+    _fetchBackoffMachine = null;
+  }
+
+  /// Clear [messages], [outboxMessages], and the data derived from them,
+  /// and forget what's been fetched.
+  ///
+  /// Unlike [_reset], this leaves [generation] and the fetching status alone,
+  /// so a fetch in progress can call this and carry on.
+  ///
+  /// This does not call [notifyListeners].
+  void _clearContents() {
     messages.clear();
     middleMessage = 0;
     _oldestFetchedMessageId = null;
@@ -484,8 +497,6 @@ mixin _MessageSequence {
     outboxMessages.clear();
     _haveOldest = false;
     _haveNewest = false;
-    _status = FetchingStatus.unstarted;
-    _fetchBackoffMachine = null;
     contents.clear();
     items.clear();
     middleItem = 0;
