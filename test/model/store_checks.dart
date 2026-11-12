@@ -96,6 +96,7 @@ extension GlobalStoreChecks on Subject<GlobalStore> {
 
 extension PerAccountStoreChecks on Subject<PerAccountStore> {
   Subject<ApiConnection> get connection => has((x) => x.connection, 'connection');
+  Subject<bool> get disposed => has((x) => x.disposed, 'disposed');
   Subject<bool> get isRecoveringEventStream => has((x) => x.isRecoveringEventStream, 'isRecoveringEventStream');
   Subject<String> get queueId => has((x) => x.queueId, 'queueId');
   Subject<Uri> get realmUrl => has((x) => x.realmUrl, 'realmUrl');

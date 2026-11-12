@@ -1011,6 +1011,14 @@ class PerAccountStore extends PerAccountStoreBase with
     autocompleteViewManager.reassemble();
   }
 
+  /// Whether [dispose] has been called.
+  ///
+  /// A store gets disposed when it's replaced by a new one for the same account
+  /// (for example on reloading the account's data from the server),
+  /// or when the account is logged out.
+  /// Code that awaits something and then uses the store,
+  /// such as a retry loop, can check this to stop instead.
+  bool get disposed => _disposed;
   bool _disposed = false;
 
   @override

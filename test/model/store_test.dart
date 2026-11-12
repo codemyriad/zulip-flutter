@@ -602,6 +602,13 @@ void main() {
     check(monitor.updateCount).equals(countBefore);
   }));
 
+  test('PerAccountStore.disposed', () {
+    final store = eg.store();
+    check(store).disposed.isFalse();
+    store.dispose();
+    check(store).disposed.isTrue();
+  });
+
   group('PerAccountStore.handleEvent', () {
     // Mostly this method just dispatches to ChannelStore and MessageStore etc.,
     // and so its tests generally live in the test files for those
