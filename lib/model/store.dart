@@ -1594,6 +1594,8 @@ class UpdateMachine {
   /// without waiting for the server.
   /// Then if the event queue turns out to be gone, or the stored data is
   /// too old or otherwise not worth catching up on through the event queue,
+  /// or the events it catches up on call for a fresh snapshot
+  /// (see [_requiresFreshSnapshot]),
   /// the store gets replaced through the usual reload path,
   /// as when an event queue expires.
   /// Stored data that's unusable is deleted.
@@ -1918,7 +1920,13 @@ class UpdateMachine {
   /// a first batch of events from its event queue.
   ///
   /// Until then, we don't know whether the server still has the event queue,
-  /// at the stored [lastEventId].
+  /// at the stored [lastEventId], or whether our API key still works;
+  /// so [_handlePollError] treats those failures as expected.
+  ///
+  /// That first batch has the events from while the app wasn't running.
+  /// Its typing events are stale, so [poll] skips them;
+  /// and if it calls for a fresh snapshot (see [_requiresFreshSnapshot]),
+  /// [poll] replaces the store after recording the batch.
   bool _eventQueueUnconfirmed = false;
 
   /// Make the register-queue request, with retries.
@@ -2704,7 +2712,8 @@ class _UnusableServerDataException implements Exception {
 }
 
 /// A store loaded from stored server data should be replaced right away;
-/// see [UpdateMachine._replaceStoreImmediately].
+/// see [UpdateMachine._replaceStoreImmediately]
+/// and [UpdateMachine._eventQueueUnconfirmed].
 class _ReplaceImmediatelyException implements Exception {}
 
 class _EventHandlingException implements Exception {
