@@ -35,12 +35,23 @@ enum ImageDiskCachePolicy {
   /// That includes the `/avatar/{user_id}` fallback avatar URL,
   /// realm emoji, and images from outside the realm.
   static ImageDiskCachePolicy forUrl(Uri url, {required Uri realmUrl}) {
-    if (url.queryParameters.containsKey('version')) return cacheFirst;
+    if (_hasQueryParameter(url, 'version')) return cacheFirst;
     if (url.origin == realmUrl.origin
         && url.path.startsWith('/user_uploads/')) {
       return cacheFirst;
     }
     return networkFirst;
+  }
+
+  /// Whether [url]'s query has a parameter named [name].
+  ///
+  /// Unlike [Uri.queryParameters], this doesn't decode the query,
+  /// which would throw on an invalid percent-escape like `%ff`.
+  /// A parameter whose name is percent-encoded is not recognized,
+  /// which errs toward [networkFirst].
+  static bool _hasQueryParameter(Uri url, String name) {
+    return url.query.split('&')
+      .any((param) => param == name || param.startsWith('$name='));
   }
 }
 

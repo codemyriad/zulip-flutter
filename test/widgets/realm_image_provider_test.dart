@@ -49,6 +49,13 @@ void main() {
         ImageDiskCachePolicy.networkFirst);
       checkPolicy('https://other.example/user_uploads/2/ab/xyz/image.png',
         ImageDiskCachePolicy.networkFirst);
+      checkPolicy('https://chat.example/static/image.png?versions=1',
+        ImageDiskCachePolicy.networkFirst);
+    });
+
+    test('network-first for query with invalid percent-escape', () {
+      checkPolicy('https://chat.example/static/image.png?a=%ff',
+        ImageDiskCachePolicy.networkFirst);
     });
   });
 
