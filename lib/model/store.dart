@@ -2458,6 +2458,15 @@ class UpdateMachine {
         // so treat it like a lost event queue.
         isUnexpected = false;
 
+      case ZulipApiException(httpStatus: 401) when _eventQueueUnconfirmed:
+        assert(debugLog('Auth failure resuming stored event queue for $store: $error\n'
+          'Replacing…'));
+        // E.g., the API key was revoked while the app wasn't running.
+        // Reloading registers a new queue, which fails the same way;
+        // then [GlobalStore.loadPerAccount] tells the user, and logs out.
+        // TODO(#1054) handle auth failure directly, here and elsewhere
+        isUnexpected = false;
+
       case _ReplaceImmediatelyException():
         assert(debugLog('Replacing $store, loaded from stored data…'));
         isUnexpected = false;

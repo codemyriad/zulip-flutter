@@ -2375,6 +2375,25 @@ void main() {
         .single.equals(eg.otherUser.userId);
     }));
 
+    test('auth failure on resumed queue: reload quietly, then log out', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      globalStore.prepareResumedPollResponse = (connection) =>
+        connection.prepare(apiException: eg.apiExceptionUnauthorized());
+      globalStore.prepareRegisterQueueResponse = (connection) =>
+        connection.prepare(apiException: eg.apiExceptionUnauthorized());
+      seed();
+      await load();
+      async.elapse(Duration.zero);
+      // The reload's register request failed too, and that led to this.
+      check(lastReportedModalError).equals('Could not connect');
+      check(lastReportedError).isNull();
+      check(globalStore.takeDoRemoveAccountCalls()).single.equals(eg.selfAccount.id);
+
+      async.elapse(TestGlobalStore.removeAccountDuration);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).isNull();
+      check(lastReportedError).isNull();
+    }));
+
     test('BAD_REQUEST after a first successful poll is unexpected', () => awaitFakeAsync((async) async {
       prepare(expectedLoad: ExpectedLoad.persisted);
       seed();
