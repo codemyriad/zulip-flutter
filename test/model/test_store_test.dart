@@ -193,6 +193,12 @@ void main() {
       backend.loadServerDataError = error;
       await check(backend.doLoadServerData(eg.selfAccount.id)).throws<Exception>();
       check(await backend.doLoadServerData(eg.selfAccount.id)).isNotNull();
+
+      backend.clearServerDataError = error;
+      await check(backend.doClearServerData(eg.selfAccount.id)).throws<Exception>();
+      check(backend.serverSnapshotOf(eg.selfAccount.id)).isNotNull();
+      await backend.doClearServerData(eg.selfAccount.id);
+      check(backend.serverSnapshotOf(eg.selfAccount.id)).isNull();
     });
 
     test('append waits for gate', () => awaitFakeAsync((async) async {

@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:checks/checks.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
+import 'package:flutter_test/flutter_test.dart' show WidgetTester, testWidgets;
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
 import 'package:zulip/api/backoff.dart';
@@ -2122,6 +2124,48 @@ void main() {
         ..lastEventId.equals(3);
     }));
 
+    test('append rejected; stop storing, polling continues', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      // As if another load stored a snapshot for another queue.
+      await globalStore.backend.doStoreServerSnapshot(
+        eg.serverSnapshot(account: eg.selfAccount, queueId: 'queue2'),
+        data: utf8.encode(registerQueueBody(queueId: 'queue2')));
+
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(updateMachine.lastEventId).equals(3);
+      check(storedSnapshot()!).queueId.equals('queue2');
+      check(storedEventBatches()).isEmpty();
+
+      // Even if this queue's snapshot is somehow back,
+      // nothing more gets appended for it.
+      await globalStore.backend.doStoreServerSnapshot(
+        eg.serverSnapshot(account: eg.selfAccount,
+          queueId: 'queue1', lastEventId: 1),
+        data: utf8.encode(registerQueueBody(queueId: 'queue1')));
+      preparePollResponse([settingsEvent(4)]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 3);
+      check(storedSnapshot()!).lastEventId.equals(1);
+      check(storedEventBatches()).isEmpty();
+      checkPollingContinues(async, lastEventId: 4);
+    }));
+
+    test('append fails, then clearing fails; polling continues', () => awaitFakeAsync((async) async {
+      await prepare(async);
+      globalStore.backend.appendServerEventsError = Exception('disk full');
+      globalStore.backend.clearServerDataError = Exception('disk I/O error');
+      preparePollResponse([messageEvent]);
+      advancePoll(async);
+      checkPollRequest(lastEventId: 2);
+      check(updateMachine.lastEventId).equals(3);
+      check(store.messages[1003]).isNotNull();
+      checkPollingContinues(async, lastEventId: 3);
+      // Nothing more was appended.
+      check(storedSnapshot()!).lastEventId.equals(2);
+    }));
+
     test('logout while append pending', () => awaitFakeAsync((async) async {
       await prepare(async);
       final gate = Completer<void>();
@@ -2585,6 +2629,15 @@ void main() {
       });
     });
 
+    test('discard data, failing to clear it; load from server', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.network);
+      seed(appVersion: '0.9.0+1');
+      globalStore.backend.clearServerDataError = Exception('disk I/O error');
+      await load();
+      check(store).queueId.equals('fresh-queue');
+      checkNoErrorReported();
+    }));
+
     test('tolerate realm name and icon unlike account; keep account\'s', () => awaitFakeAsync((async) async {
       prepare(expectedLoad: ExpectedLoad.persisted);
       seed(snapshot: snapshotJson(realmName: 'Old name',
@@ -2595,6 +2648,45 @@ void main() {
         ..realmName.equals(eg.selfAccount.realmName)
         ..realmIcon.equals(eg.selfAccount.realmIcon);
     }));
+
+    group('presence', () {
+      Future<void> prepareWithPresence(WidgetTester tester, {
+        required ExpectedLoad expectedLoad,
+      }) async {
+        Presence.debugEnable = true;
+        addTearDown(() => Presence.debugEnable = false);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        prepare(expectedLoad: expectedLoad);
+      }
+
+      /// Dispose the store, and let pending timers finish.
+      Future<void> finish(WidgetTester tester) async {
+        globalStore.perAccountSync(eg.selfAccount.id)!.dispose();
+        await tester.pump(const Duration(minutes: 5));
+      }
+
+      testWidgets('ping right away', (tester) async {
+        await prepareWithPresence(tester, expectedLoad: ExpectedLoad.persisted);
+        seed();
+        await load();
+        await tester.pump();
+        check(connection.takeRequests()).any((it) => it.isA<http.Request>()
+          ..url.path.equals('/api/v1/users/me/presence')
+          ..bodyFields['ping_only'].equals('false'));
+        await finish(tester);
+      });
+
+      testWidgets('no ping when replacing right away', (tester) async {
+        await prepareWithPresence(tester,
+          expectedLoad: ExpectedLoad.persistedReplaced);
+        seed(timestamp: testBinding.utcNow()
+          .subtract(const Duration(hours: 25)).millisecondsSinceEpoch ~/ 1000);
+        await load();
+        await tester.pump();
+        check(connection.takeRequests()).isEmpty();
+        await finish(tester);
+      });
+    });
 
     final now = DateTime.utc(2026, 11, 12, 10, 30);
 
@@ -2643,6 +2735,40 @@ void main() {
       gate.complete();
       await check(future).throws<AccountNotFoundException>();
       check(connection.takeRequests()).isEmpty();
+    }));
+
+    test('logout while replaying stored events', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      seed(eventBatches: [[ChannelCreateEvent(id: 11, streams: [channel])]]);
+      // Finish reading just before the logout finishes, so that it
+      // finishes while replaying.  (Timers due at the same time
+      // fire in the order they were created.)
+      globalStore.backend.loadServerDataGate =
+        Future<void>.delayed(TestGlobalStore.removeAccountDuration);
+      final future = globalStore.perAccount(eg.selfAccount.id);
+      async.flushMicrotasks();
+
+      globalStore.clearCachedApiConnections();
+      unawaited(logOutAccount(globalStore, eg.selfAccount.id));
+      Object? error;
+      unawaited(future.then((_) {}, onError: (Object e) { error = e; }));
+      async.elapse(TestGlobalStore.removeAccountDuration);
+      check(error).isA<AccountNotFoundException>();
+      check(connection.takeRequests()).isEmpty();
+    }));
+
+    test('stored events over size limit but not bigger than snapshot: resume', () => awaitFakeAsync((async) async {
+      UpdateMachine.debugMaxStoredEventBatchesSize = 10;
+      addTearDown(() => UpdateMachine.debugMaxStoredEventBatchesSize = null);
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      seed(eventBatches: [[ChannelCreateEvent(id: 11, streams: [channel])]]);
+      await load();
+      check(store.streams[channel.streamId]).isNotNull();
+      check(connection.takeRequests()).first
+        .which(isResumedPollRequest(lastEventId: 11));
+      async.elapse(Duration.zero);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).identicalTo(store);
+      checkNoErrorReported();
     }));
 
     group('replace immediately', () {

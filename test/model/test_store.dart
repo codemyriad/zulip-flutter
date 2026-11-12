@@ -216,6 +216,10 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// If non-null, each call to [doLoadServerData] first waits for this.
   Future<void>? loadServerDataGate;
 
+  /// If non-null, the next call to [doClearServerData] throws this
+  /// and resets it to null.
+  Object? clearServerDataError;
+
   @override
   Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
     required Uint8List data,
@@ -320,6 +324,10 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
 
   @override
   Future<void> doClearServerData(int accountId) async {
+    if (clearServerDataError case final error?) {
+      clearServerDataError = null;
+      throw error;
+    }
     _serverSnapshots.remove(accountId);
     _serverSnapshotData.remove(accountId);
     _serverEventBatches.remove(accountId);
