@@ -625,7 +625,6 @@ class ChannelStoreImpl extends HasUserStore with ChannelStore {
           case SubscriptionProperty.color:
             subscription.color                  = event.value as int;
           case SubscriptionProperty.isMuted:
-            // TODO(#1255) update [MessageListView] if affected
             subscription.isMuted                = event.value as bool;
           case SubscriptionProperty.pinToTop:
             subscription.pinToTop               = event.value as bool;

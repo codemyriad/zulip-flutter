@@ -1921,6 +1921,66 @@ void main() {
           model.dispose();
           await fetchFuture;
         }));
+
+        group('channel muting', () {
+          final cached = <Message>[eg.streamMessage(stream: channel),
+            eg.dmMessage(from: eg.otherUser, to: [eg.selfUser])];
+
+          Future<void> setChannelMuted(bool value) async {
+            await store.updateSubscription(channel.streamId,
+              SubscriptionProperty.isMuted, value);
+          }
+
+          late Future<void> fetchFuture;
+
+          /// Set up a [CombinedFeedNarrow] view with [cached] stored,
+          /// and start [MessageListView.fetchInitial] as [fetchFuture]
+          /// with the request failing.
+          Future<void> prepareShowingCached({bool channelMuted = false}) async {
+            const narrow = CombinedFeedNarrow();
+            await prepare(narrow: narrow, stream: channel);
+            await setChannelMuted(channelMuted);
+            seedCachedFetch(narrow, cached);
+            prepareNetworkException();
+            fetchFuture = model.fetchInitial();
+          }
+
+          test('channel muted: remove its cached messages', () => awaitFakeAsync((async) async {
+            await prepareShowingCached();
+            async.elapse(Duration.zero);
+            checkNotifiedOnce();
+            checkShowingCached(cached);
+
+            await setChannelMuted(true);
+            checkNotifiedOnce();
+            checkShowingCached([cached.last]);
+
+            model.dispose();
+            await fetchFuture;
+          }));
+
+          test('channel unmuted: refetch from scratch', () => awaitFakeAsync((async) async {
+            await prepareShowingCached(channelMuted: true);
+            async.elapse(Duration.zero);
+            checkNotifiedOnce();
+            checkShowingCached([cached.last]);
+
+            final fresh = [...cached, eg.streamMessage(stream: channel)];
+            prepareSuccess(fresh);
+            await setChannelMuted(false);
+            checkNotifiedOnce();
+            checkWaiting();
+            checkHasMessages([]);
+
+            async.elapse(Duration.zero);
+            checkNotifiedOnce();
+            check(model)
+              ..showingCachedMessages.isFalse()
+              ..haveNewest.isTrue();
+            checkHasMessages(fresh);
+            await fetchFuture;
+          }));
+        });
       });
 
       group('derive from a containing narrow', () {
@@ -2453,6 +2513,37 @@ void main() {
           (timer) => timer.duration == kCachedMessagesWriteDelay)).isEmpty();
 
         model.dispose();
+      }));
+
+      test('channel muted and unmuted: none missing between stored messages', () => awaitFakeAsync((async) async {
+        final channelMessage1 = eg.streamMessage(stream: channel, topic: 'topic');
+        final dmMessage = eg.dmMessage(from: eg.otherUser, to: [eg.selfUser]);
+        await prepareStored(messages: [channelMessage1, dmMessage]);
+
+        await store.updateSubscription(channel.streamId,
+          SubscriptionProperty.isMuted, true);
+        checkNotifiedOnce();
+        checkHasMessages([dmMessage]);
+
+        // A message arrives while the channel is muted, so isn't shown.
+        final channelMessage2 = eg.streamMessage(stream: channel, topic: 'topic');
+        await store.addMessage(channelMessage2);
+        checkNotNotified();
+
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [channelMessage1, dmMessage, channelMessage2]).toJson());
+        await store.updateSubscription(channel.streamId,
+          SubscriptionProperty.isMuted, false);
+        checkNotifiedOnce();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+
+        final channelMessage3 = eg.streamMessage(stream: channel, topic: 'topic');
+        await store.addMessage(channelMessage3);
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async);
+        checkCachedMessages(const CombinedFeedNarrow(),
+          [channelMessage1, dmMessage, channelMessage2, channelMessage3]);
       }));
 
       test('topic moved away: old topic\'s stored messages deleted', () => awaitFakeAsync((async) async {
@@ -4060,6 +4151,201 @@ void main() {
       await fetchFuture;
       checkNotifiedOnce();
       checkHasMessageIds([1]);
+    });
+  });
+
+  group('SubscriptionEvent', () {
+    // ChannelStore.isTopicVisible has its own thorough unit tests.
+    // So these tests focus on the rest of the logic.
+
+    final channel = eg.stream();
+    final otherChannel = eg.stream();
+
+    Future<void> setChannelMuted(bool value) async {
+      await store.updateSubscription(channel.streamId,
+        SubscriptionProperty.isMuted, value);
+    }
+
+    /// Set up [model] on [narrow], subscribed to [channel] and [otherChannel],
+    /// with a topic in [channel] the user has unmuted and one they follow.
+    Future<void> prepareChannels(Narrow narrow, {List<int>? starredMessages}) async {
+      await prepare(narrow: narrow, stream: channel,
+        starredMessages: starredMessages);
+      await store.addStream(otherChannel);
+      await store.addSubscription(eg.subscription(otherChannel));
+      await store.setUserTopic(channel, 'unmuted', UserTopicVisibilityPolicy.unmuted);
+      await store.setUserTopic(channel, 'followed', UserTopicVisibilityPolicy.followed);
+    }
+
+    /// Messages in [channel] (in a topic with no policy, then the unmuted
+    /// and followed topics), then in [otherChannel], then a DM.
+    List<Message> combinedFeedMessages() => [
+      eg.streamMessage(id: 1, stream: channel, topic: 'plain'),
+      eg.streamMessage(id: 2, stream: channel, topic: 'unmuted'),
+      eg.streamMessage(id: 3, stream: channel, topic: 'followed'),
+      eg.streamMessage(id: 4, stream: otherChannel, topic: 'plain'),
+      eg.dmMessage(    id: 5, from: eg.otherUser, to: [eg.selfUser]),
+    ];
+
+    test('mute a channel: remove its messages no longer visible', () => awaitFakeAsync((async) async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+
+      await prepareOutboxMessagesTo([
+        StreamDestination(channel.streamId, eg.t('plain')),
+        StreamDestination(channel.streamId, eg.t('followed')),
+        StreamDestination(otherChannel.streamId, eg.t('plain')),
+      ]);
+      async.elapse(kLocalEchoDebounceDuration);
+      checkNotified(count: 3);
+
+      await setChannelMuted(true);
+      checkNotifiedOnce();
+      checkHasMessageIds([2, 3, 4, 5]);
+      check(model).outboxMessages.deepEquals(<Condition<Object?>>[
+        (it) => it.isA<StreamOutboxMessage>().conversation
+                  ..streamId.equals(channel.streamId)
+                  ..topic.equals(eg.t('followed')),
+        (it) => it.isA<StreamOutboxMessage>().conversation
+                  ..streamId.equals(otherChannel.streamId)
+                  ..topic.equals(eg.t('plain')),
+      ]);
+    }));
+
+    test('mute a channel, no messages affected: no notification', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true,
+        messages: combinedFeedMessages().sublist(1));
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      await setChannelMuted(true);
+      checkNotNotified();
+      checkHasMessageIds([2, 3, 4, 5]);
+    });
+
+    test('unmute a channel: refetch from scratch', () => awaitFakeAsync((async) async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await setChannelMuted(true);
+      final messages = combinedFeedMessages();
+      await prepareMessages(foundOldest: true, messages: messages);
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      connection.prepare(
+        json: newestResult(foundOldest: true, messages: messages).toJson());
+      await setChannelMuted(false);
+      checkNotifiedOnce();
+      check(model).fetched.isFalse();
+      checkHasMessageIds([]);
+
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    }));
+
+    test('unmute a channel before initial fetch completes: do nothing', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await setChannelMuted(true);
+      connection.prepare(json: newestResult(foundOldest: true,
+        messages: combinedFeedMessages()).toJson());
+      final fetchFuture = model.fetchInitial();
+
+      await setChannelMuted(false);
+      checkNotNotified();
+
+      // The new state does get applied when the fetch eventually completes.
+      await fetchFuture;
+      checkNotifiedOnce();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    });
+
+    test('unsubscribe: remove its messages no longer visible', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+
+      await store.removeSubscription(channel.streamId);
+      checkNotifiedOnce();
+      checkHasMessageIds([2, 3, 4, 5]);
+    });
+
+    test('subscribe: refetch from scratch', () => awaitFakeAsync((async) async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await store.removeSubscription(channel.streamId);
+      final messages = combinedFeedMessages();
+      await prepareMessages(foundOldest: true, messages: messages);
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      connection.prepare(
+        json: newestResult(foundOldest: true, messages: messages).toJson());
+      await store.addSubscription(eg.subscription(channel));
+      checkNotifiedOnce();
+      check(model).fetched.isFalse();
+
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    }));
+
+    test('subscribe muted: no effect', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await store.removeSubscription(channel.streamId);
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      await store.addSubscription(eg.subscription(channel, isMuted: true));
+      checkNotNotified();
+      check(model).fetched.isTrue();
+      checkHasMessageIds([2, 3, 4, 5]);
+    });
+
+    test('other subscription property: no effect', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+
+      await store.updateSubscription(channel.streamId,
+        SubscriptionProperty.pinToTop, true);
+      checkNotNotified();
+      check(model).fetched.isTrue();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    });
+
+    group('narrows whose visibility does not depend on it: no effect', () {
+      Future<void> checkNoEffect(Narrow narrow, List<Message> messages, {
+        List<int>? starredMessages,
+      }) async {
+        await prepareChannels(narrow, starredMessages: starredMessages);
+        await prepareMessages(foundOldest: true, messages: messages);
+        checkHasMessages(messages);
+
+        await setChannelMuted(true);
+        checkNotNotified();
+        await setChannelMuted(false);
+        checkNotNotified();
+        await store.removeSubscription(channel.streamId);
+        checkNotNotified();
+        await store.addSubscription(eg.subscription(channel));
+        checkNotNotified();
+        check(model).fetched.isTrue();
+        checkHasMessages(messages);
+      }
+
+      test('ChannelNarrow', () => checkNoEffect(ChannelNarrow(channel.streamId),
+        [eg.streamMessage(stream: channel, topic: 'plain')]));
+
+      test('TopicNarrow', () => checkNoEffect(eg.topicNarrow(channel.streamId, 'plain'),
+        [eg.streamMessage(stream: channel, topic: 'plain')]));
+
+      test('MentionsNarrow', () => checkNoEffect(const MentionsNarrow(),
+        [eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.mentioned])]));
+
+      test('StarredMessagesNarrow', () {
+        final message = eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.starred]);
+        return checkNoEffect(const StarredMessagesNarrow(), [message],
+          starredMessages: [message.id]);
+      });
     });
   });
 

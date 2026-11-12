@@ -1210,6 +1210,8 @@ class PerAccountStore extends PerAccountStoreBase with
           _messages.handleSubscriptionRemoveEvent(event);
         }
         _channels.handleSubscriptionEvent(event);
+        // After _channels, so message lists see the new subscription state.
+        _messages.handleSubscriptionEvent(event);
         notifyListeners();
 
       case ChannelFolderEvent():

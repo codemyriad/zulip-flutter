@@ -1001,8 +1001,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   ///
   /// See also [_allMessagesVisible].
   // When updating this, check [_allMessagesVisible], [_willAffectVisibility],
-  // [_mutedUsersEventWillAffectVisibility], and [messagesMoved] to see whether
-  // they need to be updated too.
+  // [_mutedUsersEventWillAffectVisibility], [handleSubscriptionEvent],
+  // and [messagesMoved] to see whether they need to be updated too.
   // Also check the unread-count methods in [Unreads] to make sure they count
   // exactly the unread messages for which this would return true.
   bool _messageVisible(MessageBase message) {
@@ -2118,6 +2118,76 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           notifyListeners();
           fetchInitial();
         }
+    }
+  }
+
+  /// Update for [event], a change to the user's subscriptions,
+  /// which the store has already applied.
+  ///
+  /// Of the narrows, only the combined feed's [_messageVisible] depends on
+  /// whether the user is subscribed to a channel and has muted it
+  /// (see [ChannelStore.isTopicVisible]),
+  /// so other views are unaffected.
+  ///
+  /// On muting a channel or unsubscribing from it,
+  /// this removes the channel's messages that are no longer visible.
+  /// On unmuting a channel or subscribing to it unmuted,
+  /// some of its messages may become visible,
+  /// so this refetches the list from scratch, as for unmuting a topic.
+  /// (Subscribing to a channel muted changes no message's visibility:
+  /// a topic the user has unmuted or follows is visible either way,
+  /// and any other topic is hidden either way.)
+  void handleSubscriptionEvent(SubscriptionEvent event) {
+    if (narrow is! CombinedFeedNarrow) return;
+
+    switch (event) {
+      case SubscriptionAddEvent(:final subscriptions):
+        if (subscriptions.every((subscription) => subscription.isMuted)) return;
+        _refetchForNewlyVisibleMessages();
+
+      case SubscriptionRemoveEvent(:final channelIds):
+        _removeMessagesNoLongerVisible(channelIds: channelIds);
+
+      case SubscriptionUpdateEvent(
+          property: SubscriptionProperty.isMuted, :final channelId, :final value):
+        if (value == true) {
+          _removeMessagesNoLongerVisible(channelIds: [channelId]);
+        } else {
+          _refetchForNewlyVisibleMessages();
+        }
+
+      case SubscriptionUpdateEvent():
+      case SubscriptionPeerAddEvent():
+      case SubscriptionPeerRemoveEvent():
+        return;
+    }
+  }
+
+  /// Remove the messages in [channelIds], including outbox messages,
+  /// that [_messageVisible] no longer allows.
+  void _removeMessagesNoLongerVisible({required Iterable<int> channelIds}) {
+    bool shouldRemove(MessageBase message) => switch (message.conversation) {
+      StreamConversation(:final streamId) =>
+        channelIds.contains(streamId) && !_messageVisible(message),
+      DmConversation() => false,
+    };
+    bool removed = _removeMessagesWhere(shouldRemove);
+    removed |= _removeOutboxMessagesWhere(shouldRemove);
+    if (removed) {
+      notifyListeners();
+    }
+  }
+
+  /// Refetch from scratch, because some messages
+  /// [_messageVisible] used to hide may now be visible.
+  void _refetchForNewlyVisibleMessages() {
+    // TODO get the newly-visible messages from the message store
+    // For now, we simplify the task by just refetching this message list
+    // from scratch.
+    if (fetched) {
+      _reset();
+      notifyListeners();
+      fetchInitial();
     }
   }
 
