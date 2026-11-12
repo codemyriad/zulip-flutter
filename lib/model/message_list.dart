@@ -2155,7 +2155,14 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       case TopicNarrow(:final channelId):
         if (event case SubscriptionAddEvent(:final subscriptions)
             when subscriptions.any((s) => s.streamId == channelId)) {
-          _refetchFromScratch();
+          // Restart even a fetch still in progress: its result may have been
+          // computed before the user subscribed, and so lack messages
+          // which no event will bring either.
+          if (_status != FetchingStatus.unstarted) {
+            _reset();
+            notifyListeners();
+            fetchInitial();
+          }
         }
         return;
 

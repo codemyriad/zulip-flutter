@@ -2509,6 +2509,33 @@ void main() {
         checkCachedMessages(narrow, [message1, message2, message3]);
       }));
 
+      test('channel subscribed during fetchInitial: none missing between stored messages', () => awaitFakeAsync((async) async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, stream: channel);
+        await store.removeSubscription(channel.streamId);
+        final message1 = eg.streamMessage(stream: channel);
+        // The server computes this response before the user subscribes.
+        connection.prepare(delay: const Duration(milliseconds: 500),
+          json: newestResult(foundOldest: true, messages: [message1]).toJson());
+        final fetchFuture = model.fetchInitial();
+        async.elapse(const Duration(milliseconds: 100));
+
+        // A message is sent while unsubscribed; no event brings it.
+        final message2 = eg.streamMessage(stream: channel);
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [message1, message2]).toJson());
+        await store.addSubscription(eg.subscription(channel));
+        async.elapse(const Duration(milliseconds: 500));
+        await fetchFuture;
+        check(model).fetched.isTrue();
+
+        final message3 = eg.streamMessage(stream: channel);
+        await store.addMessage(message3);
+        async.elapse(kCachedMessagesWriteDelay);
+        checkHasMessages([message1, message2, message3]);
+        checkCachedMessages(narrow, [message1, message2, message3]);
+      }));
+
       test('topic moved away: old topic\'s stored messages deleted', () => awaitFakeAsync((async) async {
         final narrow = eg.topicNarrow(channel.streamId, 'topic');
         await prepareStored(narrow: narrow);
