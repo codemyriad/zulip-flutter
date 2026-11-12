@@ -1165,14 +1165,15 @@ void main() {
         await fetchFuture;
       }));
 
-      test('showCachedImmediately: show once read, without waiting', () => awaitFakeAsync((async) async {
+      test('previousMessageIds: show once read, without waiting', () => awaitFakeAsync((async) async {
         const narrow = CombinedFeedNarrow();
         await prepare(narrow: narrow, stream: channel);
         final cached = [eg.streamMessage(stream: channel)];
         seedCachedFetch(narrow, cached);
         final fresh = [eg.streamMessage(stream: channel)];
         prepareSuccess(fresh, delay: kShowCachedMessagesDelay ~/ 2);
-        final fetchFuture = model.fetchInitial(showCachedImmediately: true);
+        final fetchFuture = model.fetchInitial(
+          previousMessageIds: cached.map((m) => m.id).toSet());
 
         async.elapse(Duration.zero);
         checkNotifiedOnce();
@@ -1184,6 +1185,25 @@ void main() {
         checkHasMessages(fresh);
         await fetchFuture;
         check(async.pendingTimers).isEmpty();
+      }));
+
+      test('previousMessageIds: show only those messages', () => awaitFakeAsync((async) async {
+        // As when the previous view saw a message deleted,
+        // after the fetch was stored, and the store doesn't know that.
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = List.generate(3, (i) => eg.streamMessage(stream: channel));
+        seedCachedFetch(narrow, cached);
+        prepareSuccess([cached[0], cached[2]], delay: kShowCachedMessagesDelay ~/ 2);
+        final fetchFuture = model.fetchInitial(
+          previousMessageIds: {cached[0].id, cached[2].id});
+
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached([cached[0], cached[2]]);
+
+        model.dispose();
+        await fetchFuture;
       }));
 
       test('cache read finishes after request fails', () => awaitFakeAsync((async) async {

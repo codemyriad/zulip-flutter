@@ -1077,12 +1077,17 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// a stored fetch is shown only for those anchors too.
   /// A fetch that finds no messages deletes any stored one.
   ///
-  /// If [showCachedImmediately] is true, the stored fetch is shown
-  /// as soon as it's read, without waiting for the request.
+  /// If [previousMessageIds] is non-null, the stored fetch is shown
+  /// as soon as it's read, without waiting for the request,
+  /// but only those of its messages that are in [previousMessageIds].
   /// This is for when the list was already showing messages,
   /// as when replacing a view after the store was replaced,
   /// so that it doesn't go back to showing none meanwhile.
-  Future<void> fetchInitial({bool showCachedImmediately = false}) async {
+  /// The [previousMessageIds] should be the messages the list was showing.
+  /// A stored message not among them may have been deleted,
+  /// or moved out of [narrow], since the fetch was stored;
+  /// the old view learned that, but a new store may not know it.
+  Future<void> fetchInitial({Set<int>? previousMessageIds}) async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
     assert(messages.isEmpty && contents.isEmpty);
@@ -1118,7 +1123,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // Parse it only if it's to be shown; usually the request succeeds first.
     Uint8List? cachedData;
     bool mayShowCached = useCache;
-    bool shouldShowCached = showCachedImmediately;
+    bool shouldShowCached = previousMessageIds != null;
     void maybeShowCached() {
       if (isStale() || !mayShowCached || !shouldShowCached) return;
       final data = cachedData;
@@ -1127,7 +1132,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       mayShowCached = false;
       final result = _parseCachedMessageFetch(cacheKey!, data);
       if (result == null) return;
-      _showCachedMessages(result);
+      _showCachedMessages(result, onlyMessageIds: previousMessageIds);
     }
     if (useCache) {
       assert(_showCachedMessagesTimer == null);
@@ -1295,15 +1300,19 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// for example a message that was deleted, or moved out of [narrow],
   /// into a muted topic, or into a channel the user can no longer access,
   /// is left out.
+  /// If [onlyMessageIds] is non-null, messages not in it are left out too.
   /// If no messages are left, this leaves the view as it is.
   ///
   /// See [showingCachedMessages].
-  void _showCachedMessages(GetMessagesResult cached) {
+  void _showCachedMessages(GetMessagesResult cached, {Set<int>? onlyMessageIds}) {
     assert(_status == FetchingStatus.fetchInitial);
     assert(messages.isEmpty && outboxMessages.isEmpty);
 
     final toShow = <Message>[];
     for (final cachedMessage in cached.messages) {
+      if (onlyMessageIds != null && !onlyMessageIds.contains(cachedMessage.id)) {
+        continue;
+      }
       // Prefer the store's copy, which events have kept up to date.
       // Leave the store alone otherwise: this data may be stale,
       // and no event would come to correct it.

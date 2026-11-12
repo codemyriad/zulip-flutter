@@ -873,11 +873,15 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
   void onNewStore() { // TODO(#464) try to keep using old model until new one gets messages
     final oldModel = _model;
     final anchor = oldModel == null ? widget.initAnchor : oldModel.anchor;
+    // Rather than going from showing messages back to a spinner,
+    // show any stored ones, like as not those the old model fetched;
+    // but only those the old model still had, because the new store
+    // won't know of any deleted or moved away since they were stored.
+    final previousMessageIds = (oldModel != null && oldModel.fetched)
+      ? oldModel.messages.map((m) => m.id).toSet() : null;
     oldModel?.dispose();
     _initModel(PerAccountStoreWidget.of(context), anchor,
-      // Rather than going from showing messages back to a spinner,
-      // show any stored ones, like as not those the old model fetched.
-      showCachedImmediately: oldModel?.fetched ?? false);
+      previousMessageIds: previousMessageIds);
   }
 
   @override
@@ -889,7 +893,7 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
   }
 
   void _initModel(PerAccountStore store, Anchor anchor, {
-    required bool showCachedImmediately,
+    required Set<int>? previousMessageIds,
   }) {
     var narrow = widget.narrow;
     if (narrow is TopicNarrow) {
@@ -907,7 +911,7 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
       narrow: narrow, anchor: anchor);
     _modelWasShowingCachedMessages = false;
     model.addListener(_modelChanged);
-    model.fetchInitial(showCachedImmediately: showCachedImmediately);
+    model.fetchInitial(previousMessageIds: previousMessageIds);
   }
 
   bool _autofocusDecided = false;

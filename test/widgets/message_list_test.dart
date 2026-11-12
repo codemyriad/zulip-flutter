@@ -952,21 +952,18 @@ void main() {
       check(connection.takeRequests()).isEmpty();
     });
 
-    testWidgets('store replaced: show the stored messages at once', (tester) async {
-      final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
-      await setupRetrying(tester);
-      prepareFreshFetch([message]);
-      await retryFetch(tester);
-      check(find.text('some message')).findsOne();
-      check(findBanner).findsNothing();
-
+    /// Expire the event queue, so that the store is replaced,
+    /// and have the new store's fetch return [messages] after 5 seconds.
+    Future<PerAccountStore> replaceStore(WidgetTester tester, {
+      required List<Message> messages,
+    }) async {
       FakeApiConnection? newConnection;
       void prepareNewStore() {
         final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id);
         if (newStore == null || newStore == store || newConnection != null) return;
         newConnection = newStore.connection as FakeApiConnection;
         newConnection!.prepare(json: eg.newestGetMessagesResult(
-          foundOldest: true, messages: [message]).toJson(),
+          foundOldest: true, messages: messages).toJson(),
           delay: const Duration(seconds: 5));
       }
       testBinding.globalStore.addListener(prepareNewStore);
@@ -980,8 +977,21 @@ void main() {
       updateMachine.debugAdvanceLoop();
       await tester.pump();
       await tester.pump(Duration.zero);
+      await tester.pump(); // render any cached messages shown
       final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id)!;
       check(newStore).not((it) => it.identicalTo(store));
+      return newStore;
+    }
+
+    testWidgets('store replaced: show the stored messages at once', (tester) async {
+      final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
+      await setupRetrying(tester);
+      prepareFreshFetch([message]);
+      await retryFetch(tester);
+      check(find.text('some message')).findsOne();
+      check(findBanner).findsNothing();
+
+      final newStore = await replaceStore(tester, messages: [message]);
       check(newStore.debugMessageListViews.single.showingCachedMessages).isTrue();
       check(find.text('some message')).findsOne();
       check(findBanner).findsOne();
@@ -990,6 +1000,28 @@ void main() {
       check(newStore.debugMessageListViews.single.showingCachedMessages).isFalse();
       check(find.text('some message')).findsOne();
       check(findBanner).findsNothing();
+    });
+
+    testWidgets('store replaced: no stored message the old view saw deleted', (tester) async {
+      final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
+      final deleted = eg.streamMessage(stream: channel, content: '<p>deleted message</p>');
+      await setupRetrying(tester);
+      prepareFreshFetch([message, deleted]);
+      await retryFetch(tester);
+      await store.handleEvent(eg.deleteMessageEvent([deleted]));
+      await tester.pump();
+      check(find.text('some message')).findsOne();
+      check(find.text('deleted message')).findsNothing();
+
+      // The new store doesn't know of the deletion,
+      // and the stored fetch is from before it.
+      final newStore = await replaceStore(tester, messages: [message]);
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isTrue();
+      check(find.text('some message')).findsOne();
+      check(find.text('deleted message')).findsNothing();
+
+      await tester.pump(const Duration(seconds: 5));
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isFalse();
     });
 
     testWidgets('banner while showing cached messages', (tester) async {
