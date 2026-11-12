@@ -1708,10 +1708,9 @@ class UpdateMachine {
         for (final batch in data.eventBatches) {
           final rawEvents = (jsonUtf8Decoder.convert(batch.data) as List<dynamic>)
             .cast<Map<String, dynamic>>();
-          // We don't handle these events, but a fresh snapshot
-          // will have the updated data they're about.
-          replaceImmediately |= rawEvents.any((rawEvent) =>
-            const {'realm', 'restart'}.contains(rawEvent['type']));
+          replaceImmediately |= _requiresFreshSnapshot(rawEvents,
+            zulipVersion: initialSnapshot.zulipVersion,
+            zulipFeatureLevel: initialSnapshot.zulipFeatureLevel);
           eventBatches.add(rawEvents.map(Event.fromJson).toList());
         }
       }
@@ -1768,6 +1767,31 @@ class UpdateMachine {
       throwIfNoAccount();
       return null;
     }
+  }
+
+  /// Whether any of [rawEvents], received on the event queue
+  /// of a snapshot from a server with [zulipVersion] and [zulipFeatureLevel],
+  /// carries data we only get from a fresh snapshot.
+  ///
+  /// We don't handle these events (see #668),
+  /// but a fresh snapshot will have the updated data they're about.
+  /// So when one turns up in the events received while the app wasn't running,
+  /// a store loaded from stored data should be replaced
+  /// as a cold start would have done before we stored data (#477).
+  static bool _requiresFreshSnapshot(Iterable<Map<String, dynamic>> rawEvents, {
+    required String zulipVersion,
+    required int zulipFeatureLevel,
+  }) {
+    return rawEvents.any((rawEvent) => switch (rawEvent['type']) {
+      'realm' => true,
+      // The server sends this on every restart, which on some servers
+      // (like Zulip Cloud) is often; only a change of version matters.
+      // See: https://zulip.com/api/get-events#restart
+      'restart' =>
+        rawEvent['zulip_version'] != zulipVersion
+          || rawEvent['zulip_feature_level'] != zulipFeatureLevel,
+      _ => false,
+    });
   }
 
   /// If the stored event log has more events than this,
@@ -2070,6 +2094,15 @@ class UpdateMachine {
         }
         if (_eventQueueUnconfirmed) {
           _eventQueueUnconfirmed = false;
+          // These are the events from while the app wasn't running.
+          // Check them as [_loadPersisted] checked the stored ones.
+          // (If the app quits before the replacement is done,
+          // the next start finds these events stored, and replaces then.)
+          if (_requiresFreshSnapshot(result.rawEvents ?? const [],
+                zulipVersion: store.zulipVersion,
+                zulipFeatureLevel: store.zulipFeatureLevel)) {
+            throw _ReplaceImmediatelyException();
+          }
           // Now the store's data about this device is up to date.
           store.pushDevices.start();
         }

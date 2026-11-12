@@ -2224,13 +2224,13 @@ void main() {
         .single.lastEventId.equals(11);
     }));
 
-    /// Check that when the first poll fails as prepared by [prepareError],
+    /// Check that when the first poll goes as prepared by [preparePoll],
     /// the store gets quietly replaced by one from a fresh register,
     /// and the stored data along with it.
-    void checkReplacedAfterPoll(void Function(FakeApiConnection) prepareError) {
+    void checkReplacedAfterPoll(void Function(FakeApiConnection) preparePoll) {
       awaitFakeAsync((async) async {
         prepare(expectedLoad: ExpectedLoad.persisted);
-        globalStore.prepareResumedPollResponse = prepareError;
+        globalStore.prepareResumedPollResponse = preparePoll;
         seed(eventBatches: [[settingsEvent(11)]]);
         await load();
         check(connection.takeRequests()).first
@@ -2258,6 +2258,89 @@ void main() {
         httpStatus: 400, json: {'result': 'error', 'code': 'BAD_REQUEST',
           'msg': 'An event newer than 11 has already been pruned!'}));
     });
+
+    Map<String, dynamic> restartEvent(int id, {
+      required String? zulipVersion,
+      required int? zulipFeatureLevel,
+    }) => {
+      'id': id, 'type': 'restart', 'server_generation': 1234,
+      'zulip_version': ?zulipVersion,
+      'zulip_merge_base': ?zulipVersion,
+      'zulip_feature_level': ?zulipFeatureLevel,
+    };
+
+    void prepareCatchUpEvents(FakeApiConnection connection,
+        List<Map<String, dynamic>> rawEvents) {
+      connection.prepare(json: {'events': rawEvents, 'queue_id': queueId});
+    }
+
+    test('realm event on resumed queue: replace quietly', () {
+      checkReplacedAfterPoll((connection) => prepareCatchUpEvents(connection, [
+        rawJson(settingsEvent(12)),
+        {'id': 13, 'type': 'realm', 'op': 'update',
+          'property': 'name', 'value': 'New name'},
+      ]));
+    });
+
+    test('restart event with new server version on resumed queue: replace quietly', () {
+      checkReplacedAfterPoll((connection) => prepareCatchUpEvents(connection, [
+        restartEvent(12, zulipVersion: eg.recentZulipVersion,
+          zulipFeatureLevel: eg.recentZulipFeatureLevel + 1),
+      ]));
+    });
+
+    test('restart event without server version on resumed queue: replace quietly', () {
+      checkReplacedAfterPoll((connection) => prepareCatchUpEvents(connection, [
+        restartEvent(12, zulipVersion: null, zulipFeatureLevel: null),
+      ]));
+    });
+
+    test('replace after storing the events that call for it', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      final realmEvent = {'id': 11, 'type': 'realm', 'op': 'update',
+        'property': 'name', 'value': 'New name'};
+      globalStore.prepareResumedPollResponse = (connection) =>
+        prepareCatchUpEvents(connection, [realmEvent]);
+      globalStore.prepareRegisterQueueResponse = (connection) =>
+        connection.prepare(delay: const Duration(seconds: 1), json: rawJson(
+          eg.initialSnapshot(queueId: 'fresh-queue', lastEventId: 1)));
+      seed();
+      await load();
+      async.elapse(Duration.zero);
+      check(updateMachine.lastEventId).equals(11);
+      check(globalStore.backend.serverSnapshotOf(eg.selfAccount.id)!)
+        ..queueId.equals(queueId)
+        ..lastEventId.equals(11);
+      check(globalStore.backend.serverEventBatchesOf(eg.selfAccount.id))
+        .single.lastEventId.equals(11);
+      check(store.pushKeys.latestPushKey).isNull();
+      final newConnection =
+        globalStore.apiConnectionFromAccount(eg.selfAccount) as FakeApiConnection;
+      check(newConnection.takeRequests()).single.which(isRegisterRequest());
+
+      async.elapse(const Duration(seconds: 1));
+      check(globalStore.perAccountSync(eg.selfAccount.id)).isNotNull()
+        .queueId.equals('fresh-queue');
+      checkNoErrorReported();
+    }));
+
+    test('restart event with same server version on resumed queue: keep store', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      globalStore.prepareResumedPollResponse = (connection) =>
+        prepareCatchUpEvents(connection, [
+          restartEvent(11, zulipVersion: eg.recentZulipVersion,
+            zulipFeatureLevel: eg.recentZulipFeatureLevel),
+        ]);
+      seed();
+      await load();
+      async.elapse(Duration.zero);
+      check(updateMachine.lastEventId).equals(11);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).identicalTo(store);
+      check(store.pushKeys.latestPushKey).isNotNull();
+      check(connection.takeRequests().whereType<http.Request>()
+        .where((request) => request.url.path == '/api/v1/register')).isEmpty();
+      checkNoErrorReported();
+    }));
 
     test('BAD_REQUEST after a first successful poll is unexpected', () => awaitFakeAsync((async) async {
       prepare(expectedLoad: ExpectedLoad.persisted);
@@ -2486,16 +2569,35 @@ void main() {
         ]));
       });
 
-      test('restart event in stored events', () {
+      test('restart event with new server version in stored events', () {
         checkReplacedImmediately(expectReplayed: true, () => seedRaw([
           [rawJson(channelCreateEvent)],
-          [{'id': 12, 'type': 'restart', 'server_generation': 1234,
-            'immediate': false, 'zulip_version': eg.recentZulipVersion,
-            'zulip_merge_base': eg.recentZulipVersion,
-            'zulip_feature_level': eg.recentZulipFeatureLevel + 1}],
+          [restartEvent(12, zulipVersion: eg.recentZulipVersion,
+            zulipFeatureLevel: eg.recentZulipFeatureLevel + 1)],
+        ]));
+      });
+
+      test('restart event without server version in stored events', () {
+        checkReplacedImmediately(expectReplayed: true, () => seedRaw([
+          [rawJson(channelCreateEvent)],
+          [restartEvent(12, zulipVersion: null, zulipFeatureLevel: null)],
         ]));
       });
     });
+
+    test('restart event with same server version in stored events: resume', () => awaitFakeAsync((async) async {
+      prepare(expectedLoad: ExpectedLoad.persisted);
+      seedRaw([
+        [restartEvent(11, zulipVersion: eg.recentZulipVersion,
+          zulipFeatureLevel: eg.recentZulipFeatureLevel)],
+      ]);
+      await load();
+      check(connection.takeRequests()).first
+        .which(isResumedPollRequest(lastEventId: 11));
+      async.elapse(Duration.zero);
+      check(globalStore.perAccountSync(eg.selfAccount.id)).identicalTo(store);
+      checkNoErrorReported();
+    }));
 
     test('round trip: load from network, then from stored data', () => awaitFakeAsync((async) async {
       prepare(expectedLoad: ExpectedLoad.network);
