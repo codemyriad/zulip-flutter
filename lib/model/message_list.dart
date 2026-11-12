@@ -289,8 +289,8 @@ mixin _MessageSequence {
   /// If nothing is stored for [narrow], or nothing stored is left to show,
   /// the messages may instead be derived from those stored for
   /// a narrow containing [narrow]:
-  /// for a topic, its channel's or the combined feed's,
-  /// and for a channel or a DM conversation, the combined feed's.
+  /// for a topic, its channel's,
+  /// and for a DM conversation, the combined feed's.
   /// The messages derived are those of the containing narrow's
   /// that belong in this view,
   /// and they're handled just like messages stored for [narrow].
@@ -319,8 +319,7 @@ mixin _MessageSequence {
   ///    (see [MessageListView.fetchInitial]);
   ///    a list opened at a specific message, or a search, stays online-only,
   ///    as do other fetches like those for the topic list.
-  ///  * Whether stored messages still match this view,
-  ///    and whether messages may be derived from a containing narrow's,
+  ///  * Whether stored messages still match this view
   ///    is judged by the muting state now,
   ///    which may differ from when the messages were stored.
   ///    For example, messages stored for a channel
@@ -329,9 +328,9 @@ mixin _MessageSequence {
   ///  * Messages derived from a containing narrow's stored messages
   ///    reach back only as far as those do,
   ///    so they may be few even where this view has many more.
-  ///    Mentions and starred messages are never derived,
-  ///    nor the messages of a narrow the derivation would leave incomplete,
-  ///    like a channel the user has muted.
+  ///    Only a topic's and a DM conversation's messages are derived;
+  ///    for others, like a channel's from the combined feed's,
+  ///    the derived messages might have gaps.
   bool get showingCachedMessages =>
     _status == FetchingStatus.fetchInitialShowingCached;
 
@@ -1478,7 +1477,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// (see [showingCachedMessages]).
   /// Data that doesn't decode is of no use to the containing narrow either,
   /// but a view of that narrow may be open too, for example
-  /// the combined feed beneath a topic the user went to from there.
+  /// the channel beneath a topic the user went to from there.
   /// That view may store fresh data under the key between this read
   /// and a deletion, which would then delete the fresh data.
   /// So the corrupt data is left for a view of its own narrow,
@@ -1499,18 +1498,19 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
   /// The narrows whose stored messages [fetchInitial] may show,
   /// in order of preference:
-  /// [narrow] itself, then any narrows containing it
-  /// from whose stored messages this view's may be derived,
-  /// most specific first.
+  /// [narrow] itself, then any narrow containing it
+  /// from whose stored messages this view's may be derived.
   ///
   /// Whether a containing narrow's stored messages are actually used
   /// depends on the store's current state;
   /// see [_mayDeriveCachedMessagesFrom].
   List<Narrow> get _cachedMessageSources => switch (narrow) {
-    TopicNarrow(:final channelId) =>
-      [narrow, ChannelNarrow(channelId), const CombinedFeedNarrow()],
-    ChannelNarrow() || DmNarrow() => [narrow, const CombinedFeedNarrow()],
-    CombinedFeedNarrow() || MentionsNarrow() || StarredMessagesNarrow() => [narrow],
+    TopicNarrow(:final channelId) => [narrow, ChannelNarrow(channelId)],
+    DmNarrow() => [narrow, const CombinedFeedNarrow()],
+    CombinedFeedNarrow()
+      || ChannelNarrow()
+      || MentionsNarrow()
+      || StarredMessagesNarrow() => [narrow],
     KeywordSearchNarrow() => const [],
   };
 
@@ -1519,75 +1519,78 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   ///
   /// The messages stored for a narrow are the newest ones
   /// that a view of it showed:
-  /// those in the narrow and visible there ([_messageVisible]),
+  /// those in the narrow and visible there ([_messageVisible])
+  /// by the muting state when they were stored,
   /// from some message, the oldest stored, through the newest,
   /// with none missing between.
+  /// (As the muting state changes, a view removes messages that become hidden,
+  /// and refetches when some may become visible;
+  /// see [handleUserTopicEvent], [handleMutedUsersEvent],
+  /// and [handleSubscriptionEvent].)
   /// Restricting them to those that belong in this view
   /// ([_messageBelongsHere]) gives the same for this view, from that point on,
   /// just if every message that belongs in this view
-  /// is also visible in the view of [source].
-  /// If [source]'s view would hide some messages this view shows,
+  /// was also in the view of [source] when they were stored.
+  /// If [source]'s view hid some messages this view shows,
   /// the restriction might skip them, possibly including the newest,
   /// and show older messages as if they were the newest.
   /// Messages of this view older than the oldest stored for [source]
   /// are simply not shown, which is fine:
   /// while [showingCachedMessages], [haveOldest] is false.
   ///
-  /// The muting state when the messages were stored isn't known,
-  /// so this judges by the state now.
-  ///
-  /// The rules for each pair, given [_messageVisible]:
+  /// The muting state when the messages were stored isn't known:
+  /// it may have changed since, while no view of [source] was open.
+  /// So this allows only pairs where, whatever the muting state,
+  /// [source]'s view has either every message of this narrow or none.
+  /// Then the stored messages include either all of this narrow's messages
+  /// in the range they cover, or none, which leaves nothing to show,
+  /// and [fetchInitial] goes on without them.
   ///  * A topic, from its channel:
-  ///    the channel's view hides just the topics the user has muted
-  ///    ([ChannelStore.isTopicVisibleInChannel]),
-  ///    and the topic's view hides nothing.
-  ///    So this requires the topic not be muted.
-  ///  * A topic, from the combined feed:
-  ///    the combined feed's view hides a topic just if
-  ///    [ChannelStore.isTopicVisible] is false for it,
-  ///    so this requires that be true.
-  ///    It also requires the user be subscribed to the channel.
-  ///    The combined feed has only messages the user received,
-  ///    so if the user isn't subscribed it lacks the channel's new messages,
-  ///    even for a topic the user has unmuted or follows.
-  ///    (Messages from before the user subscribed are older than
-  ///    any received since, so missing them leaves no gap.
-  ///    A time the user was unsubscribed within the stored range
-  ///    would leave a gap, but isn't known.)
-  ///  * A channel, from the combined feed:
-  ///    the channel's view shows the topics the user hasn't muted.
-  ///    Where the user is subscribed to the channel and hasn't muted it,
-  ///    [ChannelStore.isTopicVisible] is true for each of those topics,
-  ///    so the combined feed shows them too;
-  ///    a muted topic is hidden in both views.
-  ///    If the channel is muted, the combined feed shows
-  ///    only the topics unmuted or followed;
-  ///    if unsubscribed, it lacks the new messages, as above.
-  ///    So this requires the user be subscribed and not have muted it.
+  ///    the channel's view hides a topic's messages, all of them,
+  ///    just if the user has muted the topic
+  ///    ([ChannelStore.isTopicVisibleInChannel]).
+  ///    The server gives a view of the channel
+  ///    the same messages of the topic as a view of the topic.
+  ///    While the user isn't subscribed to the channel,
+  ///    no events bring its new messages,
+  ///    but a view of the channel refetches when the user subscribes,
+  ///    so it doesn't go on to add new messages after a gap
+  ///    (see [handleSubscriptionEvent]).
   ///  * A DM conversation, from the combined feed:
-  ///    the combined feed's view hides the conversation just if
-  ///    [UserStore.shouldMuteDmConversation] is true for it,
-  ///    and the conversation's own view hides nothing.
-  ///    So this requires that be false.
-  ///    The user receives every message in their DM conversations.
+  ///    the combined feed's view hides a conversation's messages,
+  ///    all of them, just if [UserStore.shouldMuteDmConversation] is true for it.
+  ///    The user receives every message in their DM conversations,
+  ///    so the combined feed has them all.
   ///
-  /// For any other pair, this returns false.
-  /// (The combined feed has no containing narrow,
-  /// and no stored messages are derived for mentions or starred messages,
-  /// which change by flags the stored messages may not have up to date.)
+  /// Beyond that, this requires that [source]'s view
+  /// show this narrow's messages by the muting state now.
+  /// That isn't needed for the derived messages to have none missing,
+  /// but if [source]'s view hides them,
+  /// a view of [source] open since that became so has stored none of them.
+  ///
+  /// For any other pair, this returns false. In particular:
+  ///  * A channel, from the combined feed:
+  ///    while the user has muted a channel,
+  ///    the combined feed's view shows only the topics in it
+  ///    that the user has unmuted or follows.
+  ///    So messages stored for the combined feed then
+  ///    may have some of the channel's messages and lack others between them,
+  ///    and the user may have unmuted the channel since.
+  ///  * A topic, or a channel, from the combined feed:
+  ///    the combined feed has only messages the user received,
+  ///    so it lacks those sent to a channel while the user was unsubscribed,
+  ///    even in a topic the user follows.
+  ///    A time the user was unsubscribed,
+  ///    within the range the stored messages cover, isn't known.
+  ///  * The combined feed has no containing narrow,
+  ///    and no stored messages are derived for mentions or starred messages,
+  ///    which change by flags the stored messages may not have up to date.
   bool _mayDeriveCachedMessagesFrom(Narrow source) {
     switch ((narrow, source)) {
       case (TopicNarrow(:final channelId, :final topic),
             ChannelNarrow(channelId: final sourceChannelId)):
         assert(sourceChannelId == channelId);
         return store.isTopicVisibleInChannel(channelId, topic);
-
-      case (TopicNarrow(:final channelId, :final topic), CombinedFeedNarrow()):
-        return store.subscriptions[channelId] != null
-          && store.isTopicVisible(channelId, topic);
-
-      case (ChannelNarrow(:final channelId), CombinedFeedNarrow()):
-        return store.subscriptions[channelId]?.isMuted == false;
 
       case (DmNarrow narrow, CombinedFeedNarrow()):
         return !store.shouldMuteDmConversation(narrow);

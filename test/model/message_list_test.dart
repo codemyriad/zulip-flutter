@@ -2045,7 +2045,7 @@ void main() {
           await fetchFuture;
         }
 
-        group('sound: show', () {
+        group('show', () {
           test('topic, from its channel', () => awaitFakeAsync((async) async {
             final messages = [topicMessage(), otherTopicMessage(), topicMessage()];
             await checkDerived(async, topicNarrow,
@@ -2066,46 +2066,6 @@ void main() {
               expected: [messages[0], messages[2]]);
           }));
 
-          test('topic, from the combined feed', () => awaitFakeAsync((async) async {
-            final messages = <Message>[topicMessage(), dmMessage(),
-              otherTopicMessage(), topicMessage()];
-            await checkDerived(async, topicNarrow,
-              stored: {combinedNarrow: messages},
-              expected: [messages[0], messages[3]]);
-          }));
-
-          test('topic followed in muted channel, from the combined feed', () => awaitFakeAsync((async) async {
-            final messages = [topicMessage(), otherTopicMessage(), topicMessage()];
-            await checkDerived(async, topicNarrow,
-              setUp: () async {
-                await store.updateSubscription(channel.streamId,
-                  SubscriptionProperty.isMuted, true);
-                await store.setUserTopic(channel, 'topic',
-                  UserTopicVisibilityPolicy.followed);
-              },
-              stored: {combinedNarrow: messages},
-              expected: [messages[0], messages[2]]);
-          }));
-
-          test('channel, from the combined feed', () => awaitFakeAsync((async) async {
-            final otherChannel = eg.stream();
-            final messages = <Message>[topicMessage(), dmMessage(),
-              eg.streamMessage(stream: otherChannel), otherTopicMessage()];
-            await checkDerived(async, channelNarrow,
-              stored: {combinedNarrow: messages},
-              expected: [messages[0], messages[3]]);
-          }));
-
-          test('channel with a muted topic, from the combined feed', () => awaitFakeAsync((async) async {
-            // Both views hide the muted topic.
-            final messages = [topicMessage(), otherTopicMessage()];
-            await checkDerived(async, channelNarrow,
-              setUp: () => store.setUserTopic(channel, 'other',
-                UserTopicVisibilityPolicy.muted),
-              stored: {combinedNarrow: messages},
-              expected: [messages[0]]);
-          }));
-
           test('DM conversation, from the combined feed', () => awaitFakeAsync((async) async {
             final messages = <Message>[dmMessage(), topicMessage(),
               eg.dmMessage(from: eg.selfUser, to: [eg.otherUser]),
@@ -2116,58 +2076,39 @@ void main() {
           }));
         });
 
-        group('unsound: show nothing', () {
+        group('show nothing', () {
           test('topic muted, from its channel', () => awaitFakeAsync((async) async {
-            // The channel's view hides the topic, so its stored messages
-            // may lack the topic's newest messages.
-            // (These were stored before the topic was muted.)
+            // Stored before the topic was muted, the channel's messages
+            // would have all of the topic's in their range; but a view
+            // of the channel open since then would have stored none.
             await checkDerived(async, topicNarrow,
               setUp: () => store.setUserTopic(channel, 'topic',
                 UserTopicVisibilityPolicy.muted),
-              stored: {channelNarrow: [topicMessage(), otherTopicMessage()],
-                       combinedNarrow: [topicMessage()]},
+              stored: {channelNarrow: [topicMessage(), otherTopicMessage()]},
               expected: []);
           }));
 
-          test('topic in muted channel, from the combined feed', () => awaitFakeAsync((async) async {
+          test('topic, from the combined feed', () => awaitFakeAsync((async) async {
+            // The combined feed lacks messages sent to the channel
+            // while the user was unsubscribed, even in a followed topic.
             await checkDerived(async, topicNarrow,
-              setUp: () => store.updateSubscription(channel.streamId,
-                SubscriptionProperty.isMuted, true),
+              setUp: () => store.setUserTopic(channel, 'topic',
+                UserTopicVisibilityPolicy.followed),
               stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
               expected: []);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(topicNarrow), keyOf(channelNarrow)]);
           }));
 
-          test('topic followed in unsubscribed channel, from the combined feed', () => awaitFakeAsync((async) async {
-            // The combined feed lacks messages sent since unsubscribing.
-            await checkDerived(async, topicNarrow,
-              setUp: () async {
-                await store.removeSubscription(channel.streamId);
-                await store.setUserTopic(channel, 'topic',
-                  UserTopicVisibilityPolicy.followed);
-              },
-              stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
-              expected: []);
-          }));
-
-          test('muted channel, from the combined feed', () => awaitFakeAsync((async) async {
-            // The combined feed shows only the unmuted topic,
-            // but the channel's view shows both.
+          test('channel, from the combined feed', () => awaitFakeAsync((async) async {
+            // Stored while the user had muted the channel,
+            // the combined feed's messages would have
+            // only the topics in it the user unmuted or follows.
             await checkDerived(async, channelNarrow,
-              setUp: () async {
-                await store.updateSubscription(channel.streamId,
-                  SubscriptionProperty.isMuted, true);
-                await store.setUserTopic(channel, 'topic',
-                  UserTopicVisibilityPolicy.unmuted);
-              },
-              stored: {combinedNarrow: [topicMessage(), topicMessage()]},
-              expected: []);
-          }));
-
-          test('unsubscribed channel, from the combined feed', () => awaitFakeAsync((async) async {
-            await checkDerived(async, channelNarrow,
-              setUp: () => store.removeSubscription(channel.streamId),
               stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
               expected: []);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(channelNarrow)]);
           }));
 
           test('muted DM conversation, from the combined feed', () => awaitFakeAsync((async) async {
@@ -2197,7 +2138,7 @@ void main() {
               .deepEquals([keyOf(topicNarrow)]);
           }));
 
-          test('then the channel\'s; combined feed not read', () => awaitFakeAsync((async) async {
+          test('then the channel\'s', () => awaitFakeAsync((async) async {
             final fromChannel = [topicMessage()];
             await checkDerived(async, topicNarrow,
               stored: {channelNarrow: fromChannel,
@@ -2207,14 +2148,13 @@ void main() {
               .deepEquals([keyOf(topicNarrow), keyOf(channelNarrow)]);
           }));
 
-          test('then the combined feed\'s, if the channel\'s give nothing', () => awaitFakeAsync((async) async {
-            final fromCombined = [topicMessage()];
+          test('channel\'s giving nothing: combined feed\'s not read', () => awaitFakeAsync((async) async {
             await checkDerived(async, topicNarrow,
               stored: {channelNarrow: [otherTopicMessage()],
-                       combinedNarrow: fromCombined},
-              expected: fromCombined);
-            check(backend.cachedMessageFetchLoads).deepEquals([
-              keyOf(topicNarrow), keyOf(channelNarrow), keyOf(combinedNarrow)]);
+                       combinedNarrow: [topicMessage()]},
+              expected: []);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(topicNarrow), keyOf(channelNarrow)]);
           }));
 
           test('own stored messages giving nothing: derive', () => awaitFakeAsync((async) async {
@@ -2241,15 +2181,14 @@ void main() {
           }));
 
           test('corrupt containing narrow\'s data: skip, not delete', () => awaitFakeAsync((async) async {
-            final fromCombined = [topicMessage()];
             final corrupt = utf8.encode('{"messages": "nonsense"');
             await checkDerived(async, topicNarrow,
               setUp: () async {
                 backend.seedCachedMessageFetch(eg.selfAccount.id,
                   keyOf(channelNarrow), data: corrupt);
               },
-              stored: {combinedNarrow: fromCombined},
-              expected: fromCombined);
+              stored: {},
+              expected: []);
             check(cachedFetchOf(channelNarrow)).isNotNull()
               .data.deepEquals(corrupt);
           }));
@@ -2294,12 +2233,12 @@ void main() {
         }));
 
         test('fresh fetch replaces derived messages, and is stored', () => awaitFakeAsync((async) async {
-          final fromCombined = <Message>[topicMessage(), dmMessage()];
-          await prepareDerived(async, topicNarrow,
+          final fromCombined = <Message>[dmMessage(), topicMessage()];
+          await prepareDerived(async, dmNarrow,
             stored: {combinedNarrow: fromCombined});
           checkShowingCached([fromCombined.first]);
 
-          final fresh = <Message>[fromCombined.first, topicMessage()];
+          final fresh = <Message>[fromCombined.first, dmMessage()];
           prepareSuccess(fresh);
           async.elapse(const Duration(milliseconds: 100)); // max first backoff
           checkNotifiedOnce();
@@ -2308,7 +2247,7 @@ void main() {
             ..haveNewest.isTrue();
           checkHasMessages(fresh);
           await fetchFuture;
-          checkCachedMessages(topicNarrow, fresh);
+          checkCachedMessages(dmNarrow, fresh);
           checkCachedMessages(combinedNarrow, fromCombined);
         }));
       });
