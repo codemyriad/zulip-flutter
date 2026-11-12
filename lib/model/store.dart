@@ -1585,9 +1585,11 @@ class UpdateMachine {
       try {
         data = await fetchServerEmojiData(store.connection,
           emojiDataUrl: serverEmojiDataUrl);
+        if (_disposed) return;
         assert(debugLog('Got emoji data: ${data.codeToNames.length} emoji'));
         break;
       } catch (e) {
+        if (_disposed) return;
         assert(debugLog('Error fetching emoji data: $e\n' // TODO(log)
           'Backing off, then will retry…'));
         // The emoji data is a lot less urgent than the initial fetch,
@@ -1595,6 +1597,7 @@ class UpdateMachine {
         backoffMachine ??= BackoffMachine(firstBound: const Duration(seconds: 2),
                                           maxBound: const Duration(minutes: 2));
         await backoffMachine.wait();
+        if (_disposed) return;
       }
     }
 
