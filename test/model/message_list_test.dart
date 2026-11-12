@@ -698,7 +698,7 @@ void main() {
           async.elapse(Duration.zero);
           check(connection.takeRequests()).single;
 
-          async.elapse(const Duration(seconds: 30));
+          async.elapse(kShowCachedMessagesDelay);
           check(connection.takeRequests()).isEmpty();
 
           final message = eg.streamMessage();
@@ -708,6 +708,31 @@ void main() {
           check(connection.takeRequests()).single;
           checkNotifiedOnce();
           check(model).messages.single.id.equals(message.id);
+          await fetchFuture;
+        }));
+
+        test('sent while event stream recovering, recently: no abort on recovery', () => awaitFakeAsync((async) async {
+          // As on startup from stored server data: the event stream is
+          // recovering until the first poll succeeds, even when the network
+          // is fine, and a request sent meanwhile is likely fine too.
+          await prepare();
+          store.isRecoveringEventStream = true;
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: kShowCachedMessagesDelay);
+          final fetchFuture = model.fetchInitial();
+          async.elapse(kShowCachedMessagesDelay - const Duration(milliseconds: 1));
+          check(connection.takeRequests()).single;
+
+          store.isRecoveringEventStream = false;
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).isEmpty();
+          check(model).fetched.isFalse();
+
+          async.elapse(const Duration(milliseconds: 1));
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          check(connection.takeRequests()).isEmpty();
           await fetchFuture;
         }));
 

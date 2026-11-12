@@ -12,6 +12,7 @@ import '../api/model/model.dart';
 import '../api/route/messages.dart';
 import '../log.dart';
 import 'algorithms.dart';
+import 'binding.dart';
 import 'channel.dart';
 import 'connectivity.dart';
 import 'content.dart';
@@ -124,7 +125,7 @@ class _FetchInitialAttempt {
   _FetchInitialAttempt({
     required this.sentWhileRecovering,
     required this.connectivityCount,
-  });
+  }) : _stopwatch = ZulipBinding.instance.stopwatch()..start();
 
   /// Whether [PerAccountStore.isRecoveringEventStream] was true
   /// when the request was sent.
@@ -133,6 +134,10 @@ class _FetchInitialAttempt {
   /// The value of [ConnectivityMonitor.updateCount]
   /// when the request was sent.
   final int connectivityCount;
+
+  /// How long the request has been in flight.
+  Duration get elapsed => _stopwatch.elapsed;
+  final Stopwatch _stopwatch;
 
   /// Whether, if the request fails, to retry it at once
   /// rather than after a backoff wait.
@@ -1371,14 +1376,22 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   ///
   /// If [fetchInitial] has a request in flight
   /// that was sent while the event stream was recovering,
+  /// and has been in flight for at least [kShowCachedMessagesDelay],
   /// the request may be stuck on a dead connection;
   /// this aborts it, so that [fetchInitial] retries now.
-  /// If the request in flight was sent otherwise,
+  /// A younger request is likely fine:
+  /// on startup from stored server data, for example,
+  /// the event stream is recovering until its first poll succeeds,
+  /// and a list opened meanwhile sends its request on a working network.
+  /// If the request in flight is left alone,
   /// and goes on to fail, [fetchInitial] retries without waiting.
   void handleEventStreamRecovered() {
     if (_fetchInitialAttempt case final attempt?) {
       attempt.retryPromptly = true;
-      if (attempt.sentWhileRecovering) attempt.abort();
+      if (attempt.sentWhileRecovering
+          && attempt.elapsed >= kShowCachedMessagesDelay) {
+        attempt.abort();
+      }
     }
     final wake = _fetchInitialBackoffWake;
     _fetchInitialBackoffWake = null;
