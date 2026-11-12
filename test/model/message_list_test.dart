@@ -1044,8 +1044,8 @@ void main() {
           ..fetched.isFalse();
       }
 
-      /// Set up a [CombinedFeedNarrow] view with a stored fetch
-      /// of some messages in [channel], and start [MessageListView.fetchInitial]
+      /// Set up a [CombinedFeedNarrow] view with stored messages
+      /// in [channel], and start [MessageListView.fetchInitial]
       /// with the request failing.
       ///
       /// The cached messages appear once the cache read finishes.
@@ -1443,7 +1443,7 @@ void main() {
         await prepare(narrow: narrow, stream: channel);
         backend.loadCachedMessageFetchGate = gate.future;
         seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
-        // Keep the stored fetch, so the read finds it.
+        // Keep the stored messages, so the read finds them.
         backend.deleteCachedMessageFetchError = Exception('failed');
         connection.prepare(apiException: eg.apiBadRequest());
         await check(model.fetchInitial()).throws<ZulipApiException>();

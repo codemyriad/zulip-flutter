@@ -2456,7 +2456,7 @@ class MessageWithPossibleSender extends StatelessWidget {
       && !MessageListPage.maybeRevealedMutedMessagesOf(context)!
                          .isMutedMessageRevealed(message.id);
 
-    // The message list can show messages from a stored earlier fetch
+    // The message list can show messages stored from an earlier view
     // that the store doesn't have; see [MessageListView.showingCachedMessages].
     // Actions on a message expect the store to have it, so don't offer them.
     final isCacheOnly = store.messages[message.id] == null;

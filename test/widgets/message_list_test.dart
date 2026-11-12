@@ -1000,6 +1000,25 @@ void main() {
       check(findBanner).findsNothing();
     });
 
+    testWidgets('store replaced: show messages the old view got from events', (tester) async {
+      final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
+      final newMessage = eg.streamMessage(stream: channel, content: '<p>new message</p>');
+      await setupRetrying(tester);
+      prepareFreshFetch([message]);
+      await retryFetch(tester);
+      await store.addMessage(newMessage);
+      await tester.pump();
+      check(find.text('new message')).findsOne();
+
+      final newStore = await replaceStore(tester, messages: [message, newMessage]);
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isTrue();
+      check(find.text('some message')).findsOne();
+      check(find.text('new message')).findsOne();
+
+      await tester.pump(const Duration(seconds: 5));
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isFalse();
+    });
+
     testWidgets('store replaced: no stored message the old view saw deleted', (tester) async {
       final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
       final deleted = eg.streamMessage(stream: channel, content: '<p>deleted message</p>');
@@ -1011,9 +1030,12 @@ void main() {
       check(find.text('some message')).findsOne();
       check(find.text('deleted message')).findsNothing();
 
-      // The new store doesn't know of the deletion,
-      // and the stored fetch is from before it.
+      // The new store doesn't know of the deletion.
+      // Nor do the stored messages, if storing the old view's failed.
+      testBinding.globalStore.backend.storeCachedMessageFetchError =
+        Exception('failed');
       final newStore = await replaceStore(tester, messages: [message]);
+      check(testBinding.globalStore.backend.storeCachedMessageFetchError).isNull();
       check(newStore.debugMessageListViews.single.showingCachedMessages).isTrue();
       check(find.text('some message')).findsOne();
       check(find.text('deleted message')).findsNothing();
