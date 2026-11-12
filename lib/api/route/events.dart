@@ -93,19 +93,40 @@ Future<GetEventsResult> getEvents(ApiConnection connection, {
   }, timeout: timeout, abortTrigger: abortTrigger);
 }
 
-@JsonSerializable(fieldRename: FieldRename.snake)
+@JsonSerializable(fieldRename: FieldRename.snake, createFactory: false)
 class GetEventsResult {
   final List<Event> events;
   // TODO(server): Docs say queueId required; empirically sometimes missing.
   final String? queueId;
 
+  /// The JSON of each of [events], as received from the server,
+  /// if this result came from [GetEventsResult.fromJson]; else null.
+  ///
+  /// Unlike the result of [Event.toJson], this is exactly what the server sent.
+  @JsonKey(includeToJson: false)
+  final List<Map<String, dynamic>>? rawEvents;
+
   GetEventsResult({
     required this.events,
     required this.queueId,
+  }) : rawEvents = null;
+
+  GetEventsResult._({
+    required this.events,
+    required this.queueId,
+    required this.rawEvents,
   });
 
-  factory GetEventsResult.fromJson(Map<String, dynamic> json) =>
-    _$GetEventsResultFromJson(json);
+  factory GetEventsResult.fromJson(Map<String, dynamic> json) {
+    final rawEvents = [
+      for (final event in json['events'] as List<dynamic>)
+        event as Map<String, dynamic>,
+    ];
+    return GetEventsResult._(
+      events: rawEvents.map(Event.fromJson).toList(),
+      queueId: json['queue_id'] as String?,
+      rawEvents: rawEvents);
+  }
 
   Map<String, dynamic> toJson() => _$GetEventsResultToJson(this);
 }
