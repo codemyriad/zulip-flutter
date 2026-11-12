@@ -839,7 +839,7 @@ void main() {
     });
   });
 
-  group('cached messages, while fetchInitial retries', () {
+  group('while fetchInitial retries', () {
     // Tests of the model side are in test/model/message_list_test.dart.
 
     final channel = eg.stream(streamId: eg.defaultStreamMessageStreamId);
@@ -847,10 +847,15 @@ void main() {
     final findBanner = find.widgetWithText(ZulipBanner,
       'Showing saved messages. Connecting…');
 
-    Future<void> setupCached(WidgetTester tester, {
+    /// Open a message list whose initial fetch fails, and will be retried
+    /// after a backoff of 10 seconds;
+    /// see [prepareFreshFetch] and [retryFetch].
+    ///
+    /// If [cachedMessages] is non-null, the list shows those meanwhile.
+    Future<void> setupRetrying(WidgetTester tester, {
       Narrow narrow = const CombinedFeedNarrow(),
       List<Message> storeMessages = const [],
-      required List<Message> cachedMessages,
+      List<Message>? cachedMessages,
     }) async {
       addTearDown(testBinding.reset);
       BackoffMachine.debugDuration = const Duration(seconds: 10);
@@ -861,18 +866,21 @@ void main() {
       connection = store.connection as FakeApiConnection;
       await store.addUsers([eg.selfUser, eg.otherUser]);
       await store.addMessages(storeMessages);
-      testBinding.globalStore.backend.seedCachedMessageFetch(eg.selfAccount.id,
-        messageFetchCacheKey(narrow)!,
-        json: eg.newestGetMessagesResult(foundOldest: true,
-          messages: cachedMessages).toJson());
+      if (cachedMessages != null) {
+        testBinding.globalStore.backend.seedCachedMessageFetch(eg.selfAccount.id,
+          messageFetchCacheKey(narrow)!,
+          json: eg.newestGetMessagesResult(foundOldest: true,
+            messages: cachedMessages).toJson());
+      }
 
       connection.prepare(httpException: const SocketException('failed'));
       await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
         child: MessageListPage(initNarrow: narrow)));
       await tester.pump(); // global store, per-account store
-      await tester.pump(Duration.zero); // fetch fails, and cached messages are shown
+      await tester.pump(Duration.zero); // fetch fails, and any cached messages are shown
       check(connection.takeRequests()).single;
-      check(store.debugMessageListViews.single.showingCachedMessages).isTrue();
+      check(store.debugMessageListViews.single.showingCachedMessages)
+        .equals(cachedMessages != null);
     }
 
     void prepareFreshFetch(List<Message> messages) {
@@ -884,8 +892,68 @@ void main() {
       await tester.pump(BackoffMachine.debugDuration);
     }
 
+    testWidgets('no cached messages: spinner until fetch succeeds', (tester) async {
+      await setupRetrying(tester);
+      check(findLoadingIndicator).findsOne();
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await retryFetch(tester);
+      check(connection.takeRequests()).single;
+      check(findLoadingIndicator).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);
+      await retryFetch(tester);
+      check(connection.takeRequests()).single;
+      check(findLoadingIndicator).findsNothing();
+      check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('event queue expired during backoff: old view disposed, no request on old store', (tester) async {
+      // Compare the test 'dispose MessageListView when event queue expired'.
+      final message = eg.streamMessage(stream: channel, content: '<p>cached message</p>');
+      await setupRetrying(tester, cachedMessages: [message]);
+      final oldViewModel = store.debugMessageListViews.single;
+
+      // The [MessageList] rebuilds with the new store in the same frame
+      // the store is replaced in, because the loading indicators keep
+      // frames coming; so prepare the new store's response right away.
+      FakeApiConnection? newConnection;
+      void prepareNewStore() {
+        final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id);
+        if (newStore == null || newStore == store || newConnection != null) return;
+        newConnection = newStore.connection as FakeApiConnection;
+        newConnection!.prepare(json: eg.newestGetMessagesResult(
+          foundOldest: true, messages: [message]).toJson());
+      }
+      testBinding.globalStore.addListener(prepareNewStore);
+      addTearDown(() => testBinding.globalStore.removeListener(prepareNewStore));
+
+      final updateMachine = store.updateMachine!;
+      updateMachine.debugPauseLoop();
+      updateMachine.poll();
+      updateMachine.debugPrepareLoopError(
+        eg.apiExceptionBadEventQueueId(queueId: store.queueId));
+      updateMachine.debugAdvanceLoop();
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id)!;
+      check(newStore).not((it) => it.identicalTo(store));
+      check(connection.isOpen).isFalse();
+      check(store.debugMessageListViews).isEmpty();
+      check(newStore.debugMessageListViews).single
+        ..not((it) => it.equals(oldViewModel))
+        ..has((x) => x.fetched, 'fetched').isTrue();
+      check(newConnection!.takeRequests()).single;
+
+      // The old view never retries,
+      // which would be a request on the old, closed connection.
+      await retryFetch(tester);
+      check(connection.takeRequests()).isEmpty();
+    });
+
     testWidgets('banner while showing cached messages', (tester) async {
-      await setupCached(tester, cachedMessages: [
+      await setupRetrying(tester, cachedMessages: [
         eg.streamMessage(stream: channel, content: '<p>cached message</p>')]);
       check(find.text('cached message')).findsOne();
       check(findBanner).findsOne();
@@ -899,7 +967,7 @@ void main() {
     });
 
     testWidgets('scroll-to-bottom button scrolls, without refetching', (tester) async {
-      await setupCached(tester, cachedMessages: List.generate(30,
+      await setupRetrying(tester, cachedMessages: List.generate(30,
         (_) => eg.streamMessage(stream: channel)));
       final controller = findMessageListScrollController(tester)!;
       controller.jumpTo(-600);
@@ -920,7 +988,7 @@ void main() {
       await testBinding.globalStore.settings
         .setMarkReadOnScroll(MarkReadOnScrollSetting.always);
       final message = eg.streamMessage(stream: channel, flags: []);
-      await setupCached(tester,
+      await setupRetrying(tester,
         storeMessages: [message], cachedMessages: [message]);
       await tester.pump();
       check(connection.takeRequests()).isEmpty();
@@ -949,7 +1017,7 @@ void main() {
       final cacheOnlyMessage = eg.streamMessage(stream: channel,
         content: '<p>cache-only message</p>',
         reactions: [eg.unicodeEmojiReaction]);
-      await setupCached(tester, storeMessages: [storeMessage],
+      await setupRetrying(tester, storeMessages: [storeMessage],
         cachedMessages: [storeMessage, cacheOnlyMessage]);
 
       await tester.longPress(find.text('cache-only message'));
@@ -968,7 +1036,7 @@ void main() {
 
     testWidgets('scroll position reset when fresh messages replace cached', (tester) async {
       final messages = List.generate(30, (_) => eg.streamMessage(stream: channel));
-      await setupCached(tester, cachedMessages: messages);
+      await setupRetrying(tester, cachedMessages: messages);
       final controller = findMessageListScrollController(tester)!;
       check(controller.position).extentAfter.equals(0);
       controller.jumpTo(-600);
