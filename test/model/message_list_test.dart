@@ -1137,6 +1137,22 @@ void main() {
         await fetchFuture;
       }));
 
+      test('not parsed when request succeeds sooner', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        // Corrupt data would be deleted if parsed.
+        backend.seedCachedMessageFetch(eg.selfAccount.id, messageFetchCacheKey(narrow)!,
+          data: utf8.encode('{"messages": "nonsense"'));
+        // Keep the fresh fetch from replacing the stored one.
+        backend.storeCachedMessageFetchError = Exception('failed');
+        prepareSuccess([eg.streamMessage(stream: channel)],
+          delay: kShowCachedMessagesDelay ~/ 2);
+        await model.fetchInitial();
+        checkNotifiedOnce();
+        async.elapse(kShowCachedMessagesDelay);
+        check(cachedFetchOf(narrow)).isNotNull();
+      }));
+
       test('not used with numeric anchor', () => awaitFakeAsync((async) async {
         BackoffMachine.debugDuration = const Duration(seconds: 10);
         addTearDown(() => BackoffMachine.debugDuration = null);

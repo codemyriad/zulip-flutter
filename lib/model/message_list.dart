@@ -1046,15 +1046,18 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     };
 
     // Meanwhile, read any stored fetch, in parallel with the request.
-    GetMessagesResult? cachedResult;
+    // Parse it only if it's to be shown; usually the request succeeds first.
+    Uint8List? cachedData;
     bool mayShowCached = useCache;
     bool shouldShowCached = false;
     void maybeShowCached() {
       if (isStale() || !mayShowCached || !shouldShowCached) return;
-      final result = cachedResult;
-      if (result == null) return;
+      final data = cachedData;
+      if (data == null) return;
       assert(_status == FetchingStatus.fetchInitial);
       mayShowCached = false;
+      final result = _parseCachedMessageFetch(cacheKey!, data);
+      if (result == null) return;
       _showCachedMessages(result);
     }
     if (useCache) {
@@ -1064,14 +1067,14 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         shouldShowCached = true;
         maybeShowCached();
       });
-      unawaited(_loadCachedMessageFetch(cacheKey).then((result) {
+      unawaited(store.loadCachedMessageFetch(cacheKey).then((data) {
         if (isStale()) return;
-        if (result == null) {
+        if (data == null) {
           mayShowCached = false;
           _cancelShowCachedMessagesTimer();
           return;
         }
-        cachedResult = result;
+        cachedData = data;
         maybeShowCached();
       }));
     }
@@ -1179,12 +1182,10 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _setStatus(FetchingStatus.idle);
   }
 
-  /// Read and parse the stored fetch for [cacheKey], if any.
+  /// Parse [data], the stored fetch for [cacheKey].
   ///
-  /// If the stored data doesn't parse, this deletes it and returns null.
-  Future<GetMessagesResult?> _loadCachedMessageFetch(String cacheKey) async {
-    final data = await store.loadCachedMessageFetch(cacheKey);
-    if (data == null) return null;
+  /// If the data doesn't parse, this deletes it and returns null.
+  GetMessagesResult? _parseCachedMessageFetch(String cacheKey, Uint8List data) {
     try {
       return GetMessagesResult.fromJson(
         jsonUtf8Decoder.convert(data) as Map<String, dynamic>);
