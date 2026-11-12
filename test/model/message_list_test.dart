@@ -972,22 +972,25 @@ void main() {
         check(model).showingCachedMessages.isFalse();
       }));
 
-      test('show at once while event stream is recovering', () => awaitFakeAsync((async) async {
+      test('not shown at once while event stream is recovering', () => awaitFakeAsync((async) async {
+        // On startup from stored server data, the event stream is recovering
+        // until the first poll succeeds, even when the network is fine.
+        // Showing the cached messages at once would make them flash by.
         const narrow = CombinedFeedNarrow();
         await prepare(narrow: narrow, stream: channel);
-        final cached = [eg.streamMessage(stream: channel)];
-        seedCachedFetch(narrow, cached);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
         store.isRecoveringEventStream = true;
         final fresh = [eg.streamMessage(stream: channel)];
-        prepareSuccess(fresh, delay: kShowCachedMessagesDelay * 2);
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay ~/ 2);
         final fetchFuture = model.fetchInitial();
 
         async.elapse(Duration.zero);
-        checkNotifiedOnce();
-        checkShowingCached(cached);
+        checkNotNotified();
+        checkWaiting();
 
-        async.elapse(kShowCachedMessagesDelay * 2);
+        async.elapse(kShowCachedMessagesDelay ~/ 2);
         checkNotifiedOnce();
+        check(model).showingCachedMessages.isFalse();
         checkHasMessages(fresh);
         await fetchFuture;
       }));
@@ -1014,7 +1017,6 @@ void main() {
         await prepare(narrow: narrow, stream: channel);
         backend.loadCachedMessageFetchGate = gate.future;
         seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
-        store.isRecoveringEventStream = true;
         final fresh = [eg.streamMessage(stream: channel)];
         prepareSuccess(fresh);
         await model.fetchInitial();
@@ -1176,7 +1178,6 @@ void main() {
         await prepare(narrow: narrow, stream: channel);
         backend.loadCachedMessageFetchGate = gate.future;
         seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
-        store.isRecoveringEventStream = true;
         // Keep the stored fetch, so the read finds it.
         backend.deleteCachedMessageFetchError = Exception('failed');
         connection.prepare(apiException: eg.apiBadRequest());

@@ -1006,7 +1006,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// On other errors, this throws.
   ///
   /// Meanwhile, if the request has failed, or has taken longer than
-  /// [kShowCachedMessagesDelay], or the event stream is recovering,
+  /// [kShowCachedMessagesDelay],
   /// this shows the messages from the narrow's stored earlier fetch, if any.
   /// See [showingCachedMessages].
   /// A fetch is stored after it succeeds, if [narrow] isn't a keyword search
@@ -1072,9 +1072,6 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           return;
         }
         cachedResult = result;
-        // When the event stream is having trouble,
-        // this request probably is too; don't wait for it.
-        if (store.isRecoveringEventStream) shouldShowCached = true;
         maybeShowCached();
       }));
     }
