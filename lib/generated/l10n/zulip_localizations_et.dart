@@ -1450,6 +1450,9 @@ class ZulipLocalizationsEt extends ZulipLocalizations {
       'Showing saved messages. Connecting…';
 
   @override
+  String get messageListCantConnectRetrying => 'Can’t connect. Retrying…';
+
+  @override
   String get zulipAppTitle => 'Zulip';
 
   @override

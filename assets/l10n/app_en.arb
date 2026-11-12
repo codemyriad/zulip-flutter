@@ -1721,6 +1721,10 @@
   "@messageListBannerLabelShowingSavedMessages": {
     "description": "Label text for a banner in the message list when it shows messages saved on the device from an earlier visit, because it has not yet been able to load messages from the server."
   },
+  "messageListCantConnectRetrying": "Can’t connect. Retrying…",
+  "@messageListCantConnectRetrying": {
+    "description": "Text shown with a loading indicator in the message list when loading messages from the server keeps failing, as when the device is offline, and there are no saved messages to show meanwhile."
+  },
   "zulipAppTitle": "Zulip",
   "@zulipAppTitle": {
     "description": "The name of Zulip. This should be either 'Zulip' or a transliteration."

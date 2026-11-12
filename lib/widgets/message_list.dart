@@ -1166,7 +1166,9 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
   Widget build(BuildContext context) {
     final zulipLocalizations = ZulipLocalizations.of(context);
 
-    if (!model.fetched) return const Center(child: CircularProgressIndicator());
+    if (!model.fetched) {
+      return _MessageListInitialLoading(failing: model.fetchInitialFailing);
+    }
 
     if (model.items.isEmpty && model.haveNewest && model.haveOldest) {
       return _EmptyMessageListPlaceholder(narrow: widget.narrow);
@@ -1401,6 +1403,45 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
           isLastInFeed: isLastInFeed,
           item: data);
     }
+  }
+}
+
+/// What the message list shows before it has any messages to show,
+/// while its initial fetch is in progress.
+class _MessageListInitialLoading extends StatelessWidget {
+  const _MessageListInitialLoading({required this.failing});
+
+  /// Whether the fetch is failing and being retried;
+  /// see [MessageListView.fetchInitialFailing].
+  final bool failing;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!failing) return const Center(child: CircularProgressIndicator());
+
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final designVariables = DesignVariables.of(context);
+    return SafeArea(
+      bottom: false,
+      minimum: const EdgeInsets.symmetric(horizontal: 24),
+      child: Center(
+        // Scrollable so that it doesn't overflow when there's little room,
+        // e.g. in landscape with the keyboard open.
+        child: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          spacing: 16,
+          children: [
+            const CircularProgressIndicator(),
+            // Styled like [PageBodyEmptyContentPlaceholder.message].
+            Text(
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: designVariables.labelSearchPrompt,
+                fontSize: 17,
+                height: 23 / 17,
+              ).merge(weightVariableTextStyle(context, wght: 500)),
+              zulipLocalizations.messageListCantConnectRetrying),
+          ]))));
   }
 }
 

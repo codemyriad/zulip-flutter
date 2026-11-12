@@ -847,6 +847,8 @@ void main() {
     final findBanner = find.widgetWithText(ZulipBanner,
       'Showing saved messages. Connecting…');
 
+    final findCantConnect = find.text('Can’t connect. Retrying…');
+
     /// Open a message list whose initial fetch fails, and will be retried
     /// after a backoff of 10 seconds;
     /// see [prepareFreshFetch] and [retryFetch].
@@ -890,6 +892,17 @@ void main() {
       await tester.pump(BackoffMachine.debugDuration);
     }
 
+    testWidgets('no overflow when there is little room', (tester) async {
+      // Landscape on a small phone, with the keyboard open.
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(640, 360);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 150);
+      addTearDown(tester.view.reset);
+      await setupRetrying(tester,
+        narrow: eg.topicNarrow(channel.streamId, 'topic'));
+      check(findCantConnect).findsOne();
+    });
+
     testWidgets('no cached messages: spinner until fetch succeeds', (tester) async {
       await setupRetrying(tester);
       check(findLoadingIndicator).findsOne();
@@ -905,6 +918,70 @@ void main() {
       check(connection.takeRequests()).single;
       check(findLoadingIndicator).findsNothing();
       check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('no cached messages: "can\'t connect" with the spinner once a fetch fails', (tester) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      connection.prepare(httpException: const SocketException('failed'),
+        delay: const Duration(seconds: 1));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: const CombinedFeedNarrow())));
+      await tester.pump(); // global store, per-account store
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsNothing();
+
+      await tester.pump(const Duration(seconds: 1)); // the fetch fails
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsOne();
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('keyword search: "can\'t connect" until fetch succeeds', (tester) async {
+      await setupRetrying(tester, narrow: KeywordSearchNarrow('hello'));
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>hello world</p>')]);
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('hello world')).findsOne();
+    });
+
+    testWidgets('keyword search: "can\'t connect" cleared on new search', (tester) async {
+      await setupRetrying(tester, narrow: KeywordSearchNarrow('hello'));
+      check(findCantConnect).findsOne();
+
+      connection.prepare(json: eg.newestGetMessagesResult(foundOldest: true,
+        messages: [eg.streamMessage(stream: channel, content: '<p>goodbye world</p>')],
+      ).toJson(), delay: const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), 'goodbye');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsNothing();
+
+      await tester.pump(const Duration(seconds: 1));
+      check(findLoadingIndicator).findsNothing();
+      check(find.text('goodbye world')).findsOne();
     });
 
     testWidgets('event queue expired during backoff: old view disposed, no request on old store', (tester) async {
@@ -1049,6 +1126,7 @@ void main() {
         eg.streamMessage(stream: channel, content: '<p>cached message</p>')]);
       check(find.text('cached message')).findsOne();
       check(findBanner).findsOne();
+      check(findCantConnect).findsNothing();
 
       prepareFreshFetch([
         eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);

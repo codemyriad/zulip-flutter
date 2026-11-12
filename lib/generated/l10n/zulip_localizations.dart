@@ -2502,6 +2502,12 @@ abstract class ZulipLocalizations {
   /// **'Showing saved messages. Connecting…'**
   String get messageListBannerLabelShowingSavedMessages;
 
+  /// Text shown with a loading indicator in the message list when loading messages from the server keeps failing, as when the device is offline, and there are no saved messages to show meanwhile.
+  ///
+  /// In en, this message translates to:
+  /// **'Can’t connect. Retrying…'**
+  String get messageListCantConnectRetrying;
+
   /// The name of Zulip. This should be either 'Zulip' or a transliteration.
   ///
   /// In en, this message translates to:
