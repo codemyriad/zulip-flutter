@@ -2096,6 +2096,810 @@ class PushKeysCompanion extends UpdateCompanion<PushKey> {
   }
 }
 
+class $ServerSnapshotsTable extends ServerSnapshots
+    with TableInfo<$ServerSnapshotsTable, ServerSnapshot> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ServerSnapshotsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<int> accountId = GeneratedColumn<int>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES accounts (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _queueIdMeta = const VerificationMeta(
+    'queueId',
+  );
+  @override
+  late final GeneratedColumn<String> queueId = GeneratedColumn<String>(
+    'queue_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastEventIdMeta = const VerificationMeta(
+    'lastEventId',
+  );
+  @override
+  late final GeneratedColumn<int> lastEventId = GeneratedColumn<int>(
+    'last_event_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _appVersionMeta = const VerificationMeta(
+    'appVersion',
+  );
+  @override
+  late final GeneratedColumn<String> appVersion = GeneratedColumn<String>(
+    'app_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _timestampMeta = const VerificationMeta(
+    'timestamp',
+  );
+  @override
+  late final GeneratedColumn<int> timestamp = GeneratedColumn<int>(
+    'timestamp',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dataMeta = const VerificationMeta('data');
+  @override
+  late final GeneratedColumn<Uint8List> data = GeneratedColumn<Uint8List>(
+    'data',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    accountId,
+    queueId,
+    lastEventId,
+    appVersion,
+    timestamp,
+    data,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'server_snapshots';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ServerSnapshot> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    }
+    if (data.containsKey('queue_id')) {
+      context.handle(
+        _queueIdMeta,
+        queueId.isAcceptableOrUnknown(data['queue_id']!, _queueIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_queueIdMeta);
+    }
+    if (data.containsKey('last_event_id')) {
+      context.handle(
+        _lastEventIdMeta,
+        lastEventId.isAcceptableOrUnknown(
+          data['last_event_id']!,
+          _lastEventIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastEventIdMeta);
+    }
+    if (data.containsKey('app_version')) {
+      context.handle(
+        _appVersionMeta,
+        appVersion.isAcceptableOrUnknown(data['app_version']!, _appVersionMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_appVersionMeta);
+    }
+    if (data.containsKey('timestamp')) {
+      context.handle(
+        _timestampMeta,
+        timestamp.isAcceptableOrUnknown(data['timestamp']!, _timestampMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_timestampMeta);
+    }
+    if (data.containsKey('data')) {
+      context.handle(
+        _dataMeta,
+        this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dataMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {accountId};
+  @override
+  ServerSnapshot map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ServerSnapshot(
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}account_id'],
+      )!,
+      queueId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}queue_id'],
+      )!,
+      lastEventId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_event_id'],
+      )!,
+      appVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}app_version'],
+      )!,
+      timestamp: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}timestamp'],
+      )!,
+      data: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}data'],
+      )!,
+    );
+  }
+
+  @override
+  $ServerSnapshotsTable createAlias(String alias) {
+    return $ServerSnapshotsTable(attachedDatabase, alias);
+  }
+}
+
+class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
+  final int accountId;
+
+  /// The ID of the event queue the snapshot was registered with.
+  ///
+  /// This corresponds to [InitialSnapshot.queueId].
+  final String queueId;
+
+  /// The ID of the last event received on the queue and stored,
+  /// i.e. the event-queue position to resume from.
+  ///
+  /// This starts out as [InitialSnapshot.lastEventId],
+  /// and advances as batches of events are received.
+  final int lastEventId;
+
+  /// The app version that stored the snapshot,
+  /// as "version+buildNumber".
+  final String appVersion;
+
+  /// When the snapshot was registered, in seconds since the Unix epoch.
+  final int timestamp;
+
+  /// The body of the server's response to [registerQueue], as UTF-8 JSON.
+  final Uint8List data;
+  const ServerSnapshot({
+    required this.accountId,
+    required this.queueId,
+    required this.lastEventId,
+    required this.appVersion,
+    required this.timestamp,
+    required this.data,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['account_id'] = Variable<int>(accountId);
+    map['queue_id'] = Variable<String>(queueId);
+    map['last_event_id'] = Variable<int>(lastEventId);
+    map['app_version'] = Variable<String>(appVersion);
+    map['timestamp'] = Variable<int>(timestamp);
+    map['data'] = Variable<Uint8List>(data);
+    return map;
+  }
+
+  ServerSnapshotsCompanion toCompanion(bool nullToAbsent) {
+    return ServerSnapshotsCompanion(
+      accountId: Value(accountId),
+      queueId: Value(queueId),
+      lastEventId: Value(lastEventId),
+      appVersion: Value(appVersion),
+      timestamp: Value(timestamp),
+      data: Value(data),
+    );
+  }
+
+  factory ServerSnapshot.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ServerSnapshot(
+      accountId: serializer.fromJson<int>(json['accountId']),
+      queueId: serializer.fromJson<String>(json['queueId']),
+      lastEventId: serializer.fromJson<int>(json['lastEventId']),
+      appVersion: serializer.fromJson<String>(json['appVersion']),
+      timestamp: serializer.fromJson<int>(json['timestamp']),
+      data: serializer.fromJson<Uint8List>(json['data']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'accountId': serializer.toJson<int>(accountId),
+      'queueId': serializer.toJson<String>(queueId),
+      'lastEventId': serializer.toJson<int>(lastEventId),
+      'appVersion': serializer.toJson<String>(appVersion),
+      'timestamp': serializer.toJson<int>(timestamp),
+      'data': serializer.toJson<Uint8List>(data),
+    };
+  }
+
+  ServerSnapshot copyWith({
+    int? accountId,
+    String? queueId,
+    int? lastEventId,
+    String? appVersion,
+    int? timestamp,
+    Uint8List? data,
+  }) => ServerSnapshot(
+    accountId: accountId ?? this.accountId,
+    queueId: queueId ?? this.queueId,
+    lastEventId: lastEventId ?? this.lastEventId,
+    appVersion: appVersion ?? this.appVersion,
+    timestamp: timestamp ?? this.timestamp,
+    data: data ?? this.data,
+  );
+  ServerSnapshot copyWithCompanion(ServerSnapshotsCompanion data) {
+    return ServerSnapshot(
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      queueId: data.queueId.present ? data.queueId.value : this.queueId,
+      lastEventId: data.lastEventId.present
+          ? data.lastEventId.value
+          : this.lastEventId,
+      appVersion: data.appVersion.present
+          ? data.appVersion.value
+          : this.appVersion,
+      timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
+      data: data.data.present ? data.data.value : this.data,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshot(')
+          ..write('accountId: $accountId, ')
+          ..write('queueId: $queueId, ')
+          ..write('lastEventId: $lastEventId, ')
+          ..write('appVersion: $appVersion, ')
+          ..write('timestamp: $timestamp, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    accountId,
+    queueId,
+    lastEventId,
+    appVersion,
+    timestamp,
+    $driftBlobEquality.hash(data),
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ServerSnapshot &&
+          other.accountId == this.accountId &&
+          other.queueId == this.queueId &&
+          other.lastEventId == this.lastEventId &&
+          other.appVersion == this.appVersion &&
+          other.timestamp == this.timestamp &&
+          $driftBlobEquality.equals(other.data, this.data));
+}
+
+class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
+  final Value<int> accountId;
+  final Value<String> queueId;
+  final Value<int> lastEventId;
+  final Value<String> appVersion;
+  final Value<int> timestamp;
+  final Value<Uint8List> data;
+  const ServerSnapshotsCompanion({
+    this.accountId = const Value.absent(),
+    this.queueId = const Value.absent(),
+    this.lastEventId = const Value.absent(),
+    this.appVersion = const Value.absent(),
+    this.timestamp = const Value.absent(),
+    this.data = const Value.absent(),
+  });
+  ServerSnapshotsCompanion.insert({
+    this.accountId = const Value.absent(),
+    required String queueId,
+    required int lastEventId,
+    required String appVersion,
+    required int timestamp,
+    required Uint8List data,
+  }) : queueId = Value(queueId),
+       lastEventId = Value(lastEventId),
+       appVersion = Value(appVersion),
+       timestamp = Value(timestamp),
+       data = Value(data);
+  static Insertable<ServerSnapshot> custom({
+    Expression<int>? accountId,
+    Expression<String>? queueId,
+    Expression<int>? lastEventId,
+    Expression<String>? appVersion,
+    Expression<int>? timestamp,
+    Expression<Uint8List>? data,
+  }) {
+    return RawValuesInsertable({
+      if (accountId != null) 'account_id': accountId,
+      if (queueId != null) 'queue_id': queueId,
+      if (lastEventId != null) 'last_event_id': lastEventId,
+      if (appVersion != null) 'app_version': appVersion,
+      if (timestamp != null) 'timestamp': timestamp,
+      if (data != null) 'data': data,
+    });
+  }
+
+  ServerSnapshotsCompanion copyWith({
+    Value<int>? accountId,
+    Value<String>? queueId,
+    Value<int>? lastEventId,
+    Value<String>? appVersion,
+    Value<int>? timestamp,
+    Value<Uint8List>? data,
+  }) {
+    return ServerSnapshotsCompanion(
+      accountId: accountId ?? this.accountId,
+      queueId: queueId ?? this.queueId,
+      lastEventId: lastEventId ?? this.lastEventId,
+      appVersion: appVersion ?? this.appVersion,
+      timestamp: timestamp ?? this.timestamp,
+      data: data ?? this.data,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (accountId.present) {
+      map['account_id'] = Variable<int>(accountId.value);
+    }
+    if (queueId.present) {
+      map['queue_id'] = Variable<String>(queueId.value);
+    }
+    if (lastEventId.present) {
+      map['last_event_id'] = Variable<int>(lastEventId.value);
+    }
+    if (appVersion.present) {
+      map['app_version'] = Variable<String>(appVersion.value);
+    }
+    if (timestamp.present) {
+      map['timestamp'] = Variable<int>(timestamp.value);
+    }
+    if (data.present) {
+      map['data'] = Variable<Uint8List>(data.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshotsCompanion(')
+          ..write('accountId: $accountId, ')
+          ..write('queueId: $queueId, ')
+          ..write('lastEventId: $lastEventId, ')
+          ..write('appVersion: $appVersion, ')
+          ..write('timestamp: $timestamp, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $ServerEventBatchesTable extends ServerEventBatches
+    with TableInfo<$ServerEventBatchesTable, ServerEventBatch> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ServerEventBatchesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<int> accountId = GeneratedColumn<int>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES accounts (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _queueIdMeta = const VerificationMeta(
+    'queueId',
+  );
+  @override
+  late final GeneratedColumn<String> queueId = GeneratedColumn<String>(
+    'queue_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastEventIdMeta = const VerificationMeta(
+    'lastEventId',
+  );
+  @override
+  late final GeneratedColumn<int> lastEventId = GeneratedColumn<int>(
+    'last_event_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dataMeta = const VerificationMeta('data');
+  @override
+  late final GeneratedColumn<Uint8List> data = GeneratedColumn<Uint8List>(
+    'data',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    accountId,
+    queueId,
+    lastEventId,
+    data,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'server_event_batches';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ServerEventBatch> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_accountIdMeta);
+    }
+    if (data.containsKey('queue_id')) {
+      context.handle(
+        _queueIdMeta,
+        queueId.isAcceptableOrUnknown(data['queue_id']!, _queueIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_queueIdMeta);
+    }
+    if (data.containsKey('last_event_id')) {
+      context.handle(
+        _lastEventIdMeta,
+        lastEventId.isAcceptableOrUnknown(
+          data['last_event_id']!,
+          _lastEventIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastEventIdMeta);
+    }
+    if (data.containsKey('data')) {
+      context.handle(
+        _dataMeta,
+        this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dataMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  ServerEventBatch map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ServerEventBatch(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}account_id'],
+      )!,
+      queueId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}queue_id'],
+      )!,
+      lastEventId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_event_id'],
+      )!,
+      data: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}data'],
+      )!,
+    );
+  }
+
+  @override
+  $ServerEventBatchesTable createAlias(String alias) {
+    return $ServerEventBatchesTable(attachedDatabase, alias);
+  }
+}
+
+class ServerEventBatch extends DataClass
+    implements Insertable<ServerEventBatch> {
+  final int id;
+  final int accountId;
+
+  /// The ID of the event queue the events were received on.
+  final String queueId;
+
+  /// The ID of the last event in the batch as received,
+  /// including any events that were left out of [data].
+  final int lastEventId;
+
+  /// The events, as a UTF-8 JSON array of the events' JSON objects.
+  final Uint8List data;
+  const ServerEventBatch({
+    required this.id,
+    required this.accountId,
+    required this.queueId,
+    required this.lastEventId,
+    required this.data,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['account_id'] = Variable<int>(accountId);
+    map['queue_id'] = Variable<String>(queueId);
+    map['last_event_id'] = Variable<int>(lastEventId);
+    map['data'] = Variable<Uint8List>(data);
+    return map;
+  }
+
+  ServerEventBatchesCompanion toCompanion(bool nullToAbsent) {
+    return ServerEventBatchesCompanion(
+      id: Value(id),
+      accountId: Value(accountId),
+      queueId: Value(queueId),
+      lastEventId: Value(lastEventId),
+      data: Value(data),
+    );
+  }
+
+  factory ServerEventBatch.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ServerEventBatch(
+      id: serializer.fromJson<int>(json['id']),
+      accountId: serializer.fromJson<int>(json['accountId']),
+      queueId: serializer.fromJson<String>(json['queueId']),
+      lastEventId: serializer.fromJson<int>(json['lastEventId']),
+      data: serializer.fromJson<Uint8List>(json['data']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'accountId': serializer.toJson<int>(accountId),
+      'queueId': serializer.toJson<String>(queueId),
+      'lastEventId': serializer.toJson<int>(lastEventId),
+      'data': serializer.toJson<Uint8List>(data),
+    };
+  }
+
+  ServerEventBatch copyWith({
+    int? id,
+    int? accountId,
+    String? queueId,
+    int? lastEventId,
+    Uint8List? data,
+  }) => ServerEventBatch(
+    id: id ?? this.id,
+    accountId: accountId ?? this.accountId,
+    queueId: queueId ?? this.queueId,
+    lastEventId: lastEventId ?? this.lastEventId,
+    data: data ?? this.data,
+  );
+  ServerEventBatch copyWithCompanion(ServerEventBatchesCompanion data) {
+    return ServerEventBatch(
+      id: data.id.present ? data.id.value : this.id,
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      queueId: data.queueId.present ? data.queueId.value : this.queueId,
+      lastEventId: data.lastEventId.present
+          ? data.lastEventId.value
+          : this.lastEventId,
+      data: data.data.present ? data.data.value : this.data,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerEventBatch(')
+          ..write('id: $id, ')
+          ..write('accountId: $accountId, ')
+          ..write('queueId: $queueId, ')
+          ..write('lastEventId: $lastEventId, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    accountId,
+    queueId,
+    lastEventId,
+    $driftBlobEquality.hash(data),
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ServerEventBatch &&
+          other.id == this.id &&
+          other.accountId == this.accountId &&
+          other.queueId == this.queueId &&
+          other.lastEventId == this.lastEventId &&
+          $driftBlobEquality.equals(other.data, this.data));
+}
+
+class ServerEventBatchesCompanion extends UpdateCompanion<ServerEventBatch> {
+  final Value<int> id;
+  final Value<int> accountId;
+  final Value<String> queueId;
+  final Value<int> lastEventId;
+  final Value<Uint8List> data;
+  const ServerEventBatchesCompanion({
+    this.id = const Value.absent(),
+    this.accountId = const Value.absent(),
+    this.queueId = const Value.absent(),
+    this.lastEventId = const Value.absent(),
+    this.data = const Value.absent(),
+  });
+  ServerEventBatchesCompanion.insert({
+    this.id = const Value.absent(),
+    required int accountId,
+    required String queueId,
+    required int lastEventId,
+    required Uint8List data,
+  }) : accountId = Value(accountId),
+       queueId = Value(queueId),
+       lastEventId = Value(lastEventId),
+       data = Value(data);
+  static Insertable<ServerEventBatch> custom({
+    Expression<int>? id,
+    Expression<int>? accountId,
+    Expression<String>? queueId,
+    Expression<int>? lastEventId,
+    Expression<Uint8List>? data,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (accountId != null) 'account_id': accountId,
+      if (queueId != null) 'queue_id': queueId,
+      if (lastEventId != null) 'last_event_id': lastEventId,
+      if (data != null) 'data': data,
+    });
+  }
+
+  ServerEventBatchesCompanion copyWith({
+    Value<int>? id,
+    Value<int>? accountId,
+    Value<String>? queueId,
+    Value<int>? lastEventId,
+    Value<Uint8List>? data,
+  }) {
+    return ServerEventBatchesCompanion(
+      id: id ?? this.id,
+      accountId: accountId ?? this.accountId,
+      queueId: queueId ?? this.queueId,
+      lastEventId: lastEventId ?? this.lastEventId,
+      data: data ?? this.data,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (accountId.present) {
+      map['account_id'] = Variable<int>(accountId.value);
+    }
+    if (queueId.present) {
+      map['queue_id'] = Variable<String>(queueId.value);
+    }
+    if (lastEventId.present) {
+      map['last_event_id'] = Variable<int>(lastEventId.value);
+    }
+    if (data.present) {
+      map['data'] = Variable<Uint8List>(data.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerEventBatchesCompanion(')
+          ..write('id: $id, ')
+          ..write('accountId: $accountId, ')
+          ..write('queueId: $queueId, ')
+          ..write('lastEventId: $lastEventId, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2106,6 +2910,15 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $IntGlobalSettingsTable(this);
   late final $AccountsTable accounts = $AccountsTable(this);
   late final $PushKeysTable pushKeys = $PushKeysTable(this);
+  late final $ServerSnapshotsTable serverSnapshots = $ServerSnapshotsTable(
+    this,
+  );
+  late final $ServerEventBatchesTable serverEventBatches =
+      $ServerEventBatchesTable(this);
+  late final Index idxServerEventBatchesAccountId = Index(
+    'idx_server_event_batches_account_id',
+    'CREATE INDEX idx_server_event_batches_account_id ON server_event_batches (account_id)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2116,6 +2929,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     intGlobalSettings,
     accounts,
     pushKeys,
+    serverSnapshots,
+    serverEventBatches,
+    idxServerEventBatchesAccountId,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -2125,6 +2941,20 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('push_keys', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'accounts',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('server_snapshots', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'accounts',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('server_event_batches', kind: UpdateKind.delete)],
     ),
   ]);
 }
@@ -2769,6 +3599,47 @@ final class $$AccountsTableReferences
       manager.$state.copyWith(prefetchedData: cache),
     );
   }
+
+  static MultiTypedResultKey<$ServerSnapshotsTable, List<ServerSnapshot>>
+  _serverSnapshotsRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.serverSnapshots,
+    aliasName: 'accounts__id__server_snapshots__account_id',
+  );
+
+  $$ServerSnapshotsTableProcessedTableManager get serverSnapshotsRefs {
+    final manager = $$ServerSnapshotsTableTableManager(
+      $_db,
+      $_db.serverSnapshots,
+    ).filter((f) => f.accountId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _serverSnapshotsRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+
+  static MultiTypedResultKey<$ServerEventBatchesTable, List<ServerEventBatch>>
+  _serverEventBatchesRefsTable(_$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(
+        db.serverEventBatches,
+        aliasName: 'accounts__id__server_event_batches__account_id',
+      );
+
+  $$ServerEventBatchesTableProcessedTableManager get serverEventBatchesRefs {
+    final manager = $$ServerEventBatchesTableTableManager(
+      $_db,
+      $_db.serverEventBatches,
+    ).filter((f) => f.accountId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _serverEventBatchesRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
 }
 
 class $$AccountsTableFilterComposer
@@ -2858,6 +3729,56 @@ class $$AccountsTableFilterComposer
           }) => $$PushKeysTableFilterComposer(
             $db: $db,
             $table: $db.pushKeys,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> serverSnapshotsRefs(
+    Expression<bool> Function($$ServerSnapshotsTableFilterComposer f) f,
+  ) {
+    final $$ServerSnapshotsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.serverSnapshots,
+      getReferencedColumn: (t) => t.accountId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$ServerSnapshotsTableFilterComposer(
+            $db: $db,
+            $table: $db.serverSnapshots,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> serverEventBatchesRefs(
+    Expression<bool> Function($$ServerEventBatchesTableFilterComposer f) f,
+  ) {
+    final $$ServerEventBatchesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.serverEventBatches,
+      getReferencedColumn: (t) => t.accountId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$ServerEventBatchesTableFilterComposer(
+            $db: $db,
+            $table: $db.serverEventBatches,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -3015,6 +3936,57 @@ class $$AccountsTableAnnotationComposer
     );
     return f(composer);
   }
+
+  Expression<T> serverSnapshotsRefs<T extends Object>(
+    Expression<T> Function($$ServerSnapshotsTableAnnotationComposer a) f,
+  ) {
+    final $$ServerSnapshotsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.serverSnapshots,
+      getReferencedColumn: (t) => t.accountId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$ServerSnapshotsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.serverSnapshots,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<T> serverEventBatchesRefs<T extends Object>(
+    Expression<T> Function($$ServerEventBatchesTableAnnotationComposer a) f,
+  ) {
+    final $$ServerEventBatchesTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.id,
+          referencedTable: $db.serverEventBatches,
+          getReferencedColumn: (t) => t.accountId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$ServerEventBatchesTableAnnotationComposer(
+                $db: $db,
+                $table: $db.serverEventBatches,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
 }
 
 class $$AccountsTableTableManager
@@ -3030,7 +4002,11 @@ class $$AccountsTableTableManager
           $$AccountsTableUpdateCompanionBuilder,
           (Account, $$AccountsTableReferences),
           Account,
-          PrefetchHooks Function({bool pushKeysRefs})
+          PrefetchHooks Function({
+            bool pushKeysRefs,
+            bool serverSnapshotsRefs,
+            bool serverEventBatchesRefs,
+          })
         > {
   $$AccountsTableTableManager(_$AppDatabase db, $AccountsTable table)
     : super(
@@ -3107,28 +4083,89 @@ class $$AccountsTableTableManager
                 ),
               )
               .toList(),
-          prefetchHooksCallback: ({pushKeysRefs = false}) {
-            return PrefetchHooks(
-              db: db,
-              explicitlyWatchedTables: [if (pushKeysRefs) db.pushKeys],
-              addJoins: null,
-              getPrefetchedDataCallback: (items) async {
-                return [
-                  if (pushKeysRefs)
-                    await $_getPrefetchedData<Account, $AccountsTable, PushKey>(
-                      currentTable: table,
-                      referencedTable: $$AccountsTableReferences
-                          ._pushKeysRefsTable(db),
-                      managerFromTypedResult: (p0) =>
-                          $$AccountsTableReferences(db, table, p0).pushKeysRefs,
-                      referencedItemsForCurrentItem: (item, referencedItems) =>
-                          referencedItems.where((e) => e.accountId == item.id),
-                      typedResults: items,
-                    ),
-                ];
+          prefetchHooksCallback:
+              ({
+                pushKeysRefs = false,
+                serverSnapshotsRefs = false,
+                serverEventBatchesRefs = false,
+              }) {
+                return PrefetchHooks(
+                  db: db,
+                  explicitlyWatchedTables: [
+                    if (pushKeysRefs) db.pushKeys,
+                    if (serverSnapshotsRefs) db.serverSnapshots,
+                    if (serverEventBatchesRefs) db.serverEventBatches,
+                  ],
+                  addJoins: null,
+                  getPrefetchedDataCallback: (items) async {
+                    return [
+                      if (pushKeysRefs)
+                        await $_getPrefetchedData<
+                          Account,
+                          $AccountsTable,
+                          PushKey
+                        >(
+                          currentTable: table,
+                          referencedTable: $$AccountsTableReferences
+                              ._pushKeysRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$AccountsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).pushKeysRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.accountId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
+                      if (serverSnapshotsRefs)
+                        await $_getPrefetchedData<
+                          Account,
+                          $AccountsTable,
+                          ServerSnapshot
+                        >(
+                          currentTable: table,
+                          referencedTable: $$AccountsTableReferences
+                              ._serverSnapshotsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$AccountsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).serverSnapshotsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.accountId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
+                      if (serverEventBatchesRefs)
+                        await $_getPrefetchedData<
+                          Account,
+                          $AccountsTable,
+                          ServerEventBatch
+                        >(
+                          currentTable: table,
+                          referencedTable: $$AccountsTableReferences
+                              ._serverEventBatchesRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$AccountsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).serverEventBatchesRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.accountId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
+                    ];
+                  },
+                );
               },
-            );
-          },
         ),
       );
 }
@@ -3145,7 +4182,11 @@ typedef $$AccountsTableProcessedTableManager =
       $$AccountsTableUpdateCompanionBuilder,
       (Account, $$AccountsTableReferences),
       Account,
-      PrefetchHooks Function({bool pushKeysRefs})
+      PrefetchHooks Function({
+        bool pushKeysRefs,
+        bool serverSnapshotsRefs,
+        bool serverEventBatchesRefs,
+      })
     >;
 typedef $$PushKeysTableCreateCompanionBuilder = PushKeysCompanion Function({
   required int pushKeyId,
@@ -3464,6 +4505,672 @@ typedef $$PushKeysTableProcessedTableManager =
       PushKey,
       PrefetchHooks Function({bool accountId})
     >;
+typedef $$ServerSnapshotsTableCreateCompanionBuilder =
+    ServerSnapshotsCompanion Function({
+      Value<int> accountId,
+      required String queueId,
+      required int lastEventId,
+      required String appVersion,
+      required int timestamp,
+      required Uint8List data,
+    });
+typedef $$ServerSnapshotsTableUpdateCompanionBuilder =
+    ServerSnapshotsCompanion Function({
+      Value<int> accountId,
+      Value<String> queueId,
+      Value<int> lastEventId,
+      Value<String> appVersion,
+      Value<int> timestamp,
+      Value<Uint8List> data,
+    });
+
+final class $$ServerSnapshotsTableReferences
+    extends
+        BaseReferences<_$AppDatabase, $ServerSnapshotsTable, ServerSnapshot> {
+  $$ServerSnapshotsTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $AccountsTable _accountIdTable(_$AppDatabase db) =>
+      db.accounts.createAlias('server_snapshots__account_id__accounts__id');
+
+  $$AccountsTableProcessedTableManager get accountId {
+    final $_column = $_itemColumn<int>('account_id')!;
+
+    final manager = $$AccountsTableTableManager(
+      $_db,
+      $_db.accounts,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_accountIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$ServerSnapshotsTableFilterComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotsTable> {
+  $$ServerSnapshotsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get queueId => $composableBuilder(
+    column: $table.queueId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get appVersion => $composableBuilder(
+    column: $table.appVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get timestamp => $composableBuilder(
+    column: $table.timestamp,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$AccountsTableFilterComposer get accountId {
+    final $$AccountsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableFilterComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotsTableOrderingComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotsTable> {
+  $$ServerSnapshotsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get queueId => $composableBuilder(
+    column: $table.queueId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get appVersion => $composableBuilder(
+    column: $table.appVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get timestamp => $composableBuilder(
+    column: $table.timestamp,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$AccountsTableOrderingComposer get accountId {
+    final $$AccountsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableOrderingComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotsTable> {
+  $$ServerSnapshotsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get queueId =>
+      $composableBuilder(column: $table.queueId, builder: (column) => column);
+
+  GeneratedColumn<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get appVersion => $composableBuilder(
+    column: $table.appVersion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get timestamp =>
+      $composableBuilder(column: $table.timestamp, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get data =>
+      $composableBuilder(column: $table.data, builder: (column) => column);
+
+  $$AccountsTableAnnotationComposer get accountId {
+    final $$AccountsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ServerSnapshotsTable,
+          ServerSnapshot,
+          $$ServerSnapshotsTableFilterComposer,
+          $$ServerSnapshotsTableOrderingComposer,
+          $$ServerSnapshotsTableAnnotationComposer,
+          $$ServerSnapshotsTableCreateCompanionBuilder,
+          $$ServerSnapshotsTableUpdateCompanionBuilder,
+          (ServerSnapshot, $$ServerSnapshotsTableReferences),
+          ServerSnapshot,
+          PrefetchHooks Function({bool accountId})
+        > {
+  $$ServerSnapshotsTableTableManager(
+    _$AppDatabase db,
+    $ServerSnapshotsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ServerSnapshotsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ServerSnapshotsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$ServerSnapshotsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> accountId = const Value.absent(),
+                Value<String> queueId = const Value.absent(),
+                Value<int> lastEventId = const Value.absent(),
+                Value<String> appVersion = const Value.absent(),
+                Value<int> timestamp = const Value.absent(),
+                Value<Uint8List> data = const Value.absent(),
+              }) => ServerSnapshotsCompanion(
+                accountId: accountId,
+                queueId: queueId,
+                lastEventId: lastEventId,
+                appVersion: appVersion,
+                timestamp: timestamp,
+                data: data,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> accountId = const Value.absent(),
+                required String queueId,
+                required int lastEventId,
+                required String appVersion,
+                required int timestamp,
+                required Uint8List data,
+              }) => ServerSnapshotsCompanion.insert(
+                accountId: accountId,
+                queueId: queueId,
+                lastEventId: lastEventId,
+                appVersion: appVersion,
+                timestamp: timestamp,
+                data: data,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$ServerSnapshotsTable, ServerSnapshot>(table),
+                  $$ServerSnapshotsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({accountId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (accountId) {
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.accountId,
+                        referencedTable: $$ServerSnapshotsTableReferences
+                            ._accountIdTable(db),
+                        referencedColumn: $$ServerSnapshotsTableReferences
+                            ._accountIdTable(db)
+                            .id,
+                      ) as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$ServerSnapshotsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ServerSnapshotsTable,
+      ServerSnapshot,
+      $$ServerSnapshotsTableFilterComposer,
+      $$ServerSnapshotsTableOrderingComposer,
+      $$ServerSnapshotsTableAnnotationComposer,
+      $$ServerSnapshotsTableCreateCompanionBuilder,
+      $$ServerSnapshotsTableUpdateCompanionBuilder,
+      (ServerSnapshot, $$ServerSnapshotsTableReferences),
+      ServerSnapshot,
+      PrefetchHooks Function({bool accountId})
+    >;
+typedef $$ServerEventBatchesTableCreateCompanionBuilder =
+    ServerEventBatchesCompanion Function({
+      Value<int> id,
+      required int accountId,
+      required String queueId,
+      required int lastEventId,
+      required Uint8List data,
+    });
+typedef $$ServerEventBatchesTableUpdateCompanionBuilder =
+    ServerEventBatchesCompanion Function({
+      Value<int> id,
+      Value<int> accountId,
+      Value<String> queueId,
+      Value<int> lastEventId,
+      Value<Uint8List> data,
+    });
+
+final class $$ServerEventBatchesTableReferences
+    extends
+        BaseReferences<
+          _$AppDatabase,
+          $ServerEventBatchesTable,
+          ServerEventBatch
+        > {
+  $$ServerEventBatchesTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $AccountsTable _accountIdTable(_$AppDatabase db) =>
+      db.accounts.createAlias('server_event_batches__account_id__accounts__id');
+
+  $$AccountsTableProcessedTableManager get accountId {
+    final $_column = $_itemColumn<int>('account_id')!;
+
+    final manager = $$AccountsTableTableManager(
+      $_db,
+      $_db.accounts,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_accountIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$ServerEventBatchesTableFilterComposer
+    extends Composer<_$AppDatabase, $ServerEventBatchesTable> {
+  $$ServerEventBatchesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get queueId => $composableBuilder(
+    column: $table.queueId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$AccountsTableFilterComposer get accountId {
+    final $$AccountsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableFilterComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerEventBatchesTableOrderingComposer
+    extends Composer<_$AppDatabase, $ServerEventBatchesTable> {
+  $$ServerEventBatchesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get queueId => $composableBuilder(
+    column: $table.queueId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$AccountsTableOrderingComposer get accountId {
+    final $$AccountsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableOrderingComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerEventBatchesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ServerEventBatchesTable> {
+  $$ServerEventBatchesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get queueId =>
+      $composableBuilder(column: $table.queueId, builder: (column) => column);
+
+  GeneratedColumn<int> get lastEventId => $composableBuilder(
+    column: $table.lastEventId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get data =>
+      $composableBuilder(column: $table.data, builder: (column) => column);
+
+  $$AccountsTableAnnotationComposer get accountId {
+    final $$AccountsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerEventBatchesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ServerEventBatchesTable,
+          ServerEventBatch,
+          $$ServerEventBatchesTableFilterComposer,
+          $$ServerEventBatchesTableOrderingComposer,
+          $$ServerEventBatchesTableAnnotationComposer,
+          $$ServerEventBatchesTableCreateCompanionBuilder,
+          $$ServerEventBatchesTableUpdateCompanionBuilder,
+          (ServerEventBatch, $$ServerEventBatchesTableReferences),
+          ServerEventBatch,
+          PrefetchHooks Function({bool accountId})
+        > {
+  $$ServerEventBatchesTableTableManager(
+    _$AppDatabase db,
+    $ServerEventBatchesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ServerEventBatchesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ServerEventBatchesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$ServerEventBatchesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<int> accountId = const Value.absent(),
+                Value<String> queueId = const Value.absent(),
+                Value<int> lastEventId = const Value.absent(),
+                Value<Uint8List> data = const Value.absent(),
+              }) => ServerEventBatchesCompanion(
+                id: id,
+                accountId: accountId,
+                queueId: queueId,
+                lastEventId: lastEventId,
+                data: data,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required int accountId,
+                required String queueId,
+                required int lastEventId,
+                required Uint8List data,
+              }) => ServerEventBatchesCompanion.insert(
+                id: id,
+                accountId: accountId,
+                queueId: queueId,
+                lastEventId: lastEventId,
+                data: data,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$ServerEventBatchesTable, ServerEventBatch>(
+                    table,
+                  ),
+                  $$ServerEventBatchesTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({accountId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (accountId) {
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.accountId,
+                        referencedTable: $$ServerEventBatchesTableReferences
+                            ._accountIdTable(db),
+                        referencedColumn: $$ServerEventBatchesTableReferences
+                            ._accountIdTable(db)
+                            .id,
+                      ) as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$ServerEventBatchesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ServerEventBatchesTable,
+      ServerEventBatch,
+      $$ServerEventBatchesTableFilterComposer,
+      $$ServerEventBatchesTableOrderingComposer,
+      $$ServerEventBatchesTableAnnotationComposer,
+      $$ServerEventBatchesTableCreateCompanionBuilder,
+      $$ServerEventBatchesTableUpdateCompanionBuilder,
+      (ServerEventBatch, $$ServerEventBatchesTableReferences),
+      ServerEventBatch,
+      PrefetchHooks Function({bool accountId})
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3478,4 +5185,8 @@ class $AppDatabaseManager {
       $$AccountsTableTableManager(_db, _db.accounts);
   $$PushKeysTableTableManager get pushKeys =>
       $$PushKeysTableTableManager(_db, _db.pushKeys);
+  $$ServerSnapshotsTableTableManager get serverSnapshots =>
+      $$ServerSnapshotsTableTableManager(_db, _db.serverSnapshots);
+  $$ServerEventBatchesTableTableManager get serverEventBatches =>
+      $$ServerEventBatchesTableTableManager(_db, _db.serverEventBatches);
 }

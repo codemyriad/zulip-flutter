@@ -470,6 +470,30 @@ PushKey pushKey({
   );
 }
 
+/// A [ServerSnapshot], by default of an [initialSnapshot]
+/// with the given [queueId] and [lastEventId],
+/// stored by the app version of the default [packageInfo].
+ServerSnapshot serverSnapshot({
+  required Account account,
+  String? queueId,
+  int? lastEventId,
+  String? appVersion,
+  int? timestamp,
+  Uint8List? data,
+}) {
+  queueId ??= '1:2345';
+  lastEventId ??= -1;
+  return ServerSnapshot(
+    accountId: account.id,
+    queueId: queueId,
+    lastEventId: lastEventId,
+    appVersion: appVersion ?? '1.0.0+1',
+    timestamp: timestamp ?? 1771389742,
+    data: data ?? utf8.encode(jsonEncode(
+      initialSnapshot(queueId: queueId, lastEventId: lastEventId).toJson())),
+  );
+}
+
 int _nextSavedSnippetId() => _lastSavedSnippetId++;
 int _lastSavedSnippetId = 1;
 

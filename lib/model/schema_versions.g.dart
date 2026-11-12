@@ -1478,6 +1478,197 @@ i1.GeneratedColumn<int> _column_42(String aliasedName) =>
           'NOT NULL DEFAULT 1 CHECK (possible_legacy_push_token IN (0, 1))',
       defaultValue: const i1.CustomExpression('1'),
     );
+
+final class Schema17 extends i0.VersionedSchema {
+  Schema17({required super.database}) : super(version: 17);
+  @override
+  late final List<i1.DatabaseSchemaEntity> entities = [
+    globalSettings,
+    boolGlobalSettings,
+    intGlobalSettings,
+    accounts,
+    pushKeys,
+    serverSnapshots,
+    serverEventBatches,
+    idxServerEventBatchesAccountId,
+  ];
+  late final Shape6 globalSettings = Shape6(
+    source: i0.VersionedTable(
+      entityName: 'global_settings',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: [],
+      columns: [_column_17, _column_18, _column_19, _column_20, _column_21],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape7 boolGlobalSettings = Shape7(
+    source: i0.VersionedTable(
+      entityName: 'bool_global_settings',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: ['PRIMARY KEY(name)'],
+      columns: [_column_22, _column_23],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape7 intGlobalSettings = Shape7(
+    source: i0.VersionedTable(
+      entityName: 'int_global_settings',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: ['PRIMARY KEY(name)'],
+      columns: [_column_22, _column_24],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape12 accounts = Shape12(
+    source: i0.VersionedTable(
+      entityName: 'accounts',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: [
+        'UNIQUE(realm_url, user_id)',
+        'UNIQUE(realm_url, email)',
+      ],
+      columns: [
+        _column_25,
+        _column_26,
+        _column_27,
+        _column_28,
+        _column_29,
+        _column_36,
+        _column_30,
+        _column_31,
+        _column_32,
+        _column_33,
+        _column_34,
+        _column_42,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape10 pushKeys = Shape10(
+    source: i0.VersionedTable(
+      entityName: 'push_keys',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: ['UNIQUE(push_key_id)'],
+      columns: [_column_37, _column_38, _column_39, _column_40, _column_41],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape13 serverSnapshots = Shape13(
+    source: i0.VersionedTable(
+      entityName: 'server_snapshots',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: ['PRIMARY KEY(account_id)'],
+      columns: [
+        _column_39,
+        _column_43,
+        _column_44,
+        _column_45,
+        _column_46,
+        _column_47,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape14 serverEventBatches = Shape14(
+    source: i0.VersionedTable(
+      entityName: 'server_event_batches',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: [],
+      columns: [_column_25, _column_39, _column_43, _column_44, _column_47],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index idxServerEventBatchesAccountId = i1.Index(
+    'idx_server_event_batches_account_id',
+    'CREATE INDEX idx_server_event_batches_account_id ON server_event_batches (account_id)',
+  );
+}
+
+class Shape13 extends i0.VersionedTable {
+  Shape13({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<int> get accountId =>
+      columnsByName['account_id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get queueId =>
+      columnsByName['queue_id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get lastEventId =>
+      columnsByName['last_event_id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get appVersion =>
+      columnsByName['app_version']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get timestamp =>
+      columnsByName['timestamp']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<i2.Uint8List> get data =>
+      columnsByName['data']! as i1.GeneratedColumn<i2.Uint8List>;
+}
+
+i1.GeneratedColumn<String> _column_43(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'queue_id',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL',
+    );
+i1.GeneratedColumn<int> _column_44(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'last_event_id',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL',
+    );
+i1.GeneratedColumn<String> _column_45(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'app_version',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL',
+    );
+i1.GeneratedColumn<int> _column_46(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'timestamp',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL',
+    );
+i1.GeneratedColumn<i2.Uint8List> _column_47(String aliasedName) =>
+    i1.GeneratedColumn<i2.Uint8List>(
+      'data',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.blob,
+      $customConstraints: 'NOT NULL',
+    );
+
+class Shape14 extends i0.VersionedTable {
+  Shape14({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<int> get id =>
+      columnsByName['id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get accountId =>
+      columnsByName['account_id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get queueId =>
+      columnsByName['queue_id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get lastEventId =>
+      columnsByName['last_event_id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<i2.Uint8List> get data =>
+      columnsByName['data']! as i1.GeneratedColumn<i2.Uint8List>;
+}
+
 i0.MigrationStepWithVersion migrationSteps({
   required Future<void> Function(i1.Migrator m, Schema2 schema) from1To2,
   required Future<void> Function(i1.Migrator m, Schema3 schema) from2To3,
@@ -1494,6 +1685,7 @@ i0.MigrationStepWithVersion migrationSteps({
   required Future<void> Function(i1.Migrator m, Schema14 schema) from13To14,
   required Future<void> Function(i1.Migrator m, Schema15 schema) from14To15,
   required Future<void> Function(i1.Migrator m, Schema16 schema) from15To16,
+  required Future<void> Function(i1.Migrator m, Schema17 schema) from16To17,
 }) {
   return (currentVersion, database) async {
     switch (currentVersion) {
@@ -1572,6 +1764,11 @@ i0.MigrationStepWithVersion migrationSteps({
         final migrator = i1.Migrator(database, schema);
         await from15To16(migrator, schema);
         return 16;
+      case 16:
+        final schema = Schema17(database: database);
+        final migrator = i1.Migrator(database, schema);
+        await from16To17(migrator, schema);
+        return 17;
       default:
         throw ArgumentError.value('Unknown migration from $currentVersion');
     }
@@ -1594,6 +1791,7 @@ i1.OnUpgrade stepByStep({
   required Future<void> Function(i1.Migrator m, Schema14 schema) from13To14,
   required Future<void> Function(i1.Migrator m, Schema15 schema) from14To15,
   required Future<void> Function(i1.Migrator m, Schema16 schema) from15To16,
+  required Future<void> Function(i1.Migrator m, Schema17 schema) from16To17,
 }) => i0.VersionedSchema.stepByStepHelper(
   step: migrationSteps(
     from1To2: from1To2,
@@ -1611,5 +1809,6 @@ i1.OnUpgrade stepByStep({
     from13To14: from13To14,
     from14To15: from14To15,
     from15To16: from15To16,
+    from16To17: from16To17,
   ),
 );

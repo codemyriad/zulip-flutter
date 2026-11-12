@@ -207,6 +207,68 @@ class PushKeys extends Table {
   ];
 }
 
+/// The table of [ServerSnapshot] records,
+/// each the latest initial snapshot from the server for an account,
+/// as a starting point for loading that account's data
+/// without waiting for the network (#477).
+///
+/// Each account has at most one row here.
+/// The events received since the snapshot are in [ServerEventBatches].
+class ServerSnapshots extends Table {
+  Column<int> get accountId => integer()
+    .references(Accounts, #id, onDelete: .cascade)();
+
+  /// The ID of the event queue the snapshot was registered with.
+  ///
+  /// This corresponds to [InitialSnapshot.queueId].
+  Column<String> get queueId => text()();
+
+  /// The ID of the last event received on the queue and stored,
+  /// i.e. the event-queue position to resume from.
+  ///
+  /// This starts out as [InitialSnapshot.lastEventId],
+  /// and advances as batches of events are received.
+  Column<int> get lastEventId => integer()();
+
+  /// The app version that stored the snapshot,
+  /// as "version+buildNumber".
+  Column<String> get appVersion => text()();
+
+  /// When the snapshot was registered, in seconds since the Unix epoch.
+  Column<int> get timestamp => integer()();
+
+  /// The body of the server's response to [registerQueue], as UTF-8 JSON.
+  // Keep this column last, so the other columns can be read
+  // without reading the possibly large data.
+  Column<Uint8List> get data => blob()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {accountId};
+}
+
+/// The table of [ServerEventBatch] records,
+/// each a batch of events received from the server
+/// on the event queue of a [ServerSnapshot].
+@DataClassName('ServerEventBatch')
+@TableIndex(name: 'idx_server_event_batches_account_id', columns: {#accountId})
+class ServerEventBatches extends Table {
+  Column<int> get id => integer().autoIncrement()();
+
+  Column<int> get accountId => integer()
+    .references(Accounts, #id, onDelete: .cascade)();
+
+  /// The ID of the event queue the events were received on.
+  Column<String> get queueId => text()();
+
+  /// The ID of the last event in the batch as received,
+  /// including any events that were left out of [data].
+  Column<int> get lastEventId => integer()();
+
+  /// The events, as a UTF-8 JSON array of the events' JSON objects.
+  // Keep this column last; see [ServerSnapshots.data].
+  Column<Uint8List> get data => blob()();
+}
+
 class UriConverter extends TypeConverter<Uri, String> {
   const UriConverter();
   @override String toSql(Uri value) => value.toString();
@@ -216,6 +278,7 @@ class UriConverter extends TypeConverter<Uri, String> {
 const _allTables = [
   GlobalSettings, BoolGlobalSettings, IntGlobalSettings,
   Accounts, PushKeys,
+  ServerSnapshots, ServerEventBatches,
 ];
 
 /// Configure a newly opened connection to the app's database file.
@@ -242,7 +305,7 @@ class AppDatabase extends _$AppDatabase {
   //  * Fix resulting analyzer errors; in particular,
   //    write a migration in `_migrationSteps` below.
   //  * Write tests.
-  static const int latestSchemaVersion = 16; // See note.
+  static const int latestSchemaVersion = 17; // See note.
 
   @override
   int get schemaVersion => latestSchemaVersion;
@@ -353,6 +416,11 @@ class AppDatabase extends _$AppDatabase {
     from15To16: (m, schema) async {
       await m.addColumn(schema.accounts, schema.accounts.possibleLegacyPushToken);
     },
+    from16To17: (m, schema) async {
+      await m.createTable(schema.serverSnapshots);
+      await m.createTable(schema.serverEventBatches);
+      await m.createIndex(schema.idxServerEventBatchesAccountId);
+    },
   );
 
   Future<void> _createLatestSchema(Migrator m) async {
@@ -450,7 +518,158 @@ class AppDatabase extends _$AppDatabase {
       rethrow;
     }
   }
+
+  /// Store [snapshot] as its account's [ServerSnapshot],
+  /// replacing any previous one and deleting its [ServerEventBatch]es.
+  ///
+  /// Returns false, storing nothing, if the account doesn't exist.
+  Future<bool> storeServerSnapshot(ServerSnapshot snapshot) {
+    return transaction(() async {
+      final accountRow = await (selectOnly(accounts)
+        ..addColumns([accounts.id])
+        ..where(accounts.id.equals(snapshot.accountId))
+      ).getSingleOrNull();
+      if (accountRow == null) return false;
+
+      await (delete(serverEventBatches)
+        ..where((b) => b.accountId.equals(snapshot.accountId))
+      ).go();
+      await into(serverSnapshots).insertOnConflictUpdate(snapshot);
+      return true;
+    });
+  }
+
+  /// Record a batch of events received on the account's stored event queue.
+  ///
+  /// This advances [ServerSnapshot.lastEventId] to [lastEventId],
+  /// and if [data] is non-null, stores it as a new [ServerEventBatch].
+  ///
+  /// Returns false, storing nothing, if there is no [ServerSnapshot]
+  /// for the account with the given [queueId].
+  Future<bool> appendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  }) {
+    return transaction(() async {
+      final rowsAffected = await (update(serverSnapshots)
+        ..where((s) => s.accountId.equals(accountId) & s.queueId.equals(queueId))
+      ).write(ServerSnapshotsCompanion(lastEventId: Value(lastEventId)));
+      if (rowsAffected == 0) return false;
+
+      if (data != null) {
+        await into(serverEventBatches).insert(ServerEventBatchesCompanion.insert(
+          accountId: accountId,
+          queueId: queueId,
+          lastEventId: lastEventId,
+          data: data));
+      }
+      return true;
+    });
+  }
+
+  /// Get the metadata of the account's [ServerSnapshot] and its event batches,
+  /// without reading their data.
+  ///
+  /// Returns null if there is no [ServerSnapshot] for the account.
+  Future<ServerSnapshotInfo?> loadServerSnapshotInfo(int accountId) {
+    return transaction(() async {
+      final snapshotSize = serverSnapshots.data.length;
+      final snapshotRow = await (selectOnly(serverSnapshots)
+        ..addColumns([
+          serverSnapshots.queueId, serverSnapshots.lastEventId,
+          serverSnapshots.appVersion, serverSnapshots.timestamp,
+          snapshotSize,
+        ])
+        ..where(serverSnapshots.accountId.equals(accountId))
+      ).getSingleOrNull();
+      if (snapshotRow == null) return null;
+      final queueId = snapshotRow.read(serverSnapshots.queueId)!;
+
+      final eventBatchesSize = serverEventBatches.data.length.sum();
+      final eventBatchesRow = await (selectOnly(serverEventBatches)
+        ..addColumns([eventBatchesSize])
+        ..where(serverEventBatches.accountId.equals(accountId)
+          & serverEventBatches.queueId.equals(queueId))
+      ).getSingle();
+
+      return (
+        queueId: queueId,
+        lastEventId: snapshotRow.read(serverSnapshots.lastEventId)!,
+        appVersion: snapshotRow.read(serverSnapshots.appVersion)!,
+        timestamp: snapshotRow.read(serverSnapshots.timestamp)!,
+        snapshotSize: snapshotRow.read(snapshotSize)!,
+        eventBatchesSize: eventBatchesRow.read(eventBatchesSize) ?? 0,
+      );
+    });
+  }
+
+  /// Get the account's [ServerSnapshot] and its event batches, in order.
+  ///
+  /// If [includeEventBatches] is false,
+  /// the result's `eventBatches` is empty, and the batches aren't read.
+  ///
+  /// Returns null if there is no [ServerSnapshot] for the account.
+  Future<ServerData?> loadServerData(int accountId, {
+    bool includeEventBatches = true,
+  }) {
+    return transaction(() async {
+      final snapshot = await (select(serverSnapshots)
+        ..where((s) => s.accountId.equals(accountId))
+      ).getSingleOrNull();
+      if (snapshot == null) return null;
+      if (!includeEventBatches) {
+        return (snapshot: snapshot, eventBatches: <ServerEventBatch>[]);
+      }
+
+      final eventBatches = await (select(serverEventBatches)
+        ..where((b) => b.accountId.equals(accountId)
+          & b.queueId.equals(snapshot.queueId))
+        ..orderBy([(b) => OrderingTerm.asc(b.id)])
+      ).get();
+      return (snapshot: snapshot, eventBatches: eventBatches);
+    });
+  }
+
+  /// Delete the account's [ServerSnapshot] and [ServerEventBatch]es, if any.
+  Future<void> clearServerData(int accountId) {
+    return transaction(() async {
+      await (delete(serverEventBatches)
+        ..where((b) => b.accountId.equals(accountId))
+      ).go();
+      await (delete(serverSnapshots)
+        ..where((s) => s.accountId.equals(accountId))
+      ).go();
+    });
+  }
 }
+
+/// Metadata about an account's [ServerSnapshot]
+/// and the [ServerEventBatch]es on its event queue.
+///
+/// The `snapshotSize` is the size of [ServerSnapshot.data], in bytes,
+/// and `eventBatchesSize` the total size of the batches'
+/// [ServerEventBatch.data], in bytes.
+/// The other fields are as on [ServerSnapshot].
+///
+/// See [AppDatabase.loadServerSnapshotInfo].
+typedef ServerSnapshotInfo = ({
+  String queueId,
+  int lastEventId,
+  String appVersion,
+  int timestamp,
+  int snapshotSize,
+  int eventBatchesSize,
+});
+
+/// An account's [ServerSnapshot]
+/// and the [ServerEventBatch]es on its event queue, in order.
+///
+/// See [AppDatabase.loadServerData].
+typedef ServerData = ({
+  ServerSnapshot snapshot,
+  List<ServerEventBatch> eventBatches,
+});
 
 class AccountAlreadyExistsException implements Exception {}
 
