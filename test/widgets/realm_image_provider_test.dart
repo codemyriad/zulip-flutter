@@ -27,8 +27,6 @@ void main() {
     test('cache-first for versioned URLs', () {
       checkPolicy('https://chat.example/user_avatars/2/abc.png?version=3',
         ImageDiskCachePolicy.cacheFirst);
-      checkPolicy('https://secure.gravatar.com/avatar/abc?d=identicon&version=1',
-        ImageDiskCachePolicy.cacheFirst);
       checkPolicy('https://chat.example/user_avatars/2/realm/icon.png?version=2',
         ImageDiskCachePolicy.cacheFirst);
     });
@@ -50,6 +48,15 @@ void main() {
       checkPolicy('https://other.example/user_uploads/2/ab/xyz/image.png',
         ImageDiskCachePolicy.networkFirst);
       checkPolicy('https://chat.example/static/image.png?versions=1',
+        ImageDiskCachePolicy.networkFirst);
+    });
+
+    test('network-first for off-realm versioned URLs', () {
+      // The server bumps a Gravatar URL's `version` only when the avatar
+      // changes through Zulip, not when it changes on Gravatar.
+      checkPolicy('https://secure.gravatar.com/avatar/abc?d=identicon&version=1',
+        ImageDiskCachePolicy.networkFirst);
+      checkPolicy('https://other.example/image.png?version=1',
         ImageDiskCachePolicy.networkFirst);
     });
 

@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 
+import '../model/avatar_url.dart';
 import '../model/binding.dart';
 import '../model/image_disk_cache.dart';
 
@@ -24,22 +25,26 @@ enum ImageDiskCachePolicy {
 
   /// The policy to use for [url], an image URL on [realmUrl] or elsewhere.
   ///
-  /// Uses [cacheFirst] for URLs known to point to content that never changes:
+  /// Uses [cacheFirst] for on-realm URLs known to point to content
+  /// that never changes:
   ///  * URLs with a `version` query parameter,
   ///    which the server bumps when the content changes,
-  ///    as on avatars and the realm icon;
-  ///  * on-realm `/user_uploads/` URLs, for uploaded files and their thumbnails,
+  ///    as on uploaded avatars and the realm icon;
+  ///  * `/user_uploads/` URLs, for uploaded files and their thumbnails,
   ///    whose paths include a random component chosen at upload.
   ///
   /// Otherwise uses [networkFirst].
   /// That includes the `/avatar/{user_id}` fallback avatar URL,
-  /// realm emoji, and images from outside the realm.
+  /// realm emoji, and all images from outside the realm.
+  /// In particular a Gravatar URL (see [GravatarUrl]) has a `version`,
+  /// but the user can change the image on Gravatar
+  /// without the server bumping it.
+  /// Avatars uploaded to S3-style storage off the realm are also excluded,
+  /// because their host can't be told apart from other image hosts.
   static ImageDiskCachePolicy forUrl(Uri url, {required Uri realmUrl}) {
+    if (url.origin != realmUrl.origin) return networkFirst;
     if (_hasQueryParameter(url, 'version')) return cacheFirst;
-    if (url.origin == realmUrl.origin
-        && url.path.startsWith('/user_uploads/')) {
-      return cacheFirst;
-    }
+    if (url.path.startsWith('/user_uploads/')) return cacheFirst;
     return networkFirst;
   }
 
