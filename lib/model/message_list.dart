@@ -983,9 +983,16 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         }
       }
       // TODO(log) the error
+      final wake = _fetchInitialBackoffWake = Completer<void>();
       await (backoffMachine ??= BackoffMachine())
-        .wait(abortTrigger: abort.future);
+        .wait(abortTrigger: Future.any([abort.future, wake.future]));
       if (isStale()) return;
+      _fetchInitialBackoffWake = null;
+      if (wake.isCompleted) {
+        // The network is probably working again;
+        // if the retry fails anyway, start backoff over small.
+        backoffMachine = null;
+      }
     }
     if (isStale()) return;
     _fetchInitialAbort = null;
@@ -1021,6 +1028,23 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
 
     _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+  }
+
+  /// Completed to cut short the backoff wait in progress, if any,
+  /// in the retry loop of [fetchInitial].
+  ///
+  /// See [handleEventStreamRecovered].
+  Completer<void>? _fetchInitialBackoffWake;
+
+  /// Called when the store's event stream has recovered from failures:
+  /// [PerAccountStore.isRecoveringEventStream] has become false.
+  ///
+  /// If [fetchInitial] is waiting to retry, this makes it retry now,
+  /// because the network is probably working again.
+  void handleEventStreamRecovered() {
+    final wake = _fetchInitialBackoffWake;
+    _fetchInitialBackoffWake = null;
+    wake?.complete();
   }
 
   /// Whether [fetchInitial] should retry after its request failed with [error].

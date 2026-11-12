@@ -895,6 +895,11 @@ class PerAccountStore extends PerAccountStoreBase with
   set isRecoveringEventStream(bool value) {
     if (_isRecoveringEventStream == value) return;
     _isRecoveringEventStream = value;
+    if (!value) {
+      // The network is probably working again;
+      // let message lists retry their failed fetches now.
+      _messages.handleEventStreamRecovered();
+    }
     notifyListeners();
   }
 

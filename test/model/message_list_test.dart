@@ -619,6 +619,58 @@ void main() {
         check(notifiedCount).equals(0);
       }));
 
+      test('retry promptly when the event stream recovers', () => awaitFakeAsync((async) async {
+        BackoffMachine.debugDuration = const Duration(seconds: 10);
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        store.isRecoveringEventStream = true;
+        async.elapse(const Duration(seconds: 1));
+        check(connection.takeRequests()).isEmpty();
+
+        prepareSuccess([eg.streamMessage()]);
+        store.isRecoveringEventStream = false;
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        checkNotifiedOnce();
+        check(model).fetched.isTrue();
+        await fetchFuture;
+      }));
+
+      test('backoff starts over when the event stream recovers', () => awaitFakeAsync((async) async {
+        // Fail enough times that the backoff bound grows to 6.4s.
+        BackoffMachine.debugDuration = const Duration(seconds: 1);
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        for (int i = 0; i < 5; i++) {
+          prepareNetworkException();
+          async.elapse(const Duration(seconds: 1));
+        }
+        check(connection.takeRequests()).length.equals(6);
+
+        BackoffMachine.debugDuration = null;
+        prepareNetworkException();
+        store.isRecoveringEventStream = true;
+        store.isRecoveringEventStream = false;
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+
+        // The next backoff is at most 100ms, as for a first failure.
+        prepareSuccess([eg.streamMessage()]);
+        async.elapse(const Duration(milliseconds: 100));
+        check(connection.takeRequests()).single;
+        check(model).fetched.isTrue();
+        await fetchFuture;
+      }));
+
       test('renarrowAndFetch during backoff: old loop stops', () => awaitFakeAsync((async) async {
         final channel = eg.stream();
         await prepare(stream: channel);

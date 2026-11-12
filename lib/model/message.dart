@@ -322,6 +322,14 @@ class MessageStoreImpl extends HasChannelStore with MessageStore, _OutboxMessage
     }
   }
 
+  /// Called when the event stream has recovered from failures;
+  /// see [PerAccountStore.isRecoveringEventStream].
+  void handleEventStreamRecovered() {
+    for (final view in _messageListViews) {
+      view.handleEventStreamRecovered();
+    }
+  }
+
   @override
   bool _disposed = false;
 
