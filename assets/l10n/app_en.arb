@@ -1717,6 +1717,10 @@
   "@scrollToBottomTooltip": {
     "description": "Tooltip for button to scroll to bottom."
   },
+  "messageListBannerLabelShowingSavedMessages": "Showing saved messages. Connecting…",
+  "@messageListBannerLabelShowingSavedMessages": {
+    "description": "Label text for a banner in the message list when it shows messages saved on the device from an earlier visit, because it has not yet been able to load messages from the server."
+  },
   "zulipAppTitle": "Zulip",
   "@zulipAppTitle": {
     "description": "The name of Zulip. This should be either 'Zulip' or a transliteration."

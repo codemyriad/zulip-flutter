@@ -1451,6 +1451,10 @@ class ZulipLocalizationsPl extends ZulipLocalizations {
   String get scrollToBottomTooltip => 'Przewiń do dołu';
 
   @override
+  String get messageListBannerLabelShowingSavedMessages =>
+      'Showing saved messages. Connecting…';
+
+  @override
   String get zulipAppTitle => 'Zulip';
 
   @override

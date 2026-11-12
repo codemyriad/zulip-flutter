@@ -10,6 +10,7 @@ import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:material_ui/material_ui.dart';
+import 'package:zulip/api/backoff.dart';
 import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
@@ -27,6 +28,7 @@ import 'package:zulip/model/store.dart';
 import 'package:zulip/model/typing_status.dart';
 import 'package:zulip/widgets/app_bar.dart';
 import 'package:zulip/widgets/autocomplete.dart';
+import 'package:zulip/widgets/banner.dart';
 import 'package:zulip/widgets/color.dart';
 import 'package:zulip/widgets/compose_box.dart';
 import 'package:zulip/widgets/content.dart';
@@ -832,6 +834,64 @@ void main() {
             'allow_empty_topic_name': 'true',
           });
       });
+    });
+  });
+
+  group('cached messages, while fetchInitial retries', () {
+    // Tests of the model side are in test/model/message_list_test.dart.
+
+    final channel = eg.stream(streamId: eg.defaultStreamMessageStreamId);
+
+    final findBanner = find.widgetWithText(ZulipBanner,
+      'Showing saved messages. Connecting…');
+
+    Future<void> setupCached(WidgetTester tester, {
+      Narrow narrow = const CombinedFeedNarrow(),
+      required List<Message> cachedMessages,
+    }) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      await store.addUsers([eg.selfUser, eg.otherUser]);
+      testBinding.globalStore.backend.seedCachedMessageFetch(eg.selfAccount.id,
+        messageFetchCacheKey(narrow)!,
+        json: eg.newestGetMessagesResult(foundOldest: true,
+          messages: cachedMessages).toJson());
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: narrow)));
+      await tester.pump(); // global store, per-account store
+      await tester.pump(Duration.zero); // fetch fails, and cached messages are shown
+      check(connection.takeRequests()).single;
+      check(store.debugMessageListViews.single.showingCachedMessages).isTrue();
+    }
+
+    void prepareFreshFetch(List<Message> messages) {
+      connection.prepare(json: eg.newestGetMessagesResult(
+        foundOldest: true, messages: messages).toJson());
+    }
+
+    Future<void> retryFetch(WidgetTester tester) async {
+      await tester.pump(BackoffMachine.debugDuration);
+    }
+
+    testWidgets('banner while showing cached messages', (tester) async {
+      await setupCached(tester, cachedMessages: [
+        eg.streamMessage(stream: channel, content: '<p>cached message</p>')]);
+      check(find.text('cached message')).findsOne();
+      check(findBanner).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);
+      await retryFetch(tester);
+      check(find.text('fresh message')).findsOne();
+      check(find.text('cached message')).findsNothing();
+      check(findBanner).findsNothing();
     });
   });
 

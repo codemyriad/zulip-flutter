@@ -2496,6 +2496,12 @@ abstract class ZulipLocalizations {
   /// **'Scroll to bottom'**
   String get scrollToBottomTooltip;
 
+  /// Label text for a banner in the message list when it shows messages saved on the device from an earlier visit, because it has not yet been able to load messages from the server.
+  ///
+  /// In en, this message translates to:
+  /// **'Showing saved messages. Connecting…'**
+  String get messageListBannerLabelShowingSavedMessages;
+
   /// The name of Zulip. This should be either 'Zulip' or a transliteration.
   ///
   /// In en, this message translates to:

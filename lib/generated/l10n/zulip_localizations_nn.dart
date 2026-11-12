@@ -1437,6 +1437,10 @@ class ZulipLocalizationsNn extends ZulipLocalizations {
   String get scrollToBottomTooltip => 'Rull til botna';
 
   @override
+  String get messageListBannerLabelShowingSavedMessages =>
+      'Showing saved messages. Connecting…';
+
+  @override
   String get zulipAppTitle => 'Zulip';
 
   @override

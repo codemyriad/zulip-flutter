@@ -19,6 +19,7 @@ import '../model/unreads.dart';
 import 'action_sheet.dart';
 import 'actions.dart';
 import 'app_bar.dart';
+import 'banner.dart';
 import 'button.dart';
 import 'color.dart';
 import 'compose_box.dart';
@@ -1121,6 +1122,8 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   @override
   Widget build(BuildContext context) {
+    final zulipLocalizations = ZulipLocalizations.of(context);
+
     if (!model.fetched) return const Center(child: CircularProgressIndicator());
 
     if (model.items.isEmpty && model.haveNewest && model.haveOldest) {
@@ -1128,7 +1131,7 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     }
 
     // Pad the left and right insets, for small devices in landscape.
-    return SafeArea(
+    final list = SafeArea(
       // Don't let this be the place we pad the bottom inset. When there's
       // no compose box, we want to let the message-list content
       // and the scroll-to-bottom button avoid it.
@@ -1160,6 +1163,15 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
                       scrollController: scrollController,
                       visible: _scrollToBottomVisible))),
               ])))));
+
+    return Column(children: [
+      if (model.showingCachedMessages)
+        ZulipBanner(
+          intent: .info,
+          label: zulipLocalizations.messageListBannerLabelShowingSavedMessages,
+          actions: const []),
+      Expanded(child: list),
+    ]);
   }
 
   Widget _buildListView(BuildContext context) {
