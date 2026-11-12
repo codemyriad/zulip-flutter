@@ -36,9 +36,24 @@ abstract class ImageDiskCache {
   /// and decline to store new ones for it.
   ///
   /// Called when the account is removed (for example by logging out).
-  /// Account IDs are never reused (see `Accounts.id` in the database),
-  /// so this need not be undone.
+  /// The database doesn't reuse an account ID while the app runs
+  /// (see `Accounts.id`), so this need not be undone.
+  /// It can reuse IDs after a reset, as on a schema downgrade;
+  /// see [retainAccounts].
   Future<void> removeAccount(int accountId);
+
+  /// Remove all entries for accounts not in [accountIds].
+  ///
+  /// Called at startup with the accounts in the database.
+  /// This removes entries left behind by an account
+  /// that is gone without [removeAccount] having been called,
+  /// as when the database is reset on a schema downgrade.
+  /// Such an account's ID may be reused for a new account,
+  /// which must not see the old account's images.
+  ///
+  /// Calls to other methods made after this one
+  /// take effect only after it completes.
+  Future<void> retainAccounts(Set<int> accountIds);
 }
 
 /// An [ImageDiskCache] storing one file per entry,
@@ -70,15 +85,19 @@ class FileImageDiskCache implements ImageDiskCache {
 
   Future<Directory>? _rootDirectory;
 
-  Future<Directory> _accountDirectory(int accountId) async {
+  Future<Directory> _root() async {
     final future = _rootDirectory ??= getRootDirectory();
-    final Directory root;
     try {
-      root = await future;
+      return await future;
     } catch (e) {
       if (identical(_rootDirectory, future)) _rootDirectory = null;
       rethrow;
     }
+  }
+
+  Future<Directory> _accountDirectory(int accountId) async {
+    if (_retaining case final retaining?) await retaining;
+    final root = await _root();
     return Directory(p.join(root.path, accountId.toString()));
   }
 
@@ -156,6 +175,34 @@ class FileImageDiskCache implements ImageDiskCache {
       await dir.delete(recursive: true);
     } on PathNotFoundException {
       // Nothing was cached for this account.
+    }
+  }
+
+  /// The latest [retainAccounts] pass, completing even if it fails.
+  Future<void>? _retaining;
+
+  @override
+  Future<void> retainAccounts(Set<int> accountIds) {
+    final future = _retainAccounts(accountIds);
+    _retaining = future.then((_) {}, onError: (_) {});
+    return future;
+  }
+
+  Future<void> _retainAccounts(Set<int> accountIds) async {
+    final root = await _root();
+    try {
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is! Directory) continue;
+        final accountId = int.tryParse(p.basename(entity.path));
+        if (accountId == null || accountIds.contains(accountId)) continue;
+        try {
+          await entity.delete(recursive: true);
+        } on FileSystemException {
+          // TODO(log)
+        }
+      }
+    } on PathNotFoundException {
+      // Nothing is cached.
     }
   }
 

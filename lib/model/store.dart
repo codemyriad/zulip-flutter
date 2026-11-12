@@ -1500,6 +1500,10 @@ class LiveGlobalStore extends GlobalStore {
       // the database file has been created on disk.
       unawaited(_maybeDisableOsBackup(file)); // TODO(log) on error
 
+      unawaited(ZulipBinding.instance.imageDiskCache.retainAccounts(
+        {for (final account in accounts) account.id},
+      ).catchError((_) {})); // TODO(log)
+
       return LiveGlobalStore._(
         backend: LiveGlobalStoreBackend._(db: db),
         globalSettings: globalSettings,

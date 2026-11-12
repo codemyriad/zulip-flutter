@@ -103,6 +103,30 @@ void main() {
     });
   });
 
+  group('retainAccounts', () {
+    test('delete directories of other accounts', () async {
+      await prepare();
+      await cache.put(accountId, url, Uint8List(10));
+      await cache.put(otherAccountId, url, Uint8List(10));
+      await cache.retainAccounts({otherAccountId, 3});
+      check(filesIn(root)).deepEquals(['$otherAccountId']);
+      check(await cache.get(otherAccountId, url)).isNotNull();
+    });
+
+    test('later calls wait for it', () async {
+      await prepare();
+      await cache.put(accountId, url, Uint8List(10));
+      final future = cache.retainAccounts({});
+      check(await cache.get(accountId, url)).isNull();
+      await future;
+    });
+
+    test('no error when nothing cached', () async {
+      await prepare();
+      await cache.retainAccounts({accountId});
+    });
+  });
+
   test('root directory failure, then retry', () async {
     final tempDir = await Directory.systemTemp.createTemp('image_disk_cache_test');
     addTearDown(() => tempDir.delete(recursive: true));

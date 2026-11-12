@@ -629,6 +629,12 @@ class FakeImageDiskCache implements ImageDiskCache {
     _maybeThrow();
     entries.remove(accountId);
   }
+
+  @override
+  Future<void> retainAccounts(Set<int> accountIds) async {
+    _maybeThrow();
+    entries.removeWhere((accountId, _) => !accountIds.contains(accountId));
+  }
 }
 
 class FakeSodium extends Fake implements sodium.Sodium {
