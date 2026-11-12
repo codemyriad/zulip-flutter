@@ -587,6 +587,20 @@ void main() {
 
       check(globalStore.debugNumPerAccountStoresLoading).equals(0);
     });
+
+    test('remove cached images', () async {
+      addTearDown(testBinding.reset);
+      final globalStore = eg.globalStore();
+      await globalStore.add(eg.selfAccount, eg.initialSnapshot());
+      await globalStore.add(eg.otherAccount, eg.initialSnapshot());
+      final imageDiskCache = testBinding.imageDiskCache;
+      final url = Uri.parse('https://chat.example/user_uploads/1/ab/x.png');
+      await imageDiskCache.put(eg.selfAccount.id, url, Uint8List(1));
+      await imageDiskCache.put(eg.otherAccount.id, url, Uint8List(1));
+
+      await globalStore.removeAccount(eg.selfAccount.id);
+      check(imageDiskCache.entries.keys).single.equals(eg.otherAccount.id);
+    });
   });
 
   test('dispose connectivityMonitor with the GlobalStore', () => awaitFakeAsync((async) async {

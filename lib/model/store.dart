@@ -576,6 +576,8 @@ abstract class GlobalStore extends ChangeNotifier {
     _perAccountStores.remove(accountId)?.dispose();
     unawaited(_perAccountStoresLoading.remove(accountId));
     pushKeys.removeAccount(accountId);
+    unawaited(ZulipBinding.instance.imageDiskCache.removeAccount(accountId)
+      .catchError((_) {})); // TODO(log)
     notifyListeners();
   }
 
