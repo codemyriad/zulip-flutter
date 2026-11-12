@@ -1051,6 +1051,28 @@ void main() {
       await tester.pump(const Duration(seconds: 2)); // mark-read debounce
     });
 
+    testWidgets('fresh messages replace cached mid-fling: mark-read on scroll copes', (tester) async {
+      MessageListPage.debugEnableMarkReadOnScroll = true;
+      addTearDown(() => MessageListPage.debugEnableMarkReadOnScroll = false);
+      await testBinding.globalStore.settings
+        .setMarkReadOnScroll(MarkReadOnScrollSetting.always);
+      final messages = List.generate(30, (_) =>
+        eg.streamMessage(stream: channel, flags: [MessageFlag.read]));
+      await setupRetrying(tester,
+        storeMessages: messages, cachedMessages: messages);
+      await tester.fling(find.byType(MessageList), const Offset(0, 300), 1000);
+      await tester.pump(const Duration(milliseconds: 50));
+
+      // The fresh fetch arrives, with no frame in between,
+      // replacing the scroll view's key while the old position is flinging.
+      prepareFreshFetch(messages);
+      await tester.binding.delayed(BackoffMachine.debugDuration!);
+      check(store.debugMessageListViews.single.showingCachedMessages).isFalse();
+      await tester.pump();
+      check(tester.takeException()).isNull();
+      await tester.pump(const Duration(seconds: 2)); // fling; mark-read debounce
+    });
+
     testWidgets('no action sheet or reaction toggling on cache-only messages', (tester) async {
       final storeMessage = eg.streamMessage(stream: channel,
         content: '<p>store message</p>');

@@ -988,8 +988,15 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
   /// A message is considered onscreen if its bottom edge is in the viewport.
   ///
   /// Ignores outbox messages.
+  ///
+  /// Also returns null if the scroll view isn't mounted.
+  /// That happens just after [_scrollViewKey] is replaced (see [_modelChanged]),
+  /// until the next build:
+  /// meanwhile the old scroll position, as in a fling,
+  /// can still report scrolling.
   (int, int)? _findMessagesInViewport() {
-    final scrollViewElement = _scrollViewKey.currentContext as Element;
+    final scrollViewElement = _scrollViewKey.currentContext as Element?;
+    if (scrollViewElement == null) return null;
     final scrollViewRenderObject = scrollViewElement.renderObject as RenderBox;
 
     int? first;
