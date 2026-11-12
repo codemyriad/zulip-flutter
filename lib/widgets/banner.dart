@@ -44,6 +44,9 @@ class ZulipBanner extends StatelessWidget {
   ///
   /// It is recommended to pass a list of [ZulipWebUiKitButton]
   /// with [ZulipWebUiKitButtonSize.small] for this field.
+  ///
+  /// If this is empty, the banner has padding below the label
+  /// to match the padding above it.
   final List<Widget> actions;
 
   @override
@@ -71,7 +74,9 @@ class ZulipBanner extends StatelessWidget {
           child: Column(crossAxisAlignment: .start,
             children: [
               Padding(
-                padding: const EdgeInsets.only(top: 9),
+                // When there are actions, their vertical outer padding
+                // provides the space below the label.
+                padding: EdgeInsets.only(top: 9, bottom: actions.isEmpty ? 9 : 0),
                 child: Text(
                   style: TextStyle(
                     fontSize: 16,
