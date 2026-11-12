@@ -46,6 +46,22 @@ void main() {
         ..total.equals(9);
     });
 
+    test('ties keep their order, even beyond 32 emoji', () {
+      // [List.sort] is unstable for lists longer than 32.
+      final reactions = [
+        for (int i = 0; i < 40; i++)
+          for (int userId = 1; userId <= (i.isOdd ? 2 : 1); userId++)
+            Reaction(reactionType: ReactionType.realmEmoji,
+              emojiCode: '$i', emojiName: 'emoji$i', userId: userId),
+      ];
+      check(Reactions(reactions))
+        .aggregated.has((list) => list.map((r) => r.emojiCode), 'emojiCodes')
+          .deepEquals([
+            for (int i = 1; i < 40; i += 2) '$i',
+            for (int i = 0; i < 40; i += 2) '$i',
+          ]);
+    });
+
     test('add', () {
       final reaction0 = Reaction(
         reactionType: ReactionType.unicodeEmoji, emojiCode: '1f44d', emojiName: 'thumbs_up', userId: 1);

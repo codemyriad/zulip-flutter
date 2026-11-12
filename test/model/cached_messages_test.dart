@@ -149,6 +149,14 @@ void main() {
       ]));
     });
 
+    test('with many reactions, tied in votes', () {
+      checkRoundTrip(eg.streamMessage(reactions: [
+        for (int i = 0; i < 40; i++)
+          Reaction(emojiName: 'emoji$i', emojiCode: '$i',
+            reactionType: ReactionType.realmEmoji, userId: eg.selfUser.userId),
+      ]));
+    });
+
     test('with reactions changed by events', () {
       final message = eg.streamMessage(reactions: [eg.unicodeEmojiReaction]);
       message.reactions!.add(eg.realmEmojiReaction);

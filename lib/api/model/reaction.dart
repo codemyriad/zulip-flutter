@@ -33,13 +33,13 @@ class Reactions {
       current.userIds.add(reaction.userId);
     }
 
-    return Reactions._(
-      byReaction.values.sorted(
-        // Descending by number of votes
-        (a, b) => -a.userIds.length.compareTo(b.userIds.length),
-      ),
-      unaggregated.length,
-    );
+    final aggregated = byReaction.values.toList();
+    // A stable sort, so that ties keep their order;
+    // [List.sort] doesn't promise that.
+    mergeSort(aggregated,
+      // Descending by number of votes
+      compare: (a, b) => -a.userIds.length.compareTo(b.userIds.length));
+    return Reactions._(aggregated, unaggregated.length);
   }
 
   factory Reactions.fromJson(List<dynamic> json) {
