@@ -1209,7 +1209,8 @@ class LiveGlobalStore extends GlobalStore {
     // in parallel, or deferring some to be concurrent with loading server data.
     final stopwatch = Stopwatch()..start();
     final file = await _dbFile();
-    final db = AppDatabase(NativeDatabase.createInBackground(file));
+    final db = AppDatabase(NativeDatabase.createInBackground(file,
+      setup: setupDatabaseConnection));
     try {
       final t1 = stopwatch.elapsed;
       final globalSettings = await db.getGlobalSettings();
