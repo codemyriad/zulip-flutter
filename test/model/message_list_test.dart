@@ -1922,6 +1922,336 @@ void main() {
           await fetchFuture;
         }));
       });
+
+      group('derive from a containing narrow', () {
+        final topicNarrow = eg.topicNarrow(channel.streamId, 'topic');
+        final channelNarrow = ChannelNarrow(channel.streamId);
+        const combinedNarrow = CombinedFeedNarrow();
+        final dmNarrow = DmNarrow.withUser(eg.otherUser.userId,
+          selfUserId: eg.selfUser.userId);
+
+        StreamMessage topicMessage() =>
+          eg.streamMessage(stream: channel, topic: 'topic');
+        StreamMessage otherTopicMessage() =>
+          eg.streamMessage(stream: channel, topic: 'other');
+        DmMessage dmMessage() =>
+          eg.dmMessage(from: eg.otherUser, to: [eg.selfUser]);
+
+        String keyOf(Narrow narrow) => messageFetchCacheKey(narrow)!;
+
+        late Future<void> fetchFuture;
+
+        /// Set up a view of [narrow], with [stored] as the stored messages,
+        /// and start [MessageListView.fetchInitial] as [fetchFuture]
+        /// with the request failing, letting the stored messages be read.
+        ///
+        /// Before that, [setUp] runs, as for setting muting state.
+        Future<void> prepareDerived(FakeAsync async, Narrow narrow, {
+          required Map<Narrow, List<Message>> stored,
+          List<int>? mutedUserIds,
+          Future<void> Function()? setUp,
+        }) async {
+          await prepare(narrow: narrow, stream: channel,
+            users: [eg.otherUser], mutedUserIds: mutedUserIds);
+          await setUp?.call();
+          for (final MapEntry(key: narrow, value: messages) in stored.entries) {
+            seedCachedFetch(narrow, messages);
+          }
+          prepareNetworkException();
+          fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          notifiedCount = 0;
+        }
+
+        /// Check the view of [narrow] shows [expected]
+        /// derived from [stored], or waits if [expected] is empty.
+        Future<void> checkDerived(FakeAsync async, Narrow narrow, {
+          required Map<Narrow, List<Message>> stored,
+          required List<Message> expected,
+          List<int>? mutedUserIds,
+          Future<void> Function()? setUp,
+        }) async {
+          await prepareDerived(async, narrow,
+            stored: stored, mutedUserIds: mutedUserIds, setUp: setUp);
+          if (expected.isEmpty) {
+            checkWaiting();
+            check(model).fetchInitialFailing.isTrue();
+          } else {
+            checkShowingCached(expected);
+            check(model).fetchInitialFailing.isFalse();
+          }
+
+          model.dispose();
+          await fetchFuture;
+        }
+
+        group('sound: show', () {
+          test('topic, from its channel', () => awaitFakeAsync((async) async {
+            final messages = [topicMessage(), otherTopicMessage(), topicMessage()];
+            await checkDerived(async, topicNarrow,
+              stored: {channelNarrow: messages},
+              expected: [messages[0], messages[2]]);
+          }));
+
+          test('topic unmuted in muted channel, from its channel', () => awaitFakeAsync((async) async {
+            final messages = [topicMessage(), otherTopicMessage(), topicMessage()];
+            await checkDerived(async, topicNarrow,
+              setUp: () async {
+                await store.updateSubscription(channel.streamId,
+                  SubscriptionProperty.isMuted, true);
+                await store.setUserTopic(channel, 'topic',
+                  UserTopicVisibilityPolicy.unmuted);
+              },
+              stored: {channelNarrow: messages},
+              expected: [messages[0], messages[2]]);
+          }));
+
+          test('topic, from the combined feed', () => awaitFakeAsync((async) async {
+            final messages = <Message>[topicMessage(), dmMessage(),
+              otherTopicMessage(), topicMessage()];
+            await checkDerived(async, topicNarrow,
+              stored: {combinedNarrow: messages},
+              expected: [messages[0], messages[3]]);
+          }));
+
+          test('topic followed in muted channel, from the combined feed', () => awaitFakeAsync((async) async {
+            final messages = [topicMessage(), otherTopicMessage(), topicMessage()];
+            await checkDerived(async, topicNarrow,
+              setUp: () async {
+                await store.updateSubscription(channel.streamId,
+                  SubscriptionProperty.isMuted, true);
+                await store.setUserTopic(channel, 'topic',
+                  UserTopicVisibilityPolicy.followed);
+              },
+              stored: {combinedNarrow: messages},
+              expected: [messages[0], messages[2]]);
+          }));
+
+          test('channel, from the combined feed', () => awaitFakeAsync((async) async {
+            final otherChannel = eg.stream();
+            final messages = <Message>[topicMessage(), dmMessage(),
+              eg.streamMessage(stream: otherChannel), otherTopicMessage()];
+            await checkDerived(async, channelNarrow,
+              stored: {combinedNarrow: messages},
+              expected: [messages[0], messages[3]]);
+          }));
+
+          test('channel with a muted topic, from the combined feed', () => awaitFakeAsync((async) async {
+            // Both views hide the muted topic.
+            final messages = [topicMessage(), otherTopicMessage()];
+            await checkDerived(async, channelNarrow,
+              setUp: () => store.setUserTopic(channel, 'other',
+                UserTopicVisibilityPolicy.muted),
+              stored: {combinedNarrow: messages},
+              expected: [messages[0]]);
+          }));
+
+          test('DM conversation, from the combined feed', () => awaitFakeAsync((async) async {
+            final messages = <Message>[dmMessage(), topicMessage(),
+              eg.dmMessage(from: eg.selfUser, to: [eg.otherUser]),
+              eg.dmMessage(from: eg.selfUser, to: [eg.otherUser, eg.thirdUser])];
+            await checkDerived(async, dmNarrow,
+              stored: {combinedNarrow: messages},
+              expected: [messages[0], messages[2]]);
+          }));
+        });
+
+        group('unsound: show nothing', () {
+          test('topic muted, from its channel', () => awaitFakeAsync((async) async {
+            // The channel's view hides the topic, so its stored messages
+            // may lack the topic's newest messages.
+            // (These were stored before the topic was muted.)
+            await checkDerived(async, topicNarrow,
+              setUp: () => store.setUserTopic(channel, 'topic',
+                UserTopicVisibilityPolicy.muted),
+              stored: {channelNarrow: [topicMessage(), otherTopicMessage()],
+                       combinedNarrow: [topicMessage()]},
+              expected: []);
+          }));
+
+          test('topic in muted channel, from the combined feed', () => awaitFakeAsync((async) async {
+            await checkDerived(async, topicNarrow,
+              setUp: () => store.updateSubscription(channel.streamId,
+                SubscriptionProperty.isMuted, true),
+              stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
+              expected: []);
+          }));
+
+          test('topic followed in unsubscribed channel, from the combined feed', () => awaitFakeAsync((async) async {
+            // The combined feed lacks messages sent since unsubscribing.
+            await checkDerived(async, topicNarrow,
+              setUp: () async {
+                await store.removeSubscription(channel.streamId);
+                await store.setUserTopic(channel, 'topic',
+                  UserTopicVisibilityPolicy.followed);
+              },
+              stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
+              expected: []);
+          }));
+
+          test('muted channel, from the combined feed', () => awaitFakeAsync((async) async {
+            // The combined feed shows only the unmuted topic,
+            // but the channel's view shows both.
+            await checkDerived(async, channelNarrow,
+              setUp: () async {
+                await store.updateSubscription(channel.streamId,
+                  SubscriptionProperty.isMuted, true);
+                await store.setUserTopic(channel, 'topic',
+                  UserTopicVisibilityPolicy.unmuted);
+              },
+              stored: {combinedNarrow: [topicMessage(), topicMessage()]},
+              expected: []);
+          }));
+
+          test('unsubscribed channel, from the combined feed', () => awaitFakeAsync((async) async {
+            await checkDerived(async, channelNarrow,
+              setUp: () => store.removeSubscription(channel.streamId),
+              stored: {combinedNarrow: [topicMessage(), otherTopicMessage()]},
+              expected: []);
+          }));
+
+          test('muted DM conversation, from the combined feed', () => awaitFakeAsync((async) async {
+            await checkDerived(async, dmNarrow,
+              mutedUserIds: [eg.otherUser.userId],
+              stored: {combinedNarrow: [dmMessage(), dmMessage()]},
+              expected: []);
+          }));
+
+          test('mentions, from the combined feed', () => awaitFakeAsync((async) async {
+            await checkDerived(async, const MentionsNarrow(),
+              stored: {combinedNarrow: [
+                eg.streamMessage(stream: channel, flags: [MessageFlag.mentioned])]},
+              expected: []);
+          }));
+        });
+
+        group('precedence', () {
+          test('own stored messages first; others not read', () => awaitFakeAsync((async) async {
+            final own = [topicMessage()];
+            await checkDerived(async, topicNarrow,
+              stored: {topicNarrow: own,
+                       channelNarrow: [topicMessage()],
+                       combinedNarrow: [topicMessage()]},
+              expected: own);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(topicNarrow)]);
+          }));
+
+          test('then the channel\'s; combined feed not read', () => awaitFakeAsync((async) async {
+            final fromChannel = [topicMessage()];
+            await checkDerived(async, topicNarrow,
+              stored: {channelNarrow: fromChannel,
+                       combinedNarrow: [topicMessage()]},
+              expected: fromChannel);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(topicNarrow), keyOf(channelNarrow)]);
+          }));
+
+          test('then the combined feed\'s, if the channel\'s give nothing', () => awaitFakeAsync((async) async {
+            final fromCombined = [topicMessage()];
+            await checkDerived(async, topicNarrow,
+              stored: {channelNarrow: [otherTopicMessage()],
+                       combinedNarrow: fromCombined},
+              expected: fromCombined);
+            check(backend.cachedMessageFetchLoads).deepEquals([
+              keyOf(topicNarrow), keyOf(channelNarrow), keyOf(combinedNarrow)]);
+          }));
+
+          test('own stored messages giving nothing: derive', () => awaitFakeAsync((async) async {
+            final deleted = topicMessage();
+            final fromChannel = [topicMessage()];
+            await checkDerived(async, topicNarrow,
+              setUp: () => store.handleEvent(eg.deleteMessageEvent([deleted])),
+              stored: {topicNarrow: [deleted],
+                       channelNarrow: fromChannel},
+              expected: fromChannel);
+          }));
+
+          test('containing narrow\'s not read while own may give some', () => awaitFakeAsync((async) async {
+            await prepare(narrow: topicNarrow, stream: channel);
+            seedCachedFetch(topicNarrow, [topicMessage()]);
+            seedCachedFetch(channelNarrow, [topicMessage()]);
+            final fresh = [topicMessage()];
+            prepareSuccess(fresh, delay: kShowCachedMessagesDelay ~/ 2);
+            await model.fetchInitial();
+            checkNotifiedOnce();
+            checkHasMessages(fresh);
+            check(backend.cachedMessageFetchLoads)
+              .deepEquals([keyOf(topicNarrow)]);
+          }));
+
+          test('corrupt containing narrow\'s data: skip, not delete', () => awaitFakeAsync((async) async {
+            final fromCombined = [topicMessage()];
+            final corrupt = utf8.encode('{"messages": "nonsense"');
+            await checkDerived(async, topicNarrow,
+              setUp: () async {
+                backend.seedCachedMessageFetch(eg.selfAccount.id,
+                  keyOf(channelNarrow), data: corrupt);
+              },
+              stored: {combinedNarrow: fromCombined},
+              expected: fromCombined);
+            check(cachedFetchOf(channelNarrow)).isNotNull()
+              .data.deepEquals(corrupt);
+          }));
+        });
+
+        test('previousMessageIds applies to derived messages', () => awaitFakeAsync((async) async {
+          final fromChannel = [topicMessage(), topicMessage()];
+          await prepare(narrow: topicNarrow, stream: channel);
+          seedCachedFetch(channelNarrow, fromChannel);
+          prepareSuccess([fromChannel.last], delay: kShowCachedMessagesDelay ~/ 2);
+          final fetchFuture = model.fetchInitial(
+            previousMessageIds: {fromChannel.last.id});
+          async.flushMicrotasks();
+          checkNotifiedOnce();
+          checkShowingCached([fromChannel.last]);
+
+          async.elapse(kShowCachedMessagesDelay ~/ 2);
+          checkNotifiedOnce();
+          check(model).showingCachedMessages.isFalse();
+          await fetchFuture;
+        }));
+
+        test('derived messages not stored for the narrow', () => awaitFakeAsync((async) async {
+          BackoffMachine.debugDuration = const Duration(minutes: 1);
+          addTearDown(() => BackoffMachine.debugDuration = null);
+          final fromChannel = [topicMessage(), topicMessage(), otherTopicMessage()];
+          await prepareDerived(async, topicNarrow,
+            stored: {channelNarrow: fromChannel});
+          checkShowingCached(fromChannel.sublist(0, 2));
+
+          // A change to the messages would schedule storing them
+          // if the view had the newest messages.
+          await store.handleEvent(eg.deleteMessageEvent([fromChannel.first]));
+          checkNotifiedOnce();
+          checkShowingCached([fromChannel[1]]);
+          async.elapse(kCachedMessagesWriteDelay * 2);
+          model.dispose();
+          await fetchFuture;
+          async.elapse(kCachedMessagesWriteDelay * 2);
+          check(cachedFetchOf(topicNarrow)).isNull();
+          checkCachedMessages(channelNarrow, fromChannel);
+        }));
+
+        test('fresh fetch replaces derived messages, and is stored', () => awaitFakeAsync((async) async {
+          final fromCombined = <Message>[topicMessage(), dmMessage()];
+          await prepareDerived(async, topicNarrow,
+            stored: {combinedNarrow: fromCombined});
+          checkShowingCached([fromCombined.first]);
+
+          final fresh = <Message>[fromCombined.first, topicMessage()];
+          prepareSuccess(fresh);
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          checkNotifiedOnce();
+          check(model)
+            ..showingCachedMessages.isFalse()
+            ..haveNewest.isTrue();
+          checkHasMessages(fresh);
+          await fetchFuture;
+          checkCachedMessages(topicNarrow, fresh);
+          checkCachedMessages(combinedNarrow, fromCombined);
+        }));
+      });
     });
 
     group('keep stored messages up to date', () {

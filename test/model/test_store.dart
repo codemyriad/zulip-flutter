@@ -394,6 +394,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// If non-null, each call to [doLoadCachedMessageFetch] first waits for this.
   Future<void>? loadCachedMessageFetchGate;
 
+  /// The narrow keys passed to [doLoadCachedMessageFetch], in order.
+  final List<String> cachedMessageFetchLoads = [];
+
   /// If non-null, the next call to [doDeleteCachedMessageFetch] throws this
   /// and resets it to null.
   Object? deleteCachedMessageFetchError;
@@ -441,6 +444,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
 
   @override
   Future<Uint8List?> doLoadCachedMessageFetch(int accountId, String narrowKey) async {
+    cachedMessageFetchLoads.add(narrowKey);
     if (loadCachedMessageFetchGate case final gate?) {
       await gate;
     }
