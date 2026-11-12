@@ -255,8 +255,8 @@ flutter:
     # If adding a font, remember to account for its license in lib/licenses.dart.
 
 patrol:
-  app_name: Zulip
+  app_name: CodeMyriad Chat
   android:
-    package_name: com.zulipmobile
+    package_name: io.codemyriad.chat
   ios:
     bundle_id: org.zulip.Zulip
