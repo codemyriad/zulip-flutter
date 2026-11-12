@@ -1963,6 +1963,24 @@ void main() {
         check(async.pendingTimers).isEmpty();
       }));
 
+      test('refetch from scratch: store at once', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        await store.setUserTopic(channel, 'muted', UserTopicVisibilityPolicy.muted);
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        final shown = model.messages.toList();
+        check(async.pendingTimers).single;
+
+        // Unmuting a topic makes the view refetch from scratch.
+        connection.prepare(httpException: const SocketException('failed'));
+        await store.setUserTopic(channel, 'muted', UserTopicVisibilityPolicy.unmuted);
+        check(model).fetched.isFalse();
+        checkCachedMessages(const CombinedFeedNarrow(), shown);
+        check(async.pendingTimers.where(
+          (timer) => timer.duration == kCachedMessagesWriteDelay)).isEmpty();
+
+        model.dispose();
+      }));
+
       test('topic moved away: old topic\'s stored messages deleted', () => awaitFakeAsync((async) async {
         final narrow = eg.topicNarrow(channel.streamId, 'topic');
         await prepareStored(narrow: narrow);
