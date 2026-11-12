@@ -142,6 +142,9 @@ class _FetchInitialAttempt {
   Future<void> get abortTrigger => _abortCompleter.future;
   final Completer<void> _abortCompleter = Completer();
 
+  /// Whether [abort] has been called.
+  bool get aborted => _abortCompleter.isCompleted;
+
   /// Abort the request, if it hasn't already completed.
   void abort() {
     if (_abortCompleter.isCompleted) return;
@@ -1180,8 +1183,13 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           }
           rethrow;
         }
-        shouldShowCached = true;
-        maybeShowCached();
+        if (!attempt.aborted) {
+          // The request failed; show any cached messages now.
+          // But if we aborted it ourselves, to retry promptly,
+          // the retry may well succeed fast; leave that to the timer.
+          shouldShowCached = true;
+          maybeShowCached();
+        }
       } finally {
         if (identical(_fetchInitialAttempt, attempt)) _fetchInitialAttempt = null;
       }

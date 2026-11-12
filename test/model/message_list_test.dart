@@ -1084,6 +1084,39 @@ void main() {
         check(model).showingCachedMessages.isFalse();
       }));
 
+      test('not shown at once on aborting a request that may be stuck', () => awaitFakeAsync((async) async {
+        addTearDown(testBinding.reset);
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, cached);
+        async.elapse(Duration.zero); // connectivity baseline
+        prepareSuccess([eg.streamMessage(stream: channel)],
+          delay: const Duration(minutes: 15));
+        final fetchFuture = model.fetchInitial();
+        async.elapse(kShowCachedMessagesDelay ~/ 4);
+        check(connection.takeRequests()).single;
+
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay);
+        testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        checkWaiting();
+
+        // The retry is slow, so the cached messages appear on the usual timer.
+        async.elapse(kShowCachedMessagesDelay * 3 ~/ 4);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(kShowCachedMessagesDelay ~/ 4);
+        checkNotifiedOnce();
+        check(model).showingCachedMessages.isFalse();
+        checkHasMessages(fresh);
+        await fetchFuture;
+      }));
+
       test('not shown at once while event stream is recovering', () => awaitFakeAsync((async) async {
         // On startup from stored server data, the event stream is recovering
         // until the first poll succeeds, even when the network is fine.
