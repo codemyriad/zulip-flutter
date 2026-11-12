@@ -508,8 +508,10 @@ void main() {
         final fetchFuture = model.fetchInitial();
         async.elapse(Duration.zero);
         check(connection.takeRequests()).single;
-        checkNotNotified();
-        check(model).fetched.isFalse();
+        checkNotifiedOnce();
+        check(model)
+          ..fetched.isFalse()
+          ..fetchInitialFailing.isTrue();
         check(async.pendingTimers).single; // the backoff
 
         // Wait out the first and second backoffs, at most 100ms and 200ms.
@@ -518,6 +520,7 @@ void main() {
         checkNotifiedOnce();
         check(model)
           ..fetched.isTrue()
+          ..fetchInitialFailing.isFalse()
           ..messages.single.id.equals(message.id);
         await fetchFuture;
         check(async.pendingTimers).isEmpty();
@@ -528,9 +531,10 @@ void main() {
           await prepare();
           prepareError();
           final fetchFuture = model.fetchInitial();
-          async.flushMicrotasks();
+          async.elapse(Duration.zero);
           check(connection.takeRequests()).single;
-          checkNotNotified();
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
 
           prepareSuccess([eg.streamMessage()]);
           async.elapse(const Duration(milliseconds: 100)); // max first backoff
@@ -628,6 +632,7 @@ void main() {
         check(connection.takeRequests()).single;
         check(async.pendingTimers).single; // the backoff
 
+        checkNotifiedOnce(); // fetchInitialFailing
         store.dispose();
         async.elapse(const Duration(seconds: 1));
         await fetchFuture;
@@ -645,6 +650,7 @@ void main() {
         check(connection.takeRequests()).single;
         check(async.pendingTimers).single; // the backoff
 
+        checkNotifiedOnce(); // fetchInitialFailing
         store.isRecoveringEventStream = true;
         async.elapse(const Duration(seconds: 1));
         check(connection.takeRequests()).isEmpty();
@@ -803,7 +809,7 @@ void main() {
           prepareSuccess([eg.streamMessage()]);
           async.elapse(const Duration(seconds: 5));
           check(connection.takeRequests()).single;
-          checkNotifiedOnce();
+          checkNotified(count: 2); // fetchInitialFailing, then fetched
           check(model).fetched.isTrue();
           await fetchFuture;
         }));
@@ -817,6 +823,7 @@ void main() {
         async.elapse(Duration.zero);
         check(connection.takeRequests()).single;
         check(async.pendingTimers).single; // the backoff
+        checkNotifiedOnce(); // fetchInitialFailing
 
         final message = eg.streamMessage(stream: channel);
         prepareSuccess([message]);
@@ -835,6 +842,109 @@ void main() {
         async.elapse(const Duration(seconds: 10));
         check(connection.takeRequests()).isEmpty();
       }));
+
+      group('fetchInitialFailing', () {
+        test('set on first failure; unchanged on more; cleared on success', () => awaitFakeAsync((async) async {
+          await prepare();
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          check(model).fetchInitialFailing.isFalse();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isTrue();
+
+          prepareNetworkException();
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          check(connection.takeRequests()).length.equals(2);
+          checkNotNotified();
+          check(model).fetchInitialFailing.isTrue();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(milliseconds: 200)); // max second backoff
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isTrue()
+            ..fetchInitialFailing.isFalse();
+          await fetchFuture;
+        }));
+
+        test('not set by aborting our own request', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
+          await prepare();
+          async.elapse(Duration.zero); // connectivity baseline
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: const Duration(minutes: 15));
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          // The network changes, so we abort the request and retry at once.
+          prepareSuccess([eg.streamMessage()]);
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.flushMicrotasks();
+          check(connection.takeRequests()).single;
+          checkNotNotified();
+          check(model).fetchInitialFailing.isFalse();
+
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+
+        test('cleared on renarrowAndFetch', () => awaitFakeAsync((async) async {
+          final channel = eg.stream();
+          await prepare(stream: channel);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
+
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage(stream: channel)]).toJson(),
+            delay: const Duration(seconds: 1));
+          model.renarrowAndFetch(ChannelNarrow(channel.streamId), AnchorCode.newest);
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isFalse();
+          await fetchFuture;
+
+          async.elapse(const Duration(seconds: 1));
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+        }));
+
+        test('cleared on error not to retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          final throwsCheck = check(fetchFuture).throws<ZulipApiException>();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
+
+          connection.prepare(apiException: eg.apiBadRequest());
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          await throwsCheck;
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isFalse();
+        }));
+
+        test('not set on error not to retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          connection.prepare(apiException: eg.apiBadRequest());
+          await check(model.fetchInitial()).throws<ZulipApiException>();
+          checkNotNotified();
+          check(model).fetchInitialFailing.isFalse();
+        }));
+      });
     });
   });
 
@@ -1128,6 +1238,28 @@ void main() {
         await fetchFuture;
       }));
 
+      test('fetchInitialFailing not set when request fails while showing cached', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, cached);
+        connection.prepare(httpException: const SocketException('failed'),
+          delay: kShowCachedMessagesDelay * 2);
+        final fetchFuture = model.fetchInitial();
+        async.elapse(kShowCachedMessagesDelay);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(kShowCachedMessagesDelay);
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        checkShowingCached(cached);
+        check(model).fetchInitialFailing.isFalse();
+
+        model.dispose();
+        await fetchFuture;
+      }));
+
       test('not shown when request succeeds sooner', () => awaitFakeAsync((async) async {
         const narrow = CombinedFeedNarrow();
         await prepare(narrow: narrow, stream: channel);
@@ -1248,13 +1380,15 @@ void main() {
         final gate = Completer<void>();
         final (fetchFuture, cached) = await prepareFailingWithCache(loadGate: gate.future);
         async.elapse(Duration.zero);
-        checkNotNotified();
+        checkNotifiedOnce();
         checkWaiting();
+        check(model).fetchInitialFailing.isTrue();
 
         gate.complete();
         async.flushMicrotasks();
         checkNotifiedOnce();
         checkShowingCached(cached);
+        check(model).fetchInitialFailing.isFalse();
 
         model.dispose();
         await fetchFuture;
@@ -1282,6 +1416,7 @@ void main() {
         final gate = Completer<void>();
         final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
         async.elapse(Duration.zero);
+        checkNotifiedOnce(); // fetchInitialFailing
 
         model.dispose();
         gate.complete();
@@ -1295,6 +1430,7 @@ void main() {
         final gate = Completer<void>();
         final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
         async.elapse(Duration.zero);
+        checkNotifiedOnce(); // fetchInitialFailing
 
         store.dispose();
         gate.complete();
@@ -1308,6 +1444,7 @@ void main() {
         final gate = Completer<void>();
         final (fetchFuture, _) = await prepareFailingWithCache(loadGate: gate.future);
         async.elapse(Duration.zero);
+        checkNotifiedOnce(); // fetchInitialFailing
 
         final newNarrow = ChannelNarrow(channel.streamId);
         final fresh = [eg.streamMessage(stream: channel)];
@@ -1378,8 +1515,9 @@ void main() {
         prepareNetworkException();
         final fetchFuture = model.fetchInitial();
         async.elapse(Duration.zero);
-        checkNotNotified();
+        checkNotifiedOnce();
         checkWaiting();
+        check(model).fetchInitialFailing.isTrue();
         check(cachedFetchOf(narrow)).isNull();
 
         model.dispose();
@@ -1413,8 +1551,9 @@ void main() {
         prepareNetworkException();
         final fetchFuture = model.fetchInitial();
         async.elapse(kShowCachedMessagesDelay);
-        checkNotNotified();
+        checkNotifiedOnce();
         checkWaiting();
+        check(model).fetchInitialFailing.isTrue();
 
         model.dispose();
         await fetchFuture;
@@ -1678,8 +1817,9 @@ void main() {
             [eg.streamMessage(stream: unknownChannel)]);
           final fetchFuture = model.fetchInitial();
           async.elapse(Duration.zero);
-          checkNotNotified();
+          checkNotifiedOnce();
           checkWaiting();
+          check(model).fetchInitialFailing.isTrue();
 
           model.dispose();
           await fetchFuture;
@@ -5836,6 +5976,11 @@ void checkInvariants(MessageListView model) {
       ..haveNewest.isFalse()
       ..busyFetchingMore.isTrue();
   }
+  if (model.fetchInitialFailing) {
+    check(model)
+      ..fetched.isFalse()
+      ..showingCachedMessages.isFalse();
+  }
   if (model.haveOldest && model.haveNewest) {
     check(model).busyFetchingMore.isFalse();
   }
@@ -6035,6 +6180,7 @@ extension MessageListViewChecks on Subject<MessageListView> {
   Subject<int> get middleItem => has((x) => x.middleItem, 'middleItem');
   Subject<bool> get fetched => has((x) => x.fetched, 'fetched');
   Subject<bool> get showingCachedMessages => has((x) => x.showingCachedMessages, 'showingCachedMessages');
+  Subject<bool> get fetchInitialFailing => has((x) => x.fetchInitialFailing, 'fetchInitialFailing');
   Subject<int?> get oldestFetchedMessageId => has((x) => x.oldestFetchedMessageId, 'oldestFetchedMessageId');
   Subject<int?> get newestFetchedMessageId => has((x) => x.newestFetchedMessageId, 'newestFetchedMessageId');
   Subject<bool> get haveOldest => has((x) => x.haveOldest, 'haveOldest');

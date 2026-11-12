@@ -308,6 +308,23 @@ mixin _MessageSequence {
   bool get showingCachedMessages =>
     _status == FetchingStatus.fetchInitialShowingCached;
 
+  /// Whether the initial fetch is failing and being retried,
+  /// with no messages to show meanwhile.
+  ///
+  /// This becomes true when a request in the retry loop of
+  /// [MessageListView.fetchInitial] fails in a way that may be temporary,
+  /// for example because the device is offline,
+  /// unless [showingCachedMessages] is true.
+  /// A request the view aborted itself, to retry it at once, doesn't count.
+  /// It becomes false when a request succeeds,
+  /// or [showingCachedMessages] becomes true,
+  /// or the fetch stops on an error not to retry,
+  /// or the view is reset (as by [MessageListView.renarrowAndFetch]).
+  ///
+  /// While this is true, [fetched] is false.
+  bool get fetchInitialFailing => _fetchInitialFailing;
+  bool _fetchInitialFailing = false;
+
   /// Whether we know we have the oldest messages for this narrow.
   ///
   /// See also [haveNewest].
@@ -648,6 +665,7 @@ mixin _MessageSequence {
     generation += 1;
     _clearContents();
     _status = FetchingStatus.unstarted;
+    _fetchInitialFailing = false;
     _fetchBackoffMachine = null;
     _cancelFetchInitial();
   }
@@ -1227,6 +1245,9 @@ class MessageListView with ChangeNotifier, _MessageSequence {
             _clearContents();
             _status = FetchingStatus.fetchInitial;
             notifyListeners(); // [_setStatus] wouldn't, as [fetched] is now false
+          } else if (fetchInitialFailing) {
+            _fetchInitialFailing = false;
+            notifyListeners();
           }
           rethrow;
         }
@@ -1236,6 +1257,10 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           // the retry may well succeed fast; leave that to the timer.
           shouldShowCached = true;
           maybeShowCached();
+          if (!showingCachedMessages && !fetchInitialFailing) {
+            _fetchInitialFailing = true;
+            notifyListeners(); // [_setStatus] wouldn't, as [fetched] is false
+          }
         }
       } finally {
         if (identical(_fetchInitialAttempt, attempt)) _fetchInitialAttempt = null;
@@ -1300,6 +1325,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
     assert(_status == FetchingStatus.fetchInitial
       || _status == FetchingStatus.fetchInitialShowingCached);
+    _fetchInitialFailing = false;
     _setStatus(FetchingStatus.idle);
 
     // Store the messages now, rather than after [kCachedMessagesWriteDelay],
@@ -1450,6 +1476,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       }
       _addMessage(message);
     }
+    _fetchInitialFailing = false;
     _setStatus(FetchingStatus.fetchInitialShowingCached,
       was: FetchingStatus.fetchInitial);
   }
