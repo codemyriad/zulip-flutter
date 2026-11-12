@@ -2126,24 +2126,47 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   ///
   /// Of the narrows, only the combined feed's [_messageVisible] depends on
   /// whether the user is subscribed to a channel and has muted it
-  /// (see [ChannelStore.isTopicVisible]),
-  /// so other views are unaffected.
-  ///
+  /// (see [ChannelStore.isTopicVisible]).
   /// On muting a channel or unsubscribing from it,
-  /// this removes the channel's messages that are no longer visible.
+  /// this removes the channel's messages that are no longer visible there.
   /// On unmuting a channel or subscribing to it unmuted,
   /// some of its messages may become visible,
   /// so this refetches the list from scratch, as for unmuting a topic.
   /// (Subscribing to a channel muted changes no message's visibility:
   /// a topic the user has unmuted or follows is visible either way,
   /// and any other topic is hidden either way.)
+  ///
+  /// A view of a channel, or of a topic in it, shows the same messages
+  /// whether or not the user is subscribed.
+  /// But while the user isn't subscribed,
+  /// the event queue doesn't bring the channel's new messages,
+  /// so the view may lack some.
+  /// On subscribing to the channel, this refetches such a view from scratch,
+  /// so it doesn't go on to add new messages after a gap.
   void handleSubscriptionEvent(SubscriptionEvent event) {
-    if (narrow is! CombinedFeedNarrow) return;
+    switch (narrow) {
+      case CombinedFeedNarrow():
+        break;
+
+      case ChannelNarrow(:final channelId):
+      case TopicNarrow(:final channelId):
+        if (event case SubscriptionAddEvent(:final subscriptions)
+            when subscriptions.any((s) => s.streamId == channelId)) {
+          _refetchFromScratch();
+        }
+        return;
+
+      case DmNarrow():
+      case MentionsNarrow():
+      case StarredMessagesNarrow():
+      case KeywordSearchNarrow():
+        return;
+    }
 
     switch (event) {
       case SubscriptionAddEvent(:final subscriptions):
         if (subscriptions.every((subscription) => subscription.isMuted)) return;
-        _refetchForNewlyVisibleMessages();
+        _refetchFromScratch();
 
       case SubscriptionRemoveEvent(:final channelIds):
         _removeMessagesNoLongerVisible(channelIds: channelIds);
@@ -2153,7 +2176,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         if (value == true) {
           _removeMessagesNoLongerVisible(channelIds: [channelId]);
         } else {
-          _refetchForNewlyVisibleMessages();
+          _refetchFromScratch();
         }
 
       case SubscriptionUpdateEvent():
@@ -2178,10 +2201,10 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
-  /// Refetch from scratch, because some messages
-  /// [_messageVisible] used to hide may now be visible.
-  void _refetchForNewlyVisibleMessages() {
-    // TODO get the newly-visible messages from the message store
+  /// Refetch from scratch, if fetched,
+  /// because messages this view lacks may now belong in it.
+  void _refetchFromScratch() {
+    // TODO take the messages from the message store, where it has them
     // For now, we simplify the task by just refetching this message list
     // from scratch.
     if (fetched) {

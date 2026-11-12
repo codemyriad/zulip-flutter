@@ -27,7 +27,6 @@ import '../example_data.dart' as eg;
 import '../model/binding.dart';
 import '../model/narrow_checks.dart';
 import '../model/store_checks.dart';
-import '../model/test_store.dart';
 import '../stdlib_checks.dart';
 import '../test_navigation.dart';
 import '../widgets/checks.dart';
@@ -359,9 +358,12 @@ void main() {
         Future<void> prepareMessageListPage(WidgetTester tester, {
           required Narrow narrow,
           required List<Message> messages,
+          List<ZulipStream>? streams,
+          List<Subscription>? subscriptions,
         }) async {
           addTearDown(testBinding.reset);
-          await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
+          await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+            streams: streams, subscriptions: subscriptions));
           await prepare(tester);
           store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
           connection = store.connection as FakeApiConnection;
@@ -467,10 +469,9 @@ void main() {
           final message1 = eg.streamMessage(stream: stream, topic: 'a');
           await prepareMessageListPage(tester,
             narrow: TopicNarrow.ofMessage(message1),
-            messages: [message1]);
-          await store.addStream(stream);
-          await store.addSubscription(eg.subscription(stream));
-          await tester.pump();
+            messages: [message1],
+            streams: [stream],
+            subscriptions: [eg.subscription(stream)]);
 
           // Produce an error dialog by attempting to send (with an empty compose box).
           await tester.tap(find.byIcon(ZulipIcons.send));

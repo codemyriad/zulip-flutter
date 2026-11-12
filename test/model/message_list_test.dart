@@ -2546,6 +2546,30 @@ void main() {
           [channelMessage1, dmMessage, channelMessage2, channelMessage3]);
       }));
 
+      test('channel unsubscribed and resubscribed: none missing between stored messages', () => awaitFakeAsync((async) async {
+        final narrow = ChannelNarrow(channel.streamId);
+        final message1 = eg.streamMessage(stream: channel);
+        await prepareStored(narrow: narrow, messages: [message1]);
+
+        await store.removeSubscription(channel.streamId);
+        checkNotNotified();
+        // A message is sent while unsubscribed; no event brings it.
+        final message2 = eg.streamMessage(stream: channel);
+
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [message1, message2]).toJson());
+        await store.addSubscription(eg.subscription(channel));
+        checkNotifiedOnce();
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+
+        final message3 = eg.streamMessage(stream: channel);
+        await store.addMessage(message3);
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async, narrow: narrow);
+        checkCachedMessages(narrow, [message1, message2, message3]);
+      }));
+
       test('topic moved away: old topic\'s stored messages deleted', () => awaitFakeAsync((async) async {
         final narrow = eg.topicNarrow(channel.streamId, 'topic');
         await prepareStored(narrow: narrow);
@@ -4310,7 +4334,7 @@ void main() {
       checkHasMessageIds([1, 2, 3, 4, 5]);
     });
 
-    group('narrows whose visibility does not depend on it: no effect', () {
+    group('mute, unmute, unsubscribe, in other narrows: no effect', () {
       Future<void> checkNoEffect(Narrow narrow, List<Message> messages, {
         List<int>? starredMessages,
       }) async {
@@ -4323,8 +4347,6 @@ void main() {
         await setChannelMuted(false);
         checkNotNotified();
         await store.removeSubscription(channel.streamId);
-        checkNotNotified();
-        await store.addSubscription(eg.subscription(channel));
         checkNotNotified();
         check(model).fetched.isTrue();
         checkHasMessages(messages);
@@ -4346,6 +4368,79 @@ void main() {
         return checkNoEffect(const StarredMessagesNarrow(), [message],
           starredMessages: [message.id]);
       });
+    });
+
+    group('subscribe, in other narrows', () {
+      /// Check the effect on a view of [narrow] of subscribing to [channel]
+      /// while it shows [messages], with [fresh] as the result of any refetch.
+      Future<void> checkSubscribe(FakeAsync async, Narrow narrow, {
+        required List<Message> messages,
+        List<Message>? fresh,
+        List<int>? starredMessages,
+      }) async {
+        await prepareChannels(narrow, starredMessages: starredMessages);
+        await store.removeSubscription(channel.streamId);
+        await prepareMessages(foundOldest: true, messages: messages);
+        checkHasMessages(messages);
+
+        if (fresh != null) {
+          connection.prepare(
+            json: newestResult(foundOldest: true, messages: fresh).toJson());
+        }
+        await store.addSubscription(eg.subscription(channel));
+        if (fresh == null) {
+          checkNotNotified();
+          check(model).fetched.isTrue();
+          checkHasMessages(messages);
+          return;
+        }
+        checkNotifiedOnce();
+        check(model).fetched.isFalse();
+        checkHasMessages([]);
+
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkHasMessages(fresh);
+      }
+
+      // While unsubscribed, the event queue doesn't bring
+      // the channel's new messages, so the view may lack some.
+      test('ChannelNarrow: refetch from scratch', () => awaitFakeAsync((async) async {
+        final messages = [eg.streamMessage(stream: channel, topic: 'plain')];
+        await checkSubscribe(async, ChannelNarrow(channel.streamId),
+          messages: messages,
+          fresh: [...messages, eg.streamMessage(stream: channel, topic: 'other')]);
+      }));
+
+      test('TopicNarrow: refetch from scratch', () => awaitFakeAsync((async) async {
+        final messages = [eg.streamMessage(stream: channel, topic: 'plain')];
+        await checkSubscribe(async, eg.topicNarrow(channel.streamId, 'plain'),
+          messages: messages,
+          fresh: [...messages, eg.streamMessage(stream: channel, topic: 'plain')]);
+      }));
+
+      test('ChannelNarrow, other channel: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, ChannelNarrow(otherChannel.streamId),
+          messages: [eg.streamMessage(stream: otherChannel)]);
+      }));
+
+      test('TopicNarrow, other channel: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, eg.topicNarrow(otherChannel.streamId, 'plain'),
+          messages: [eg.streamMessage(stream: otherChannel, topic: 'plain')]);
+      }));
+
+      test('MentionsNarrow: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, const MentionsNarrow(),
+          messages: [eg.streamMessage(stream: channel, topic: 'plain',
+            flags: [MessageFlag.mentioned])]);
+      }));
+
+      test('StarredMessagesNarrow: no effect', () => awaitFakeAsync((async) async {
+        final message = eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.starred]);
+        await checkSubscribe(async, const StarredMessagesNarrow(),
+          messages: [message], starredMessages: [message.id]);
+      }));
     });
   });
 
