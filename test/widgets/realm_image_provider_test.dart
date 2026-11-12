@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:checks/checks.dart';
@@ -177,6 +178,18 @@ void main() {
       await putCached(networkFirstUrl, imageBytes);
       await pumpImage(tester, networkFirstUrl);
       checkImageShown(tester);
+      debugNetworkImageHttpClientProvider = null;
+    });
+
+    testWidgets('network-first, response not an image: show cached', (tester) async {
+      // As from a captive portal, which answers with its login page.
+      await prepare();
+      prepareImageHttpClient(content: utf8.encode('<html>log in</html>'));
+      await putCached(networkFirstUrl, imageBytes);
+      await pumpImage(tester, networkFirstUrl);
+      check(httpClient.requestedUrls).single.equals(networkFirstUrl);
+      checkImageShown(tester);
+      check(cachedEntries()![networkFirstUrl]).isNotNull().deepEquals(imageBytes);
       debugNetworkImageHttpClientProvider = null;
     });
 

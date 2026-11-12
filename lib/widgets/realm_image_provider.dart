@@ -129,17 +129,20 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
       }
 
       final Uint8List bytes;
+      final ui.Codec codec;
       try {
         bytes = await _fetch(chunkEvents);
+        // A response that doesn't decode, like a captive portal's login page,
+        // is a failure to get the image like any other.
+        codec = await decode(await ui.ImmutableBuffer.fromUint8List(bytes));
       } catch (e) {
         if (policy == ImageDiskCachePolicy.networkFirst) {
-          final codec = await _tryDecodeFromCache(decode);
-          if (codec != null) return codec;
+          final cached = await _tryDecodeFromCache(decode);
+          if (cached != null) return cached;
         }
         rethrow;
       }
 
-      final codec = await decode(await ui.ImmutableBuffer.fromUint8List(bytes));
       // Store only what decoded, so the cache holds no non-images.
       unawaited(_tryStore(bytes));
       return codec;
