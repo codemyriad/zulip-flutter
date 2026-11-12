@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
@@ -5,6 +6,7 @@ import 'package:test/scaffolding.dart';
 import 'package:zulip/model/database.dart';
 
 import '../example_data.dart' as eg;
+import '../fake_async.dart';
 import 'binding.dart';
 import 'store_checks.dart';
 import 'test_store.dart';
@@ -154,6 +156,25 @@ void main() {
       await check(backend.doLoadServerData(eg.selfAccount.id)).throws<Exception>();
       check(await backend.doLoadServerData(eg.selfAccount.id)).isNotNull();
     });
+
+    test('append waits for gate', () => awaitFakeAsync((async) async {
+      prepare();
+      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        queueId: 'queue1', lastEventId: 10));
+      final gate = Completer<void>();
+      backend.appendServerEventsGate = gate.future;
+      bool? result;
+      unawaited(append(11, '[{"id":11}]').then((r) => result = r));
+      async.flushMicrotasks();
+      check(result).isNull();
+      check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
+
+      gate.complete();
+      async.flushMicrotasks();
+      check(result).equals(true);
+      check(backend.serverEventBatchesOf(eg.selfAccount.id)).single
+        .lastEventId.equals(11);
+    }));
 
     test('seed server data', () async {
       prepare();

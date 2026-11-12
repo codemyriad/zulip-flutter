@@ -193,6 +193,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   /// and resets it to null.
   Object? appendServerEventsError;
 
+  /// If non-null, each call to [doAppendServerEvents] first waits for this.
+  Future<void>? appendServerEventsGate;
+
   /// If non-null, the next call to [doLoadServerSnapshotInfo] throws this
   /// and resets it to null.
   Object? loadServerSnapshotInfoError;
@@ -219,6 +222,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     required int lastEventId,
     required Uint8List? data,
   }) async {
+    if (appendServerEventsGate case final gate?) {
+      await gate;
+    }
     if (appendServerEventsError case final error?) {
       appendServerEventsError = null;
       throw error;
