@@ -846,7 +846,11 @@ class MessageList extends StatefulWidget {
 }
 
 class _MessageListState extends State<MessageList> with PerAccountStoreAwareStateMixin<MessageList> {
-  final GlobalKey _scrollViewKey = GlobalKey();
+  /// The key for the scroll view.
+  ///
+  /// Replaced with a new key to start the scroll view over,
+  /// at its initial scroll position; see [_modelChanged].
+  GlobalKey _scrollViewKey = GlobalKey();
 
   MessageListView get model => _model!;
   MessageListView? _model;
@@ -897,6 +901,8 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   bool _autofocusDecided = false;
 
+  bool _modelWasShowingCachedMessages = false;
+
   void _modelChanged() {
     // When you're scrolling quickly, our mark-as-read requests include the
     // messages *between* _messagesRecentlyInViewport and the messages currently
@@ -917,6 +923,15 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
       //   redirected us to the new location of the operand message ID.
       widget.onNarrowChanged(model.narrow);
     }
+    if (_modelWasShowingCachedMessages && !model.showingCachedMessages) {
+      // The cached messages were replaced, for example by fresh ones
+      // from the initial fetch; the old scroll position means nothing for
+      // those. Start the scroll view over, so it gets placed at the anchor
+      // the same way a newly opened list does.
+      _scrollViewKey = GlobalKey();
+    }
+    _modelWasShowingCachedMessages = model.showingCachedMessages;
+
     // TODO when model reset, reset scroll
     setState(() {
       // The actual state lives in the [MessageListView] model.

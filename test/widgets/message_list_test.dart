@@ -965,6 +965,24 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250)); // bottom-sheet animation
       check(find.byType(BottomSheet)).findsOne();
     });
+
+    testWidgets('scroll position reset when fresh messages replace cached', (tester) async {
+      final messages = List.generate(30, (_) => eg.streamMessage(stream: channel));
+      await setupCached(tester, cachedMessages: messages);
+      final controller = findMessageListScrollController(tester)!;
+      check(controller.position).extentAfter.equals(0);
+      controller.jumpTo(-600);
+      await tester.pump();
+      check(controller.position).extentAfter.isGreaterOrEqual(600);
+
+      prepareFreshFetch(messages);
+      await retryFetch(tester);
+      await tester.pump();
+      // Back at the initial position for the newest-message anchor,
+      // i.e. at the end, as for a newly opened list.
+      check(controller.position).extentAfter.equals(0);
+      check(store.debugMessageListViews.single.showingCachedMessages).isFalse();
+    });
   });
 
   group('fetch older messages on scroll', () {
