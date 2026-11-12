@@ -712,6 +712,7 @@ void main() {
         }));
 
         test('sent before network change: abort on retry signal, and retry', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
           await prepare();
           prepareStuck();
           final fetchFuture = model.fetchInitial();
@@ -728,6 +729,7 @@ void main() {
         }));
 
         test('sent after network change: no abort on retry signal', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
           await prepare();
           async.elapse(Duration.zero); // connectivity baseline
           testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
