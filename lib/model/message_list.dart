@@ -215,7 +215,8 @@ mixin _MessageSequence {
   /// and there are no [outboxMessages].
   ///
   /// The messages are as of when the stored fetch was made,
-  /// the last time the narrow was opened from its newest or first unread message;
+  /// the last time the narrow was opened from its newest or first unread message
+  /// and the fetch reached the newest message;
   /// they don't reflect events received after that,
   /// except for read and starred state, which come from the store.
   /// Where the store has a message, its copy is used instead.
@@ -1010,9 +1011,12 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// this shows the messages from the narrow's stored earlier fetch, if any.
   /// See [showingCachedMessages].
   /// A fetch is stored after it succeeds, if [narrow] isn't a keyword search
-  /// (see [messageFetchCacheKey]) and [anchor] is
-  /// [AnchorCode.newest] or [AnchorCode.firstUnread];
+  /// (see [messageFetchCacheKey]), [anchor] is
+  /// [AnchorCode.newest] or [AnchorCode.firstUnread],
+  /// and the result reaches the newest message
+  /// ([GetMessagesResult.foundNewest]);
   /// a stored fetch is shown only for those anchors too.
+  /// A fetch that finds no messages deletes any stored one.
   Future<void> fetchInitial() async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
@@ -1172,9 +1176,12 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       final key = messageFetchCacheKey(narrow)!;
       if (result.messages.isEmpty) {
         unawaited(store.deleteCachedMessageFetch(key));
-      } else {
+      } else if (result.foundNewest) {
         unawaited(store.storeCachedMessageFetch(key, rawBody.takeBytes()));
       }
+      // Otherwise the fetch stops short of the newest messages,
+      // as from an old unread in a busy conversation.
+      // Keep any stored fetch, which reaches them.
     }
 
     assert(_status == FetchingStatus.fetchInitial

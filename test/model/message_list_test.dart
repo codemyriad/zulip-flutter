@@ -773,6 +773,19 @@ void main() {
       test('not for keyword search', () =>
         checkNotStored(KeywordSearchNarrow('hello'), AnchorCode.newest));
 
+      test('not when the result stops short of the newest message', () async {
+        // As for an old unread in a busy topic.
+        final narrow = eg.topicNarrow(channel.streamId, 'topic');
+        await prepare(narrow: narrow, anchor: AnchorCode.firstUnread, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel, topic: 'topic')]);
+        final stored = cachedFetchOf(narrow)!.data;
+        final messages = [eg.streamMessage(stream: channel, topic: 'topic')];
+        connection.prepare(json: nearResult(anchor: messages.single.id,
+          foundOldest: true, foundNewest: false, messages: messages).toJson());
+        await model.fetchInitial();
+        check(cachedFetchOf(narrow)).isNotNull().data.deepEquals(stored);
+      });
+
       test('topic permalink: store under the narrow redirected to', () async {
         final otherChannel = eg.stream();
         final message = eg.streamMessage(stream: otherChannel, topic: 'other');

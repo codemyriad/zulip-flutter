@@ -300,7 +300,7 @@ class ServerEventBatches extends Table {
 
 /// The table of [CachedMessageFetch] records,
 /// each the result of the latest initial fetch of messages
-/// for a narrow in an account,
+/// for a narrow in an account that reached the newest message,
 /// for showing that narrow's messages while the server can't be reached (#477).
 ///
 /// A row holds the server's response as of that fetch;
