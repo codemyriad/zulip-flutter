@@ -910,6 +910,9 @@ class MessageStoreImpl extends HasChannelStore with MessageStore, _OutboxMessage
     // Live-updates for polls should not rebuild the message lists.
     // [Poll] is responsible for notifying the affected listeners.
     poll.handleSubmessageEvent(event);
+    for (final view in _messageListViews) {
+      view.handlePollChanged(message.id);
+    }
   }
 
   /// In debug mode, controls whether outbox messages should be created when

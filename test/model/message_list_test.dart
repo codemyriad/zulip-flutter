@@ -6,6 +6,7 @@ import 'package:checks/checks.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:clock/clock.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
 import 'package:zulip/api/backoff.dart';
@@ -14,6 +15,7 @@ import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
+import 'package:zulip/api/model/submessage.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/algorithms.dart';
 import 'package:zulip/model/binding.dart';
@@ -28,6 +30,7 @@ import 'package:zulip/model/store.dart';
 
 import '../api/fake_api.dart';
 import '../api/model/model_checks.dart';
+import '../api/model/submessage_checks.dart';
 import '../example_data.dart' as eg;
 import '../fake_async.dart';
 import '../stdlib_checks.dart';
@@ -71,6 +74,7 @@ void main() {
   // These variables are the common state operated on by each test.
   // Each test case calls [prepare] to initialize them.
   late Subscription subscription;
+  late TestGlobalStore globalStore;
   late TestGlobalStoreBackend backend;
   late PerAccountStore store;
   late FakeApiConnection connection;
@@ -99,7 +103,7 @@ void main() {
   }) async {
     stream ??= eg.stream(streamId: eg.defaultStreamMessageStreamId);
     subscription = eg.subscription(stream);
-    final globalStore = eg.globalStore(accounts: [eg.selfAccount]);
+    globalStore = eg.globalStore(accounts: [eg.selfAccount]);
     backend = globalStore.backend;
     store = eg.store(globalStore: globalStore,
       initialSnapshot: eg.initialSnapshot(
@@ -846,12 +850,14 @@ void main() {
     }
 
     /// Check that the messages stored for [narrow] are [expected],
-    /// with the same data.
+    /// with the same data (except any polls; see cached_messages_test.dart).
     void checkCachedMessages(Narrow narrow, List<Message> expected) {
+      Object? toJson(Message message) =>
+        deepToJson(message) as Map<String, dynamic>..remove('submessages');
       final data = cachedFetchOf(narrow)?.data;
       check(data).isNotNull();
-      check(decodeCachedMessages(data!).map(deepToJson))
-        .deepEquals(expected.map(deepToJson));
+      check(decodeCachedMessages(data!).map(toJson))
+        .deepEquals(expected.map(toJson));
     }
 
     group('store after fetchInitial', () {
@@ -1772,6 +1778,332 @@ void main() {
           await fetchFuture;
         }));
       });
+    });
+
+    group('keep stored messages up to date', () {
+      /// Set up a view of [narrow] that has the newest messages,
+      /// and has stored them.
+      Future<void> prepareStored({
+        Narrow narrow = const CombinedFeedNarrow(),
+        List<Message>? messages,
+      }) async {
+        await prepare(narrow: narrow, stream: channel);
+        messages ??= List.generate(3, (_) =>
+          eg.streamMessage(stream: channel, topic: 'topic'));
+        await prepareMessages(foundOldest: true, messages: messages);
+        checkCachedMessages(narrow, model.messages);
+      }
+
+      /// Check that [narrow]'s stored messages are as [model] has them.
+      void checkStoredAsShown([Narrow narrow = const CombinedFeedNarrow()]) {
+        checkCachedMessages(narrow, model.messages);
+      }
+
+      /// Check that [narrow]'s stored messages are unchanged
+      /// since [storedData], and no write is pending.
+      void checkStoredUnchanged(Uint8List storedData, {
+        Narrow narrow = const CombinedFeedNarrow(),
+        required FakeAsync async,
+      }) {
+        check(cachedFetchOf(narrow)).isNotNull().data.deepEquals(storedData);
+        check(async.pendingTimers).isEmpty();
+      }
+
+      /// Check that [narrow]'s stored messages are unchanged
+      /// until [kCachedMessagesWriteDelay] has passed,
+      /// and then are as [model] has them.
+      void checkStoredAfterDelay(FakeAsync async, {
+        Narrow narrow = const CombinedFeedNarrow(),
+      }) {
+        final before = cachedFetchOf(narrow)!.data;
+        check(async.pendingTimers).single;
+        async.elapse(kCachedMessagesWriteDelay - const Duration(milliseconds: 1));
+        check(cachedFetchOf(narrow)).isNotNull().data.deepEquals(before);
+        async.elapse(const Duration(milliseconds: 1));
+        checkStoredAsShown(narrow);
+        check(async.pendingTimers).isEmpty();
+      }
+
+      test('new message', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final newMessage = eg.streamMessage(stream: channel, topic: 'topic');
+        await store.addMessage(newMessage);
+        checkNotifiedOnce();
+        check(model.messages).last.id.equals(newMessage.id);
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data))
+          .last.id.equals(newMessage.id);
+      }));
+
+      test('message edited', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final message = model.messages[1];
+        await store.handleEvent(eg.updateMessageEditEvent(message,
+          renderedContent: '<p>edited</p>'));
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data)[1])
+          ..content.equals('<p>edited</p>')
+          ..editState.equals(MessageEditState.edited);
+      }));
+
+      test('reaction added', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final message = model.messages[1];
+        await store.handleEvent(eg.reactionEvent(
+          eg.unicodeEmojiReaction, ReactionOp.add, message.id));
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data)[1])
+          .reactions.isNotNull().total.equals(1);
+      }));
+
+      test('flag added', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final message = model.messages[1];
+        await store.handleEvent(UpdateMessageFlagsAddEvent(id: 1,
+          flag: MessageFlag.starred, messages: [message.id], all: false));
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data)[1])
+          .flags.contains(MessageFlag.starred);
+      }));
+
+      test('message deleted', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final message = model.messages[1] as StreamMessage;
+        await store.handleEvent(eg.deleteMessageEvent([message]));
+        checkNotifiedOnce();
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data))
+          .length.equals(2);
+      }));
+
+      test('message moved within the narrow', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final message = model.messages[1] as StreamMessage;
+        await store.handleEvent(eg.updateMessageEventMoveFrom(
+          origMessages: [message], newTopicStr: 'other topic'));
+        check(notifiedCount).isGreaterThan(0);
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data)[1])
+          .isA<StreamMessage>()
+            ..topic.equals(eg.t('other topic'))
+            ..editState.equals(MessageEditState.moved);
+      }));
+
+      test('poll vote', () => awaitFakeAsync((async) async {
+        final pollMessage = eg.streamMessage(stream: channel,
+          sender: eg.selfUser, submessages: [
+            eg.submessage(senderId: eg.selfUser.userId,
+              content: eg.pollWidgetData(question: 'Question?',
+                options: ['a', 'b'])),
+          ]);
+        await prepareStored(messages: [pollMessage]);
+        await store.handleEvent(eg.submessageEvent(pollMessage.id,
+          eg.otherUser.userId,
+          content: PollVoteEventSubmessage(key: 'canned,1', op: PollVoteOp.add)));
+        checkNotNotified(); // the poll notifies, not the message list
+        checkStoredAfterDelay(async);
+        check(decodeCachedMessages(cachedFetchOf(const CombinedFeedNarrow())!.data))
+          .single.poll.isNotNull().options.last
+          .voters.deepEquals([eg.otherUser.userId]);
+      }));
+
+      test('burst of events: one write, after the first', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final storedData = cachedFetchOf(const CombinedFeedNarrow())!.data;
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        async.elapse(const Duration(seconds: 1));
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        await store.handleEvent(eg.reactionEvent(
+          eg.unicodeEmojiReaction, ReactionOp.add, model.messages.first.id));
+        check(async.pendingTimers).single;
+        check(cachedFetchOf(const CombinedFeedNarrow())).isNotNull()
+          .data.deepEquals(storedData);
+
+        async.elapse(kCachedMessagesWriteDelay - const Duration(seconds: 1));
+        checkStoredAsShown();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('dispose: store at once', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        final shown = model.messages.toList();
+        check(async.pendingTimers).single;
+        model.dispose();
+        checkCachedMessages(const CombinedFeedNarrow(), shown);
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('dispose with nothing to store: no write', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        final storedData = cachedFetchOf(const CombinedFeedNarrow())!.data;
+        backend.storeCachedMessageFetchError = Exception('unexpected write');
+        model.dispose();
+        checkStoredUnchanged(storedData, async: async);
+        check(backend.storeCachedMessageFetchError).isNotNull();
+      }));
+
+      test('renarrowAndFetch: store old narrow at once', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        final shown = model.messages.toList();
+
+        final newNarrow = ChannelNarrow(channel.streamId);
+        final newMessages = [eg.streamMessage(stream: channel)];
+        connection.prepare(json:
+          newestResult(foundOldest: true, messages: newMessages).toJson());
+        model.renarrowAndFetch(newNarrow, AnchorCode.newest);
+        checkCachedMessages(const CombinedFeedNarrow(), shown);
+        async.elapse(Duration.zero);
+        checkCachedMessages(newNarrow, newMessages);
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('topic moved away: old topic\'s stored messages deleted', () => awaitFakeAsync((async) async {
+        final narrow = eg.topicNarrow(channel.streamId, 'topic');
+        await prepareStored(narrow: narrow);
+        final messages = model.messages.cast<StreamMessage>().toList();
+        final newNarrow = eg.topicNarrow(channel.streamId, 'new topic');
+        final movedMessages = [
+          for (final message in messages)
+            StreamMessage.fromJson(deepToJson(message) as Map<String, dynamic>
+              ..['subject'] = 'new topic'),
+        ];
+        connection.prepare(json:
+          newestResult(foundOldest: true, messages: movedMessages).toJson());
+        await store.handleEvent(eg.updateMessageEventMoveFrom(
+          origMessages: messages, newTopicStr: 'new topic',
+          propagateMode: PropagateMode.changeAll));
+        check(cachedFetchOf(narrow)).isNull();
+        async.elapse(Duration.zero);
+        check(model).narrow.equals(newNarrow);
+        checkCachedMessages(newNarrow, model.messages);
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('no longer having the newest messages: store at once', () => awaitFakeAsync((async) async {
+        await prepareStored();
+        await store.addMessage(eg.streamMessage(stream: channel, topic: 'topic'));
+        final shown = model.messages.toList();
+        check(async.pendingTimers).single;
+
+        // Another view's fetch learns of a newer message the event queue missed.
+        store.reconcileMessages([eg.streamMessage(stream: channel, topic: 'topic')]);
+        check(model).haveNewest.isFalse();
+        checkCachedMessages(const CombinedFeedNarrow(), shown);
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('fetchNewer reaching the newest messages: store', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, anchor: NumericAnchor(1), stream: channel);
+        final older = [eg.streamMessage(stream: channel)];
+        connection.prepare(json: nearResult(anchor: older.single.id,
+          foundOldest: true, foundNewest: false, messages: older).toJson());
+        await model.fetchInitial();
+        check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).isEmpty();
+
+        connection.prepare(json: newerResult(anchor: older.single.id,
+          foundNewest: true,
+          messages: [eg.streamMessage(stream: channel)]).toJson());
+        await model.fetchNewer();
+        check(model).haveNewest.isTrue();
+        check(cachedFetchOf(narrow)).isNull();
+        async.elapse(kCachedMessagesWriteDelay);
+        checkStoredAsShown(narrow);
+        check(model.messages).length.equals(2);
+      }));
+
+      test('fetchOlder beyond the stored messages: no write', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepareStored(narrow: narrow, messages: List.generate(
+          kCachedMessagesMaxCount, (_) => eg.streamMessage(stream: channel)));
+        final storedData = cachedFetchOf(narrow)!.data;
+        connection.prepare(json: olderResult(anchor: model.oldestFetchedMessageId!,
+          foundOldest: true,
+          messages: [eg.streamMessage(id: 1, stream: channel)]).toJson());
+        await model.fetchOlder();
+        checkStoredUnchanged(storedData, async: async);
+      }));
+
+      test('no write while not having the newest messages', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, anchor: AnchorCode.firstUnread, stream: channel);
+        final stored = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, stored);
+        final storedData = cachedFetchOf(narrow)!.data;
+        final messages = [eg.streamMessage(stream: channel)];
+        connection.prepare(json: nearResult(anchor: messages.single.id,
+          foundOldest: true, foundNewest: false, messages: messages).toJson());
+        await model.fetchInitial();
+        await store.handleEvent(eg.reactionEvent(
+          eg.unicodeEmojiReaction, ReactionOp.add, messages.single.id));
+        checkNotified(count: 2);
+        checkStoredUnchanged(storedData, async: async);
+      }));
+
+      test('no write while showing cached messages', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = List.generate(3, (_) => eg.streamMessage(stream: channel));
+        seedCachedFetch(narrow, cached);
+        final storedData = cachedFetchOf(narrow)!.data;
+        connection.prepare(httpException: const SocketException('failed'));
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(model).showingCachedMessages.isTrue();
+        checkNotifiedOnce();
+
+        await store.handleEvent(eg.deleteMessageEvent([cached[1]]));
+        checkNotifiedOnce();
+        check(model.messages).length.equals(2);
+        check(async.pendingTimers.where(
+          (timer) => timer.duration == kCachedMessagesWriteDelay)).isEmpty();
+
+        model.dispose();
+        await fetchFuture;
+        checkStoredUnchanged(storedData, async: async);
+      }));
+
+      test('round trip: a later view offline shows what this one last showed', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepareStored(messages: List.generate(3, (_) =>
+          eg.streamMessage(stream: channel, topic: 'topic',
+            flags: [MessageFlag.read])));
+        final storeA = store;
+        await storeA.addMessage(eg.streamMessage(stream: channel, topic: 'topic',
+          flags: [MessageFlag.read]));
+        await storeA.handleEvent(eg.updateMessageEditEvent(model.messages[0],
+          renderedContent: '<p>edited</p>'));
+        await storeA.handleEvent(eg.reactionEvent(
+          eg.unicodeEmojiReaction, ReactionOp.add, model.messages[1].id));
+        await storeA.handleEvent(eg.deleteMessageEvent(
+          [model.messages[2] as StreamMessage]));
+        final shownByA = model.messages.map(deepToJson).toList();
+        check(shownByA).length.equals(3);
+        model.dispose();
+
+        // A new store, as after the app restarts, without those messages.
+        final storeB = eg.store(globalStore: globalStore,
+          initialSnapshot: eg.initialSnapshot(
+            streams: [channel], subscriptions: [eg.subscription(channel)]));
+        final connectionB = storeB.connection as FakeApiConnection;
+        final modelB = MessageListView.init(store: storeB,
+          narrow: narrow, anchor: AnchorCode.newest);
+        connectionB.prepare(httpException: const SocketException('failed'));
+        final fetchFuture = modelB.fetchInitial();
+        async.elapse(Duration.zero);
+        check(modelB).showingCachedMessages.isTrue();
+        check(modelB.messages.map(deepToJson)).deepEquals(shownByA);
+        check(modelB.messages[0]).editState.equals(MessageEditState.edited);
+
+        modelB.dispose();
+        await fetchFuture;
+        storeB.dispose();
+      }));
     });
   });
 

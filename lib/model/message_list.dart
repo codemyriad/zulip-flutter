@@ -33,6 +33,15 @@ const kMessageListFetchBatchSize = 100; // TODO tune
 // About as many as a fetchInitial from the first unread message gets.
 const kCachedMessagesMaxCount = 2 * kMessageListFetchBatchSize;
 
+/// How long a [MessageListView] waits after a change to its messages
+/// before storing them for its narrow.
+///
+/// Further changes meanwhile are stored along with the first,
+/// so that a burst of events causes just one write.
+///
+/// See [MessageListView.showingCachedMessages].
+const kCachedMessagesWriteDelay = Duration(seconds: 2);
+
 /// How long [MessageListView.fetchInitial] waits on its request
 /// before showing cached messages, if any.
 ///
@@ -261,17 +270,28 @@ mixin _MessageSequence {
   /// and there are no [outboxMessages].
   ///
   /// The messages are the newest ones in the narrow
-  /// (up to [kCachedMessagesMaxCount] of them),
-  /// as of the last time a view of the narrow
-  /// had an initial fetch that reached the newest message;
-  /// they don't reflect events received after that.
+  /// (up to [kCachedMessagesMaxCount] of them)
+  /// as last shown by a view of the narrow that had the newest messages,
+  /// including any changes from events while it showed them.
+  /// A view stores its messages after an initial fetch
+  /// that reaches the newest messages,
+  /// and [kCachedMessagesWriteDelay] after they change
+  /// while it has the newest messages;
+  /// and then if they're due to be stored,
+  /// when it's disposed, moves to another narrow,
+  /// or stops having the newest messages.
+  ///
   /// Where the store has a message, its copy is used instead,
   /// and a message the store has seen deleted is left out.
   /// For the other messages, the read and starred state
-  /// are taken from the store at the time the cached messages are shown;
-  /// changes to that state while they're shown don't appear on them.
+  /// are taken from the store at the time the cached messages are shown.
   ///
   /// Known limitations:
+  ///  * Messages the store doesn't have don't get updated by events
+  ///    while they're shown, except that one the store learns is deleted
+  ///    is removed: for example an edit, a reaction,
+  ///    or a change to the read or starred state doesn't appear on them.
+  ///    Nor do messages sent meanwhile get added.
   ///  * When the store is replaced, as after the event queue expires,
   ///    the message list starts over with a new [MessageListView] (#464).
   ///    If the list was showing messages, the new view shows
@@ -864,6 +884,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// Set [narrow] and [anchor], reset, [notifyListeners], and [fetchInitial].
   void renarrowAndFetch(Narrow newNarrow, Anchor anchor) {
     assert(!_disposed);
+    // Store the messages for the old narrow, if they're due to be stored.
+    _flushCachedMessagesWrite();
     _narrow = newNarrow;
     _anchor = anchor;
     _reset();
@@ -899,7 +921,14 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // don't act on, or notify listeners of, this disposed object.
     _disposed = true;
     _cancelFetchInitial();
+    _flushCachedMessagesWrite();
     super.dispose();
+  }
+
+  @override
+  void _reset() {
+    _flushCachedMessagesWrite();
+    super._reset();
   }
 
   @override bool get oneMessagePerBlock => switch (narrow) {
@@ -1062,7 +1091,10 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     assert(was == null || _status == was);
     _status = value;
     if (!fetched) return;
-    notifyListeners();
+    // Not [notifyListeners], which would schedule storing the messages:
+    // the status alone isn't part of what's stored.
+    // Where a fetch changes the messages, it schedules that itself.
+    super.notifyListeners();
   }
 
   /// Fetch messages, starting from scratch.
@@ -1270,9 +1302,52 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       || _status == FetchingStatus.fetchInitialShowingCached);
     _setStatus(FetchingStatus.idle);
 
+    // Store the messages now, rather than after [kCachedMessagesWriteDelay],
+    // so they're there if the list gets opened again soon.
     // If the result stops short of the newest messages,
     // as from an old unread in a busy conversation,
     // this keeps any stored messages, which reach them.
+    _writeCachedMessages();
+  }
+
+  /// Whether the messages are to be stored for [narrow] once they change;
+  /// see [_writeCachedMessages].
+  ///
+  /// These are the newest messages in the narrow,
+  /// with none missing between them,
+  /// whenever [haveNewest] is true (however that came about)
+  /// and the messages aren't the stored ones ([showingCachedMessages]).
+  bool get _shouldStoreMessages =>
+    haveNewest && !showingCachedMessages && messageFetchCacheKey(narrow) != null;
+
+  /// The timer for storing the messages; see [_scheduleCachedMessagesWrite].
+  Timer? _cachedMessagesWriteTimer;
+
+  /// Arrange to store the messages for [narrow],
+  /// after [kCachedMessagesWriteDelay],
+  /// because they've changed.
+  ///
+  /// This does nothing unless [_shouldStoreMessages],
+  /// or if the messages are already due to be stored.
+  ///
+  /// Call this after any change to [messages],
+  /// including a change to the data of one of them.
+  /// [notifyListeners] calls this,
+  /// so a change that notifies listeners needn't call it too.
+  void _scheduleCachedMessagesWrite() {
+    if (_cachedMessagesWriteTimer != null) return;
+    if (!_shouldStoreMessages) return;
+    _cachedMessagesWriteTimer = Timer(kCachedMessagesWriteDelay, _writeCachedMessages);
+  }
+
+  /// If the messages are due to be stored, store them now.
+  ///
+  /// Call this before [narrow] changes,
+  /// or [haveNewest] becomes false,
+  /// or the messages are cleared,
+  /// so that what's stored is what this view last showed for [narrow].
+  void _flushCachedMessagesWrite() {
+    if (_cachedMessagesWriteTimer == null) return;
     _writeCachedMessages();
   }
 
@@ -1284,14 +1359,13 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// replacing any stored for [narrow] before,
   /// or deletes those if [messages] is empty.
   ///
-  /// This does nothing unless [haveNewest],
-  /// so that the stored messages are the newest in the narrow,
-  /// with none missing between them;
-  /// nor while [showingCachedMessages];
-  /// nor if the narrow's messages aren't to be stored at all
-  /// (see [messageFetchCacheKey]).
+  /// This does nothing unless [_shouldStoreMessages].
+  ///
+  /// This cancels any timer from [_scheduleCachedMessagesWrite].
   void _writeCachedMessages() {
-    if (!haveNewest || showingCachedMessages) return;
+    _cachedMessagesWriteTimer?.cancel();
+    _cachedMessagesWriteTimer = null;
+    if (!_shouldStoreMessages) return;
     final key = messageFetchCacheKey(narrow);
     if (key == null) return;
     if (messages.isEmpty) {
@@ -1540,8 +1614,11 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           ? result.messages // Avoid unnecessarily copying the list.
           : result.messages.where(_messageVisible);
 
+        // Only the newest messages get stored.
+        final changesStoredMessages = messages.length < kCachedMessagesMaxCount;
         _insertAllMessages(0, fetchedMessages);
         _haveOldest = result.foundOldest;
+        if (changesStoredMessages) _scheduleCachedMessagesWrite();
       });
   }
 
@@ -1580,6 +1657,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         if (haveNewest) {
           _syncOutboxMessagesFromStore();
         }
+        _scheduleCachedMessagesWrite();
       });
   }
 
@@ -1771,6 +1849,9 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       // in the already-fetched range, can arise from a message move.)
       message.id > anchorId && _messageBelongsHere(message));
     if (!hasNewerMessage) return;
+    // The messages no longer reach the newest; store them as they are now,
+    // the newest the view has shown.
+    _flushCachedMessagesWrite();
     _invalidateHaveNewest();
     notifyListeners();
   }
@@ -2022,9 +2103,24 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
   // Repeal the `@protected` annotation that applies on the base implementation,
   // so we can call this method from [MessageStoreImpl].
+  //
+  // This also arranges to store the messages, if they're stored at all,
+  // because a notification normally means they changed.
   @override
   void notifyListeners() {
+    _scheduleCachedMessagesWrite();
     super.notifyListeners();
+  }
+
+  /// Called when the poll on the given message has changed.
+  ///
+  /// The view's listeners aren't notified; see [Poll].
+  /// But if the message is present in this view,
+  /// this arranges to store the messages again.
+  void handlePollChanged(int messageId) {
+    if (_findMessageWithId(messageId) != -1) {
+      _scheduleCachedMessagesWrite();
+    }
   }
 
   /// Notify listeners if the given message is present in this view.
