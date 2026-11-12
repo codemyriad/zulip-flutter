@@ -219,6 +219,14 @@ mixin _MessageSequence {
   /// they don't reflect events received after that,
   /// except for read and starred state, which come from the store.
   /// Where the store has a message, its copy is used instead.
+  ///
+  /// Known limitations:
+  ///  * Outbox messages aren't shown meanwhile,
+  ///    so a message the user sends appears only once the fetch succeeds.
+  ///  * Only a fetch from the newest or first unread message is stored,
+  ///    and not for keyword searches (see [MessageListView.fetchInitial]);
+  ///    a list opened at a specific message, or a search, stays online-only,
+  ///    as do other fetches like those for the topic list.
   bool get showingCachedMessages =>
     _status == FetchingStatus.fetchInitialShowingCached;
 
