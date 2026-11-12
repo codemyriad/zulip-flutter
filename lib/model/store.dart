@@ -17,6 +17,7 @@ import '../api/model/events.dart';
 import '../api/model/initial_snapshot.dart';
 import '../api/model/model.dart';
 import '../api/route/events.dart';
+import '../api/route/messages.dart';
 import '../api/backoff.dart';
 import '../api/route/realm.dart';
 import '../host/ios_native.g.dart';
@@ -142,6 +143,31 @@ abstract class GlobalStoreBackend {
   ///
   /// See [AppDatabase.clearServerData].
   Future<void> doClearServerData(int accountId);
+
+  /// Store [data], the body of a [getMessages] response,
+  /// as the account's cached message fetch for [narrowKey],
+  /// replacing any previous one,
+  /// and evicting the account's least recently written ones as needed.
+  ///
+  /// Returns false, storing nothing, if the account doesn't exist
+  /// or [data] is too big.
+  ///
+  /// See [AppDatabase.storeCachedMessageFetch].
+  Future<bool> doStoreCachedMessageFetch(int accountId, String narrowKey, {
+    required int lastWritten,
+    required Uint8List data,
+  });
+
+  /// Get the data of the account's cached message fetch for [narrowKey],
+  /// or null if there is none.
+  ///
+  /// See [AppDatabase.loadCachedMessageFetch].
+  Future<Uint8List?> doLoadCachedMessageFetch(int accountId, String narrowKey);
+
+  /// Delete the account's cached message fetch for [narrowKey], if any.
+  ///
+  /// See [AppDatabase.deleteCachedMessageFetch].
+  Future<void> doDeleteCachedMessageFetch(int accountId, String narrowKey);
 }
 
 /// Store for all the user's data.
@@ -1307,6 +1333,25 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
   @override
   Future<void> doClearServerData(int accountId) {
     return _db.clearServerData(accountId);
+  }
+
+  @override
+  Future<bool> doStoreCachedMessageFetch(int accountId, String narrowKey, {
+    required int lastWritten,
+    required Uint8List data,
+  }) {
+    return _db.storeCachedMessageFetch(accountId, narrowKey,
+      lastWritten: lastWritten, data: data);
+  }
+
+  @override
+  Future<Uint8List?> doLoadCachedMessageFetch(int accountId, String narrowKey) {
+    return _db.loadCachedMessageFetch(accountId, narrowKey);
+  }
+
+  @override
+  Future<void> doDeleteCachedMessageFetch(int accountId, String narrowKey) {
+    return _db.deleteCachedMessageFetch(accountId, narrowKey);
   }
 }
 

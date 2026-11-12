@@ -5,6 +5,7 @@ import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/events.dart';
+import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/api/route/realm.dart';
 import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/database.dart';
@@ -79,17 +80,18 @@ final _bogusDb = AppDatabase(LazyDatabase(() => throw 'used bogus DB'));
 ///
 /// Most data isn't kept here at all;
 /// the global store has it, and the methods for it do nothing.
-/// The server data, though, is kept here,
+/// The server data and cached message fetches, though, are kept here,
 /// with the same semantics as [LiveGlobalStoreBackend] has,
-/// so that it can be inspected with [serverSnapshotOf]
-/// and [serverEventBatchesOf],
+/// so that they can be inspected with [serverSnapshotOf],
+/// [serverEventBatchesOf], and [cachedMessageFetchOf],
 /// and so that the same backend can be passed to a second [TestGlobalStore]
 /// or [UpdateMachineTestGlobalStore],
 /// simulating a restart of the app.
 ///
 /// The global stores using this backend keep it informed
 /// of which accounts exist,
-/// standing in for the foreign-key constraints on the server-data tables.
+/// standing in for the foreign-key constraints on the server-data tables
+/// and the cached-message-fetches table.
 class TestGlobalStoreBackend implements GlobalStoreBackend {
   @override
   Future<void> doUpdateGlobalSettings(GlobalSettingsCompanion data) async {
@@ -137,6 +139,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     _serverSnapshots.remove(accountId);
     _serverSnapshotData.remove(accountId);
     _serverEventBatches.remove(accountId);
+    _cachedMessageFetches.remove(accountId);
   }
 
   /// The account's stored [ServerSnapshot], if any.
@@ -331,6 +334,131 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     _serverSnapshots.remove(accountId);
     _serverSnapshotData.remove(accountId);
     _serverEventBatches.remove(accountId);
+  }
+
+  /// The cached message fetches, by account ID and then narrow key,
+  /// each account's in the order they were last stored, oldest first.
+  final Map<int, Map<String, ({int lastWritten, Uint8List data})>>
+    _cachedMessageFetches = {};
+
+  /// The data of the account's cached message fetch for [narrowKey], if any.
+  Uint8List? cachedMessageFetchOf(int accountId, String narrowKey) =>
+    _cachedMessageFetches[accountId]?[narrowKey]?.data;
+
+  /// The narrow keys of the account's cached message fetches,
+  /// in the order they were last stored, oldest first.
+  List<String> cachedMessageFetchKeysOf(int accountId) =>
+    List.unmodifiable(_cachedMessageFetches[accountId]?.keys ?? const <String>[]);
+
+  /// Store a cached message fetch for the account,
+  /// as if stored by an earlier run of the app.
+  ///
+  /// The data is [json] encoded as JSON,
+  /// such as from [GetMessagesResult.toJson],
+  /// or else [data], for example to simulate corrupt data.
+  /// Exactly one of them must be passed.
+  ///
+  /// The [lastWritten] defaults to the current time.
+  /// Unlike [doStoreCachedMessageFetch], this ignores the bounds
+  /// on the size and number of cached message fetches,
+  /// and requires the account to exist.
+  void seedCachedMessageFetch(int accountId, String narrowKey, {
+    Map<String, dynamic>? json,
+    Uint8List? data,
+    int? lastWritten,
+  }) {
+    assert((json == null) != (data == null));
+    assert(_accountIds.contains(accountId));
+    _putCachedMessageFetch(accountId, narrowKey,
+      lastWritten: lastWritten
+        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch,
+      data: data ?? utf8.encode(jsonEncode(json)));
+  }
+
+  void _putCachedMessageFetch(int accountId, String narrowKey, {
+    required int lastWritten,
+    required Uint8List data,
+  }) {
+    final fetches = _cachedMessageFetches[accountId] ??= {};
+    fetches.remove(narrowKey);
+    fetches[narrowKey] = (lastWritten: lastWritten, data: data);
+  }
+
+  /// If non-null, the next call to [doStoreCachedMessageFetch] throws this
+  /// and resets it to null.
+  Object? storeCachedMessageFetchError;
+
+  /// If non-null, the next call to [doLoadCachedMessageFetch] throws this
+  /// and resets it to null.
+  Object? loadCachedMessageFetchError;
+
+  /// If non-null, each call to [doLoadCachedMessageFetch] first waits for this.
+  Future<void>? loadCachedMessageFetchGate;
+
+  /// If non-null, the next call to [doDeleteCachedMessageFetch] throws this
+  /// and resets it to null.
+  Object? deleteCachedMessageFetchError;
+
+  @override
+  Future<bool> doStoreCachedMessageFetch(int accountId, String narrowKey, {
+    required int lastWritten,
+    required Uint8List data,
+  }) async {
+    if (storeCachedMessageFetchError case final error?) {
+      storeCachedMessageFetchError = null;
+      throw error;
+    }
+    if (data.length > AppDatabase.maxCachedMessageFetchSize) {
+      _cachedMessageFetches[accountId]?.remove(narrowKey);
+      return false;
+    }
+    if (!_accountIds.contains(accountId)) return false;
+    _putCachedMessageFetch(accountId, narrowKey,
+      lastWritten: lastWritten, data: data);
+
+    // Evict like [AppDatabase.storeCachedMessageFetch] does.
+    final fetches = _cachedMessageFetches[accountId]!;
+    final otherKeys = fetches.keys.where((key) => key != narrowKey).toList()
+      ..sort((a, b) {
+        final byLastWritten = fetches[b]!.lastWritten
+          .compareTo(fetches[a]!.lastWritten);
+        return byLastWritten != 0 ? byLastWritten : a.compareTo(b);
+      });
+    int count = 1;
+    int totalSize = data.length;
+    final evictedKeys = <String>[];
+    for (final key in otherKeys) {
+      count++;
+      totalSize += fetches[key]!.data.length;
+      if (evictedKeys.isNotEmpty
+          || count > AppDatabase.maxCachedMessageFetchesPerAccount
+          || totalSize > AppDatabase.maxCachedMessageFetchesTotalSize) {
+        evictedKeys.add(key);
+      }
+    }
+    evictedKeys.forEach(fetches.remove);
+    return true;
+  }
+
+  @override
+  Future<Uint8List?> doLoadCachedMessageFetch(int accountId, String narrowKey) async {
+    if (loadCachedMessageFetchGate case final gate?) {
+      await gate;
+    }
+    if (loadCachedMessageFetchError case final error?) {
+      loadCachedMessageFetchError = null;
+      throw error;
+    }
+    return _cachedMessageFetches[accountId]?[narrowKey]?.data;
+  }
+
+  @override
+  Future<void> doDeleteCachedMessageFetch(int accountId, String narrowKey) async {
+    if (deleteCachedMessageFetchError case final error?) {
+      deleteCachedMessageFetchError = null;
+      throw error;
+    }
+    _cachedMessageFetches[accountId]?.remove(narrowKey);
   }
 }
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:test/scaffolding.dart';
@@ -275,6 +276,203 @@ void main() {
       check(newGlobalStore.backend).identicalTo(backend);
       check(await backend.doLoadServerData(eg.selfAccount.id)).isNotNull()
         .snapshot.equals(snapshot);
+    });
+  });
+
+  // These mirror tests of [AppDatabase] in database_test.dart,
+  // to check that the fake has the same semantics as the real backend.
+  group('TestGlobalStoreBackend cached message fetches', () {
+    late TestGlobalStore globalStore;
+    late TestGlobalStoreBackend backend;
+
+    void prepare() {
+      globalStore = TestGlobalStore(accounts: [eg.selfAccount, eg.otherAccount]);
+      backend = globalStore.backend;
+    }
+
+    Future<bool> store(String narrowKey, int lastWritten, {
+      Account? account,
+      String? data,
+      int? size,
+    }) {
+      assert(data == null || size == null);
+      return backend.doStoreCachedMessageFetch(
+        (account ?? eg.selfAccount).id, narrowKey,
+        lastWritten: lastWritten,
+        data: size != null ? Uint8List(size) : utf8.encode(data ?? '{}'));
+    }
+
+    Set<String> keys({Account? account}) {
+      return backend.cachedMessageFetchKeysOf((account ?? eg.selfAccount).id)
+        .toSet();
+    }
+
+    const maxSize = AppDatabase.maxCachedMessageFetchSize;
+
+    test('store, then load', () async {
+      prepare();
+      check(await store('channel:1', 1000, data: '{"a":1}')).isTrue();
+      check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
+        .isNotNull().deepEquals(utf8.encode('{"a":1}'));
+      check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:2'))
+        .isNull();
+      check(await backend.doLoadCachedMessageFetch(eg.otherAccount.id, 'channel:1'))
+        .isNull();
+      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1'))
+        .isNotNull().deepEquals(utf8.encode('{"a":1}'));
+    });
+
+    test('store replaces', () async {
+      prepare();
+      await store('channel:1', 1000, data: '{"a":1}');
+      check(await store('channel:1', 2000, data: '{"a":2}')).isTrue();
+      check(backend.cachedMessageFetchOf(eg.selfAccount.id, 'channel:1'))
+        .isNotNull().deepEquals(utf8.encode('{"a":2}'));
+    });
+
+    test('no store when account missing', () async {
+      globalStore = TestGlobalStore(accounts: [eg.otherAccount]);
+      backend = globalStore.backend;
+      check(await store('channel:1', 1000)).isFalse();
+      check(keys()).isEmpty();
+    });
+
+    test('no store when too big, and delete previous', () async {
+      prepare();
+      check(await store('channel:1', 1000, size: maxSize)).isTrue();
+      check(await store('channel:2', 1000, size: maxSize)).isTrue();
+      check(await store('channel:1', 2000, size: maxSize + 1)).isFalse();
+      check(keys()).deepEquals({'channel:2'});
+    });
+
+    test('delete', () async {
+      prepare();
+      await store('channel:1', 1000);
+      await store('channel:2', 1000);
+      await store('channel:1', 1000, account: eg.otherAccount);
+      await backend.doDeleteCachedMessageFetch(eg.selfAccount.id, 'channel:1');
+      check(keys()).deepEquals({'channel:2'});
+      check(keys(account: eg.otherAccount)).deepEquals({'channel:1'});
+    });
+
+    test('evict least recently written, when too many', () async {
+      prepare();
+      const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+      for (int i = 0; i < maxRows; i++) {
+        await store('channel:$i', 1000 + i);
+      }
+      await store('channel:0', 1000 + maxRows); // rewrite the oldest
+      check(keys()).length.equals(maxRows);
+
+      await store('channel:new', 1000 + maxRows + 1);
+      check(keys())
+        ..length.equals(maxRows)
+        ..contains('channel:0')
+        ..contains('channel:new')
+        ..not((it) => it.contains('channel:1'));
+    });
+
+    test('evict least recently written, when too big', () async {
+      prepare();
+      const halfSize = maxSize ~/ 2;
+      const n = AppDatabase.maxCachedMessageFetchesTotalSize ~/ halfSize;
+      for (int i = 0; i < n; i++) {
+        await store('channel:$i', 1000 + i, size: halfSize);
+      }
+      check(keys()).length.equals(n);
+
+      await store('channel:1', 1000 + n, size: 10);
+      await store('channel:new', 1000 + n + 1, size: maxSize);
+      check(keys())
+        ..length.equals(n - 1)
+        ..not((it) => it.contains('channel:0'))
+        ..contains('channel:1')
+        ..not((it) => it.contains('channel:2'))
+        ..contains('channel:3')
+        ..contains('channel:new');
+    });
+
+    test('evict by lastWritten, not order of storing', () async {
+      prepare();
+      const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+      for (int i = 0; i < maxRows; i++) {
+        await store('channel:$i', 2000 - i);
+      }
+      await store('channel:new', 3000);
+      check(keys())
+        ..contains('channel:0')
+        ..not((it) => it.contains('channel:${maxRows - 1}'));
+    });
+
+    test('eviction is per account', () async {
+      prepare();
+      const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+      for (int i = 0; i < maxRows; i++) {
+        await store('channel:$i', 1000 + i, account: eg.otherAccount);
+      }
+      await store('channel:new', 2000);
+      check(keys(account: eg.otherAccount)).length.equals(maxRows);
+    });
+
+    test('remove account deletes cached message fetches', () async {
+      prepare();
+      await store('channel:1', 1000);
+      await store('channel:1', 1000, account: eg.otherAccount);
+      await globalStore.removeAccount(eg.selfAccount.id);
+      check(keys()).isEmpty();
+      check(keys(account: eg.otherAccount)).deepEquals({'channel:1'});
+      check(await store('channel:1', 2000)).isFalse();
+    });
+
+    test('errors are thrown once', () async {
+      prepare();
+      final error = Exception('oops');
+      backend.storeCachedMessageFetchError = error;
+      await check(store('channel:1', 1000)).throws<Exception>();
+      check(keys()).isEmpty();
+      check(await store('channel:1', 1000)).isTrue();
+
+      backend.loadCachedMessageFetchError = error;
+      await check(backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
+        .throws<Exception>();
+      check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
+        .isNotNull();
+
+      backend.deleteCachedMessageFetchError = error;
+      await check(backend.doDeleteCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
+        .throws<Exception>();
+      check(keys()).deepEquals({'channel:1'});
+      await backend.doDeleteCachedMessageFetch(eg.selfAccount.id, 'channel:1');
+      check(keys()).isEmpty();
+    });
+
+    test('load waits for gate', () => awaitFakeAsync((async) async {
+      prepare();
+      await store('channel:1', 1000, data: '{"a":1}');
+      final gate = Completer<void>();
+      backend.loadCachedMessageFetchGate = gate.future;
+      Uint8List? result;
+      unawaited(backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1')
+        .then((r) => result = r));
+      async.flushMicrotasks();
+      check(result).isNull();
+
+      gate.complete();
+      async.flushMicrotasks();
+      check(result).isNotNull().deepEquals(utf8.encode('{"a":1}'));
+    }));
+
+    test('seed cached message fetch', () async {
+      prepare();
+      final json = eg.newestGetMessagesResult(foundOldest: true,
+        messages: [eg.streamMessage()]).toJson();
+      backend.seedCachedMessageFetch(eg.selfAccount.id, 'channel:1', json: json);
+      backend.seedCachedMessageFetch(eg.selfAccount.id, 'channel:2',
+        data: utf8.encode('not JSON'));
+      check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:1'))
+        .isNotNull().deepEquals(utf8.encode(jsonEncode(json)));
+      check(await backend.doLoadCachedMessageFetch(eg.selfAccount.id, 'channel:2'))
+        .isNotNull().deepEquals(utf8.encode('not JSON'));
     });
   });
 }

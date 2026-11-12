@@ -727,6 +727,18 @@ void main() {
           ..contains('channel:new');
       });
 
+      test('evict by lastWritten, not order of storing', () async {
+        await prepare();
+        const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
+        for (int i = 0; i < maxRows; i++) {
+          await store('channel:$i', 2000 - i);
+        }
+        await store('channel:new', 3000);
+        check(await keys())
+          ..contains('channel:0')
+          ..not((it) => it.contains('channel:${maxRows - 1}'));
+      });
+
       test('eviction is per account', () async {
         await prepare();
         const maxRows = AppDatabase.maxCachedMessageFetchesPerAccount;
