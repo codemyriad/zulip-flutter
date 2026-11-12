@@ -240,9 +240,7 @@ class _ZulipAppState extends State<ZulipApp> with WidgetsBindingObserver {
     return GlobalStoreWidget(
       child: Builder(builder: (context) {
         return MaterialApp(
-          onGenerateTitle: (BuildContext context) {
-            return ZulipLocalizations.of(context).zulipAppTitle;
-          },
+          title: kAppName,
           // TODO(upstream): use ZulipLocalizations.localizationsDelegates
           //   once gen-l10n supports material_ui:
           //     https://github.com/flutter/flutter/issues/191072
