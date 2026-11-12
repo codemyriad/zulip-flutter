@@ -24,6 +24,7 @@ import 'package:zulip/model/localizations.dart';
 import 'package:zulip/model/message.dart';
 import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/narrow.dart';
+import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/model/typing_status.dart';
 import 'package:zulip/widgets/app_bar.dart';
@@ -847,6 +848,7 @@ void main() {
 
     Future<void> setupCached(WidgetTester tester, {
       Narrow narrow = const CombinedFeedNarrow(),
+      List<Message> storeMessages = const [],
       required List<Message> cachedMessages,
     }) async {
       addTearDown(testBinding.reset);
@@ -857,6 +859,7 @@ void main() {
       store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
       connection = store.connection as FakeApiConnection;
       await store.addUsers([eg.selfUser, eg.otherUser]);
+      await store.addMessages(storeMessages);
       testBinding.globalStore.backend.seedCachedMessageFetch(eg.selfAccount.id,
         messageFetchCacheKey(narrow)!,
         json: eg.newestGetMessagesResult(foundOldest: true,
@@ -908,6 +911,35 @@ void main() {
       check(controller.position).extentAfter.equals(0);
       check(connection.takeRequests()).isEmpty();
       check(store.debugMessageListViews.single.showingCachedMessages).isTrue();
+    });
+
+    testWidgets('no mark-read on scroll', (tester) async {
+      MessageListPage.debugEnableMarkReadOnScroll = true;
+      addTearDown(() => MessageListPage.debugEnableMarkReadOnScroll = false);
+      await testBinding.globalStore.settings
+        .setMarkReadOnScroll(MarkReadOnScrollSetting.always);
+      final message = eg.streamMessage(stream: channel, flags: []);
+      await setupCached(tester,
+        storeMessages: [message], cachedMessages: [message]);
+      await tester.pump();
+      check(connection.takeRequests()).isEmpty();
+
+      // Once fresh messages replace the cached ones, it's back on.
+      prepareFreshFetch([message]);
+      connection.prepare(json: {});
+      await retryFetch(tester);
+      await tester.pump(Duration.zero);
+      check(connection.takeRequests()).last.isA<http.Request>()
+        ..method.equals('POST')
+        ..url.path.equals('/api/v1/messages/flags')
+        ..bodyFields.deepEquals({
+          'messages': jsonEncode([message.id]),
+          'op': 'add',
+          'flag': 'read',
+        });
+      await store.handleEvent(UpdateMessageFlagsAddEvent(id: 1,
+        flag: MessageFlag.read, messages: [message.id], all: false));
+      await tester.pump(const Duration(seconds: 2)); // mark-read debounce
     });
   });
 

@@ -1063,6 +1063,9 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   bool _effectiveMarkReadOnScroll() {
     if (!MessageListPage.debugEnableMarkReadOnScroll) return false;
+    // These may be out of date; for example, a message shown here
+    // may have been moved or deleted since.  Wait for the fresh fetch.
+    if (model.showingCachedMessages) return false;
     return widget.markReadOnScroll
       ?? GlobalStoreWidget.settingsOf(context).markReadOnScrollForNarrow(widget.narrow);
   }
