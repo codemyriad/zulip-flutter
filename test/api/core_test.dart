@@ -275,26 +275,43 @@ void main() {
     });
   });
 
-  test('API success result, with rawBody', () async {
+  group('API success result, with rawBody', () {
     // Spacing and escapes that a re-encoding wouldn't reproduce.
     final bytes = utf8.encode('{ "result": "success",\n  "x": "\\u00e9\u00e9" }');
-    final connection = ApiConnection(
-      realmUrl: eg.realmUrl, zulipFeatureLevel: eg.futureZulipFeatureLevel,
-      useBinding: false,
-      client: http_testing.MockClient.streaming((request, bodyStream) async {
-        // Split the body into chunks, including in the middle of a character.
-        final split = bytes.length - 3;
-        return http.StreamedResponse(Stream.fromIterable([
-          bytes.sublist(0, split), bytes.sublist(split)]), 200);
-      }));
-    addTearDown(connection.close);
 
-    final rawBody = BytesBuilder();
-    final result = await connection.post(
-      kExampleRouteName, (json) => json['x'], 'example/route', {},
-      rawBody: rawBody);
-    check(result).equals('\u00e9\u00e9');
-    check(rawBody.takeBytes()).deepEquals(bytes);
+    ApiConnection prepareConnection() {
+      final connection = ApiConnection(
+        realmUrl: eg.realmUrl, zulipFeatureLevel: eg.futureZulipFeatureLevel,
+        useBinding: false,
+        client: http_testing.MockClient.streaming((request, bodyStream) async {
+          // Split the body into chunks, including in the middle of a character.
+          final split = bytes.length - 3;
+          return http.StreamedResponse(Stream.fromIterable([
+            bytes.sublist(0, split), bytes.sublist(split)]), 200);
+        }));
+      addTearDown(connection.close);
+      return connection;
+    }
+
+    test('post', () async {
+      final connection = prepareConnection();
+      final rawBody = BytesBuilder();
+      final result = await connection.post(
+        kExampleRouteName, (json) => json['x'], 'example/route', {},
+        rawBody: rawBody);
+      check(result).equals('\u00e9\u00e9');
+      check(rawBody.takeBytes()).deepEquals(bytes);
+    });
+
+    test('get', () async {
+      final connection = prepareConnection();
+      final rawBody = BytesBuilder();
+      final result = await connection.get(
+        kExampleRouteName, (json) => json['x'], 'example/route', {},
+        rawBody: rawBody);
+      check(result).equals('\u00e9\u00e9');
+      check(rawBody.takeBytes()).deepEquals(bytes);
+    });
   });
 
   test('API network errors', () async {

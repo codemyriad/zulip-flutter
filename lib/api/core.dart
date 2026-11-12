@@ -271,10 +271,13 @@ class ApiConnection {
   /// for a new network connection, if there's no idle one to reuse.
   /// An abort that comes while connecting takes effect only once connected.
   /// See #2476.
+  ///
+  /// For [rawBody], see [send].
   Future<T> get<T>(String routeName, T Function(Map<String, dynamic>) fromJson,
       String path, Map<String, dynamic>? params, {
     Duration? timeout,
     Future<void>? abortTrigger,
+    BytesBuilder? rawBody,
   }) async {
     final url = realmUrl.replace(
       path: "/api/v1/$path", queryParameters: encodeParameters(params));
@@ -282,7 +285,7 @@ class ApiConnection {
       return send(routeName, fromJson, switch (abortTrigger) {
         null => http.Request('GET', url),
         _    => http.AbortableRequest('GET', url, abortTrigger: abortTrigger),
-      });
+      }, rawBody: rawBody);
     }
     if (timeout == null) return doSend(abortTrigger);
     return _withTimeout(timeout, (timeoutTrigger) => doSend(
