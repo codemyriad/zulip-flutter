@@ -87,6 +87,45 @@ abstract class GlobalStoreBackend {
   ///
   /// This should only be called from [GlobalPushKeyStore].
   Future<void> doRemovePushKey(int pushKeyId);
+
+  /// Store a fresh initial snapshot as the account's [ServerSnapshot],
+  /// replacing any previous server data for the account.
+  ///
+  /// Returns false, storing nothing, if the account doesn't exist.
+  ///
+  /// See [AppDatabase.storeServerSnapshot].
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot);
+
+  /// Record a batch of events received on the account's stored event queue.
+  ///
+  /// Returns false, storing nothing, if the account has no [ServerSnapshot]
+  /// with the given [queueId].
+  ///
+  /// See [AppDatabase.appendServerEvents].
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  });
+
+  /// Get the metadata of the account's stored server data,
+  /// without reading the data itself,
+  /// or null if there is none.
+  ///
+  /// See [AppDatabase.loadServerSnapshotInfo].
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId);
+
+  /// Get the account's stored server data, or null if there is none.
+  ///
+  /// See [AppDatabase.loadServerData].
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  });
+
+  /// Delete the account's stored server data, if any.
+  ///
+  /// See [AppDatabase.clearServerData].
+  Future<void> doClearServerData(int accountId);
 }
 
 /// Store for all the user's data.
@@ -119,11 +158,14 @@ abstract class GlobalStore extends ChangeNotifier {
     required Iterable<Account> accounts,
     required Iterable<PushKey> pushKeys,
   })
-    : settings = GlobalSettingsStore(backend: backend,
+    : _backend = backend,
+      settings = GlobalSettingsStore(backend: backend,
         data: globalSettings, boolData: boolGlobalSettings, intData: intGlobalSettings),
       pushKeys = GlobalPushKeyStore(backend: backend,
         data: pushKeys),
       _accounts = Map.fromEntries(accounts.map((a) => MapEntry(a.id, a)));
+
+  final GlobalStoreBackend _backend;
 
   /// The store for the user's account-independent settings.
   ///
@@ -1169,6 +1211,39 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
     ).go();
     assert(rowsAffected == 1);
   }
+
+  @override
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot) {
+    return _db.storeServerSnapshot(snapshot);
+  }
+
+  @override
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  }) {
+    return _db.appendServerEvents(accountId,
+      queueId: queueId, lastEventId: lastEventId, data: data);
+  }
+
+  @override
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId) {
+    return _db.loadServerSnapshotInfo(accountId);
+  }
+
+  @override
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  }) {
+    return _db.loadServerData(accountId,
+      includeEventBatches: includeEventBatches);
+  }
+
+  @override
+  Future<void> doClearServerData(int accountId) {
+    return _db.clearServerData(accountId);
+  }
 }
 
 /// A [GlobalStore] that uses a live server and live, persistent local database.
@@ -1180,13 +1255,13 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
 /// and will have an associated [UpdateMachine].
 class LiveGlobalStore extends GlobalStore {
   LiveGlobalStore._({
-    required this._backend,
+    required LiveGlobalStoreBackend super.backend,
     required super.globalSettings,
     required super.boolGlobalSettings,
     required super.intGlobalSettings,
     required super.accounts,
     required super.pushKeys,
-  }) : super(backend: _backend);
+  });
 
   @override
   ApiConnection apiConnection({
@@ -1382,13 +1457,11 @@ class LiveGlobalStore extends GlobalStore {
     }
   }
 
-  final LiveGlobalStoreBackend _backend;
-
   // The methods that use this should probably all move to [GlobalStoreBackend]
   // and [LiveGlobalStoreBackend] anyway (see comment on the former);
   // so let the latter be the canonical home of the [AppDatabase].
   // This getter just simplifies the transition.
-  AppDatabase get _db => _backend._db;
+  AppDatabase get _db => (_backend as LiveGlobalStoreBackend)._db;
 
   @override
   Future<PerAccountStore> doLoadPerAccount(int accountId) async {

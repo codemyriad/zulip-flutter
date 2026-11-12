@@ -1,9 +1,12 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/events.dart';
 import 'package:zulip/api/route/realm.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/database.dart';
 import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
@@ -72,7 +75,22 @@ mixin _ApiConnectionsMixin on GlobalStore {
 ///   https://github.com/simolus3/drift/issues/3761
 final _bogusDb = AppDatabase(LazyDatabase(() => throw 'used bogus DB'));
 
-class _TestGlobalStoreBackend implements GlobalStoreBackend {
+/// A [GlobalStoreBackend] for tests, which keeps data in memory.
+///
+/// Most data isn't kept here at all;
+/// the global store has it, and the methods for it do nothing.
+/// The server data, though, is kept here,
+/// with the same semantics as [LiveGlobalStoreBackend] has,
+/// so that it can be inspected with [serverSnapshotOf]
+/// and [serverEventBatchesOf],
+/// and so that the same backend can be passed to a second [TestGlobalStore]
+/// or [UpdateMachineTestGlobalStore],
+/// simulating a restart of the app.
+///
+/// The global stores using this backend keep it informed
+/// of which accounts exist,
+/// standing in for the foreign-key constraints on the server-data tables.
+class TestGlobalStoreBackend implements GlobalStoreBackend {
   @override
   Future<void> doUpdateGlobalSettings(GlobalSettingsCompanion data) async {
     // Nothing to do.
@@ -103,9 +121,174 @@ class _TestGlobalStoreBackend implements GlobalStoreBackend {
   Future<void> doRemovePushKey(int pushKeyId) async {
     // Nothing to do.
   }
+
+  final Set<int> _accountIds = {};
+  final Map<int, ServerSnapshot> _serverSnapshots = {};
+  final Map<int, List<ServerEventBatch>> _serverEventBatches = {};
+  int _nextServerEventBatchId = 1;
+
+  void _addAccount(int accountId) {
+    _accountIds.add(accountId);
+  }
+
+  void _removeAccount(int accountId) {
+    _accountIds.remove(accountId);
+    _serverSnapshots.remove(accountId);
+    _serverEventBatches.remove(accountId);
+  }
+
+  /// The account's stored [ServerSnapshot], if any.
+  ServerSnapshot? serverSnapshotOf(int accountId) => _serverSnapshots[accountId];
+
+  /// The account's stored [ServerEventBatch]es, in order.
+  List<ServerEventBatch> serverEventBatchesOf(int accountId) =>
+    List.unmodifiable(_serverEventBatches[accountId] ?? const <ServerEventBatch>[]);
+
+  /// Store server data for the account, as if stored by an earlier run of the app.
+  ///
+  /// The snapshot's queue ID and last event ID are taken from [snapshotJson],
+  /// and each batch's last event ID from the ID of its last event.
+  /// The stored [ServerSnapshot.lastEventId] is [lastEventId] if non-null,
+  /// else that of the last batch, if any, else that of the snapshot.
+  ///
+  /// The [appVersion] defaults to that of the default [eg.packageInfo],
+  /// and [timestamp] to the current time.
+  void seedServerData(int accountId, {
+    required Map<String, dynamic> snapshotJson,
+    List<List<Map<String, dynamic>>> eventBatches = const [],
+    int? lastEventId,
+    String? appVersion,
+    int? timestamp,
+  }) {
+    final queueId = snapshotJson['queue_id'] as String;
+    final batches = [
+      for (final events in eventBatches)
+        ServerEventBatch(
+          id: _nextServerEventBatchId++,
+          accountId: accountId,
+          queueId: queueId,
+          lastEventId: events.last['id'] as int,
+          data: utf8.encode(jsonEncode(events))),
+    ];
+    final packageInfo = eg.packageInfo();
+    _serverSnapshots[accountId] = ServerSnapshot(
+      accountId: accountId,
+      queueId: queueId,
+      lastEventId: lastEventId
+        ?? batches.lastOrNull?.lastEventId
+        ?? snapshotJson['last_event_id'] as int,
+      appVersion: appVersion
+        ?? '${packageInfo.version}+${packageInfo.buildNumber}',
+      timestamp: timestamp
+        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000,
+      data: utf8.encode(jsonEncode(snapshotJson)));
+    _serverEventBatches[accountId] = batches;
+  }
+
+  /// If non-null, the next call to [doStoreServerSnapshot] throws this
+  /// and resets it to null.
+  Object? storeServerSnapshotError;
+
+  /// If non-null, the next call to [doAppendServerEvents] throws this
+  /// and resets it to null.
+  Object? appendServerEventsError;
+
+  /// If non-null, the next call to [doLoadServerSnapshotInfo] throws this
+  /// and resets it to null.
+  Object? loadServerSnapshotInfoError;
+
+  /// If non-null, the next call to [doLoadServerData] throws this
+  /// and resets it to null.
+  Object? loadServerDataError;
+
+  @override
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot) async {
+    if (storeServerSnapshotError case final error?) {
+      storeServerSnapshotError = null;
+      throw error;
+    }
+    if (!_accountIds.contains(snapshot.accountId)) return false;
+    _serverEventBatches.remove(snapshot.accountId);
+    _serverSnapshots[snapshot.accountId] = snapshot;
+    return true;
+  }
+
+  @override
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  }) async {
+    if (appendServerEventsError case final error?) {
+      appendServerEventsError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null || snapshot.queueId != queueId) return false;
+    _serverSnapshots[accountId] = snapshot.copyWith(lastEventId: lastEventId);
+    if (data != null) {
+      (_serverEventBatches[accountId] ??= []).add(ServerEventBatch(
+        id: _nextServerEventBatchId++,
+        accountId: accountId,
+        queueId: queueId,
+        lastEventId: lastEventId,
+        data: data));
+    }
+    return true;
+  }
+
+  Iterable<ServerEventBatch> _serverEventBatchesOnQueue(ServerSnapshot snapshot) {
+    return (_serverEventBatches[snapshot.accountId] ?? [])
+      .where((batch) => batch.queueId == snapshot.queueId);
+  }
+
+  @override
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId) async {
+    if (loadServerSnapshotInfoError case final error?) {
+      loadServerSnapshotInfoError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null) return null;
+    return (
+      queueId: snapshot.queueId,
+      lastEventId: snapshot.lastEventId,
+      appVersion: snapshot.appVersion,
+      timestamp: snapshot.timestamp,
+      snapshotSize: snapshot.data.length,
+      eventBatchesSize: _serverEventBatchesOnQueue(snapshot)
+        .fold(0, (sum, batch) => sum + batch.data.length),
+    );
+  }
+
+  @override
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  }) async {
+    if (loadServerDataError case final error?) {
+      loadServerDataError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null) return null;
+    return (
+      snapshot: snapshot,
+      eventBatches: includeEventBatches
+        ? _serverEventBatchesOnQueue(snapshot).toList()
+        : <ServerEventBatch>[],
+    );
+  }
+
+  @override
+  Future<void> doClearServerData(int accountId) async {
+    _serverSnapshots.remove(accountId);
+    _serverEventBatches.remove(accountId);
+  }
 }
 
 mixin _DatabaseMixin on GlobalStore {
+  TestGlobalStoreBackend get backend;
+
   int _nextAccountId = 1;
 
   @override
@@ -125,7 +308,9 @@ mixin _DatabaseMixin on GlobalStore {
       data = data.copyWith(id: Value(_nextAccountId++));
     }
 
-    return await _bogusDb.accounts.mapFromCompanion(data, _bogusDb);
+    final account = await _bogusDb.accounts.mapFromCompanion(data, _bogusDb);
+    backend._addAccount(account.id);
+    return account;
   }
 
   @override
@@ -145,7 +330,7 @@ mixin _DatabaseMixin on GlobalStore {
   Future<void> doRemoveAccount(int accountId) async {
     (_doRemoveAccountCalls ??= []).add(accountId);
     await Future<void>.delayed(TestGlobalStore.removeAccountDuration);
-    // Nothing else to do.
+    backend._removeAccount(accountId);
   }
 }
 
@@ -168,17 +353,28 @@ mixin _DatabaseMixin on GlobalStore {
 ///     using [UpdateMachine.load] (like [LiveGlobalStore] does).
 class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMixin {
   TestGlobalStore({
+    TestGlobalStoreBackend? backend,
     GlobalSettingsData? globalSettings,
     Map<BoolGlobalSetting, bool>? boolGlobalSettings,
     Map<IntGlobalSetting, int>? intGlobalSettings,
     required super.accounts,
     Iterable<PushKey>? pushKeys,
-  }) : super(backend: _TestGlobalStoreBackend(),
+  }) : backend = backend ??= TestGlobalStoreBackend(),
+       super(backend: backend,
          globalSettings: globalSettings ?? GlobalSettingsData(),
          boolGlobalSettings: boolGlobalSettings ?? {},
          intGlobalSettings: intGlobalSettings ?? {},
          pushKeys: pushKeys ?? [],
-       );
+       ) {
+    accountIds.forEach(this.backend._addAccount);
+  }
+
+  /// The backend of this store.
+  ///
+  /// To simulate a restart of the app, pass this as the `backend`
+  /// of a new global store.
+  @override
+  final TestGlobalStoreBackend backend;
 
   final Map<int, InitialSnapshot> _initialSnapshots = {};
 
@@ -273,17 +469,28 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
 ///     without using [UpdateMachine.load].
 class UpdateMachineTestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMixin {
   UpdateMachineTestGlobalStore({
+    TestGlobalStoreBackend? backend,
     GlobalSettingsData? globalSettings,
     Map<BoolGlobalSetting, bool>? boolGlobalSettings,
     Map<IntGlobalSetting, int>? intGlobalSettings,
     required super.accounts,
     Iterable<PushKey>? pushKeys,
-  }) : super(backend: _TestGlobalStoreBackend(),
+  }) : backend = backend ??= TestGlobalStoreBackend(),
+       super(backend: backend,
          globalSettings: globalSettings ?? GlobalSettingsData(),
          boolGlobalSettings: boolGlobalSettings ?? {},
          intGlobalSettings: intGlobalSettings ?? {},
          pushKeys: pushKeys ?? [],
-       );
+       ) {
+    accountIds.forEach(this.backend._addAccount);
+  }
+
+  /// The backend of this store.
+  ///
+  /// To simulate a restart of the app, pass this as the `backend`
+  /// of a new global store.
+  @override
+  final TestGlobalStoreBackend backend;
 
   // [doLoadPerAccount] depends on the cache to prepare the API responses.
   // Calling [clearCachedApiConnections] is permitted, though.
