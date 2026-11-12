@@ -254,6 +254,11 @@ mixin _MessageSequence {
   /// and a message the store has seen deleted is left out.
   ///
   /// Known limitations:
+  ///  * When the store is replaced, as after the event queue expires,
+  ///    the message list starts over with a new [MessageListView] (#464).
+  ///    If the list was showing messages, the new view shows
+  ///    the stored fetch at once (see [fetchInitial]),
+  ///    but the scroll position is lost.
   ///  * Outbox messages aren't shown meanwhile,
   ///    so a message the user sends appears only once the fetch succeeds.
   ///  * Only a fetch from the newest or first unread message is stored,
@@ -1061,7 +1066,13 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// ([GetMessagesResult.foundNewest]);
   /// a stored fetch is shown only for those anchors too.
   /// A fetch that finds no messages deletes any stored one.
-  Future<void> fetchInitial() async {
+  ///
+  /// If [showCachedImmediately] is true, the stored fetch is shown
+  /// as soon as it's read, without waiting for the request.
+  /// This is for when the list was already showing messages,
+  /// as when replacing a view after the store was replaced,
+  /// so that it doesn't go back to showing none meanwhile.
+  Future<void> fetchInitial({bool showCachedImmediately = false}) async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
     assert(messages.isEmpty && contents.isEmpty);
@@ -1097,7 +1108,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // Parse it only if it's to be shown; usually the request succeeds first.
     Uint8List? cachedData;
     bool mayShowCached = useCache;
-    bool shouldShowCached = false;
+    bool shouldShowCached = showCachedImmediately;
     void maybeShowCached() {
       if (isStale() || !mayShowCached || !shouldShowCached) return;
       final data = cachedData;
@@ -1110,11 +1121,13 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
     if (useCache) {
       assert(_showCachedMessagesTimer == null);
-      _showCachedMessagesTimer = Timer(kShowCachedMessagesDelay, () {
-        _showCachedMessagesTimer = null;
-        shouldShowCached = true;
-        maybeShowCached();
-      });
+      if (!shouldShowCached) {
+        _showCachedMessagesTimer = Timer(kShowCachedMessagesDelay, () {
+          _showCachedMessagesTimer = null;
+          shouldShowCached = true;
+          maybeShowCached();
+        });
+      }
       unawaited(store.loadCachedMessageFetch(cacheKey).then((data) {
         if (isStale()) return;
         if (data == null) {

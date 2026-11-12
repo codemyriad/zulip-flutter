@@ -1105,6 +1105,27 @@ void main() {
         await fetchFuture;
       }));
 
+      test('showCachedImmediately: show once read, without waiting', () => awaitFakeAsync((async) async {
+        const narrow = CombinedFeedNarrow();
+        await prepare(narrow: narrow, stream: channel);
+        final cached = [eg.streamMessage(stream: channel)];
+        seedCachedFetch(narrow, cached);
+        final fresh = [eg.streamMessage(stream: channel)];
+        prepareSuccess(fresh, delay: kShowCachedMessagesDelay ~/ 2);
+        final fetchFuture = model.fetchInitial(showCachedImmediately: true);
+
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkShowingCached(cached);
+
+        async.elapse(kShowCachedMessagesDelay ~/ 2);
+        checkNotifiedOnce();
+        check(model).showingCachedMessages.isFalse();
+        checkHasMessages(fresh);
+        await fetchFuture;
+        check(async.pendingTimers).isEmpty();
+      }));
+
       test('cache read finishes after request fails', () => awaitFakeAsync((async) async {
         final gate = Completer<void>();
         final (fetchFuture, cached) = await prepareFailingWithCache(loadGate: gate.future);

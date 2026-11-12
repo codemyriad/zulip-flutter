@@ -867,9 +867,13 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   @override
   void onNewStore() { // TODO(#464) try to keep using old model until new one gets messages
-    final anchor = _model == null ? widget.initAnchor : _model!.anchor;
-    _model?.dispose();
-    _initModel(PerAccountStoreWidget.of(context), anchor);
+    final oldModel = _model;
+    final anchor = oldModel == null ? widget.initAnchor : oldModel.anchor;
+    oldModel?.dispose();
+    _initModel(PerAccountStoreWidget.of(context), anchor,
+      // Rather than going from showing messages back to a spinner,
+      // show any stored ones, like as not those the old model fetched.
+      showCachedImmediately: oldModel?.fetched ?? false);
   }
 
   @override
@@ -880,7 +884,9 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     super.dispose();
   }
 
-  void _initModel(PerAccountStore store, Anchor anchor) {
+  void _initModel(PerAccountStore store, Anchor anchor, {
+    required bool showCachedImmediately,
+  }) {
     var narrow = widget.narrow;
     if (narrow is TopicNarrow) {
       // Normalize topic name.  See #1717.
@@ -895,8 +901,9 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     }
     _model = MessageListView.init(store: store,
       narrow: narrow, anchor: anchor);
+    _modelWasShowingCachedMessages = false;
     model.addListener(_modelChanged);
-    model.fetchInitial();
+    model.fetchInitial(showCachedImmediately: showCachedImmediately);
   }
 
   bool _autofocusDecided = false;

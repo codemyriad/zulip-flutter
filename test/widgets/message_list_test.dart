@@ -952,6 +952,46 @@ void main() {
       check(connection.takeRequests()).isEmpty();
     });
 
+    testWidgets('store replaced: show the stored messages at once', (tester) async {
+      final message = eg.streamMessage(stream: channel, content: '<p>some message</p>');
+      await setupRetrying(tester);
+      prepareFreshFetch([message]);
+      await retryFetch(tester);
+      check(find.text('some message')).findsOne();
+      check(findBanner).findsNothing();
+
+      FakeApiConnection? newConnection;
+      void prepareNewStore() {
+        final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id);
+        if (newStore == null || newStore == store || newConnection != null) return;
+        newConnection = newStore.connection as FakeApiConnection;
+        newConnection!.prepare(json: eg.newestGetMessagesResult(
+          foundOldest: true, messages: [message]).toJson(),
+          delay: const Duration(seconds: 5));
+      }
+      testBinding.globalStore.addListener(prepareNewStore);
+      addTearDown(() => testBinding.globalStore.removeListener(prepareNewStore));
+
+      final updateMachine = store.updateMachine!;
+      updateMachine.debugPauseLoop();
+      updateMachine.poll();
+      updateMachine.debugPrepareLoopError(
+        eg.apiExceptionBadEventQueueId(queueId: store.queueId));
+      updateMachine.debugAdvanceLoop();
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id)!;
+      check(newStore).not((it) => it.identicalTo(store));
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isTrue();
+      check(find.text('some message')).findsOne();
+      check(findBanner).findsOne();
+
+      await tester.pump(const Duration(seconds: 5));
+      check(newStore.debugMessageListViews.single.showingCachedMessages).isFalse();
+      check(find.text('some message')).findsOne();
+      check(findBanner).findsNothing();
+    });
+
     testWidgets('banner while showing cached messages', (tester) async {
       await setupRetrying(tester, cachedMessages: [
         eg.streamMessage(stream: channel, content: '<p>cached message</p>')]);
