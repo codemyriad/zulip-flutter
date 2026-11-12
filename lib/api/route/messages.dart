@@ -40,6 +40,8 @@ class GetMessageResult {
 
 /// https://zulip.com/api/get-messages
 ///
+/// For [abortTrigger], see [ApiConnection.get].
+///
 /// If [rawBody] is non-null, the response body's bytes are added to it;
 /// see [ApiConnection.send].
 Future<GetMessagesResult> getMessages(ApiConnection connection, {
@@ -52,6 +54,7 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
   bool? applyMarkdown,
   required bool allowEmptyTopicName,
   // bool? useFirstUnreadAnchor // omitted because deprecated
+  Future<void>? abortTrigger,
   BytesBuilder? rawBody,
 }) {
   assert(allowEmptyTopicName, '`allowEmptyTopicName` should only be true');
@@ -64,7 +67,7 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
     'client_gravatar': ?clientGravatar,
     'apply_markdown': ?applyMarkdown,
     'allow_empty_topic_name': allowEmptyTopicName,
-  }, rawBody: rawBody);
+  }, abortTrigger: abortTrigger, rawBody: rawBody);
 }
 
 /// An anchor value for [getMessages].

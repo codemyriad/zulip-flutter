@@ -1,16 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
+import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/narrow.dart';
 
 import '../../example_data.dart' as eg;
+import '../../fake_async.dart';
 import '../../stdlib_checks.dart';
+import '../exception_checks.dart';
 import '../fake_api.dart';
 import 'route_checks.dart';
 
@@ -251,6 +255,24 @@ void main() {
         rawBody: rawBody);
       check(result.anchor).equals(12345);
       check(rawBody.takeBytes()).deepEquals(utf8.encode(body));
+    }));
+
+    test('abortTrigger', () => awaitFakeAsync((async) async {
+      await FakeApiConnection.with_((connection) async {
+        connection.prepare(json: fakeResult.toJson(),
+          delay: const Duration(seconds: 10));
+        final abortTrigger = Completer<void>();
+        final future = getMessages(connection,
+          narrow: const CombinedFeedNarrow().apiEncode(),
+          anchor: AnchorCode.newest, numBefore: 10, numAfter: 20,
+          allowEmptyTopicName: true,
+          abortTrigger: abortTrigger.future);
+        async.elapse(const Duration(seconds: 1));
+        abortTrigger.complete();
+        await check(future).throws<NetworkException>((it) => it
+          .cause.isA<http.RequestAbortedException>());
+        check(async.elapsed).equals(const Duration(seconds: 1));
+      });
     }));
   });
 
