@@ -257,7 +257,7 @@ abstract class GlobalStore extends ChangeNotifier {
     }
 
     // It's up to us.  Start loading.
-    future = loadPerAccount(accountId);
+    future = loadPerAccount(accountId, allowPersisted: true);
     _perAccountStoresLoading[accountId] = future;
     try {
       store = await future;
@@ -272,7 +272,7 @@ abstract class GlobalStore extends ChangeNotifier {
     assert(_accounts.containsKey(accountId));
     assert(_perAccountStores.containsKey(accountId));
     assert(!_perAccountStoresLoading.containsKey(accountId));
-    final store = await loadPerAccount(accountId);
+    final store = await loadPerAccount(accountId, allowPersisted: false);
     _setPerAccount(accountId, store);
   }
 
@@ -290,14 +290,22 @@ abstract class GlobalStore extends ChangeNotifier {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
+  /// If [allowPersisted] is true, the data may come from server data
+  /// stored on the device by an earlier load, if usable;
+  /// see [UpdateMachine.load].
+  /// When reloading, this is false,
+  /// because the stored data is then no newer than the existing store's.
+  ///
   /// This method should be called only by the implementation of [perAccount].
   /// Other callers interested in per-account data should use [perAccount]
   /// and/or [perAccountSync].
-  Future<PerAccountStore> loadPerAccount(int accountId) async {
+  Future<PerAccountStore> loadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     assert(_accounts.containsKey(accountId));
     final PerAccountStore store;
     try {
-      store = await doLoadPerAccount(accountId);
+      store = await doLoadPerAccount(accountId, allowPersisted: allowPersisted);
     } on AccountNotFoundException {
       rethrow;
     } catch (e) {
@@ -344,8 +352,12 @@ abstract class GlobalStore extends ChangeNotifier {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
+  /// For [allowPersisted], see [loadPerAccount].
+  ///
   /// This method should be called only by [loadPerAccount].
-  Future<PerAccountStore> doLoadPerAccount(int accountId);
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  });
 
   //|//////////////////////////////////////////////////////////////
   // The accounts.  TODO(store) move this to its own substore; cf GlobalSettingsStore
@@ -699,19 +711,29 @@ class PerAccountStore extends PerAccountStoreBase with
   ///
   /// If [startPushDevices] is false, the caller is responsible for
   /// calling [PushDeviceManager.start] on [pushDevices] when appropriate.
+  ///
+  /// Pass [persisted] true when the snapshot was stored on the device
+  /// by an earlier run of the app, rather than freshly received
+  /// (see [UpdateMachine.load]).
+  /// Then the account's realm name and icon may be newer than the snapshot's,
+  /// and the event queue may have been used by that earlier run.
+  /// Also, a malformed snapshot isn't reported to the user,
+  /// because the caller can fall back to fetching a fresh one.
   factory PerAccountStore.fromInitialSnapshot({
     required GlobalStore globalStore,
     required int accountId,
     ApiConnection? connection,
     required InitialSnapshot initialSnapshot,
     bool startPushDevices = true,
+    bool persisted = false,
   }) {
     final account = globalStore.getAccount(accountId)!;
     assert(account.zulipVersion == initialSnapshot.zulipVersion
       && account.zulipMergeBase == initialSnapshot.zulipMergeBase
       && account.zulipFeatureLevel == initialSnapshot.zulipFeatureLevel);
-    assert(account.realmName == initialSnapshot.realmName
-      && account.realmIcon == initialSnapshot.realmIconUrl);
+    assert(persisted
+      || (account.realmName == initialSnapshot.realmName
+          && account.realmIcon == initialSnapshot.realmIconUrl));
 
     connection ??= globalStore.apiConnectionFromAccount(account);
     assert(connection.zulipFeatureLevel == account.zulipFeatureLevel);
@@ -734,14 +756,16 @@ class PerAccountStore extends PerAccountStoreBase with
     final userMap = UserStoreImpl.userMapFromInitialSnapshot(initialSnapshot);
     final selfUser = userMap[core.selfUserId];
     if (selfUser == null) {
-      final zulipLocalizations = GlobalLocalizations.zulipLocalizations;
-      reportErrorToUserModally(
-        zulipLocalizations.errorCouldNotConnectTitle,
-        message: zulipLocalizations.errorMalformedResponseWithCause(200,
-          // skip-i18n: This would be an unlikely bug (in the server?).  We're
-          //   showing the user these details at all only because it would be a
-          //   very nasty bug (so, important to resolve ASAP) if it ever did happen.
-          'self-user missing from user list'));
+      if (!persisted) {
+        final zulipLocalizations = GlobalLocalizations.zulipLocalizations;
+        reportErrorToUserModally(
+          zulipLocalizations.errorCouldNotConnectTitle,
+          message: zulipLocalizations.errorMalformedResponseWithCause(200,
+            // skip-i18n: This would be an unlikely bug (in the server?).  We're
+            //   showing the user these details at all only because it would be a
+            //   very nasty bug (so, important to resolve ASAP) if it ever did happen.
+            'self-user missing from user list'));
+      }
       throw Exception("bad initial snapshot: self-user missing from user list");
     }
 
@@ -773,7 +797,14 @@ class PerAccountStore extends PerAccountStoreBase with
       channels: channels,
       topics: Topics(core: core),
       messages: MessageStoreImpl(channels: channels,
-        initialStarredMessages: initialSnapshot.starredMessages),
+        initialStarredMessages: initialSnapshot.starredMessages,
+        // On an event queue used by an earlier run of the app,
+        // local message IDs counting up from 1 might collide with ones
+        // that run used for messages whose events we have yet to receive.
+        // That run's IDs were less than the time it started, in milliseconds,
+        // unless it sent messages faster than one per millisecond.
+        firstLocalMessageId: persisted
+          ? ZulipBinding.instance.utcNow().millisecondsSinceEpoch : 1),
       unreads: Unreads(core: core, channelStore: channels,
         initial: initialSnapshot.unreadMsgs),
       recentDmConversationsView: RecentDmConversationsView(core: core,
@@ -957,24 +988,30 @@ class PerAccountStore extends PerAccountStoreBase with
     super.dispose();
   }
 
+  /// Whether the events being handled are stored ones, being replayed
+  /// to rebuild this store from stored server data.
+  ///
+  /// There may be thousands of those, so [handleEvent] skips its debug logging.
+  bool _replayingEvents = false;
+
   Future<void> handleEvent(Event event) async {
     assert(!_disposed);
 
     switch (event) {
       case HeartbeatEvent():
-        assert(debugLog("server event: heartbeat"));
+        assert(_replayingEvents || debugLog("server event: heartbeat"));
 
       case RealmEmojiEvent():
-        assert(debugLog("server event: realm_emoji/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: realm_emoji/${event.op}"));
         _emoji.handleRealmEmojiEvent(event);
         notifyListeners();
 
       case AlertWordsEvent():
-        assert(debugLog("server event: alert_words"));
+        assert(_replayingEvents || debugLog("server event: alert_words"));
         // We don't yet store this data, so there's nothing to update.
 
       case UserSettingsUpdateEvent():
-        assert(debugLog("server event: user_settings/update ${event.property?.name ?? '[unrecognized]'}"));
+        assert(_replayingEvents || debugLog("server event: user_settings/update ${event.property?.name ?? '[unrecognized]'}"));
         if (event.property == null) {
           // unrecognized setting; do nothing
           return;
@@ -996,17 +1033,17 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case DeviceEvent():
-        assert(debugLog("server event: device"));
+        assert(_replayingEvents || debugLog("server event: device"));
         pushDevices.handleDeviceEvent(event);
         notifyListeners();
 
       case CustomProfileFieldsEvent():
-        assert(debugLog("server event: custom_profile_fields"));
+        assert(_replayingEvents || debugLog("server event: custom_profile_fields"));
         _realm.handleCustomProfileFieldsEvent(event);
         notifyListeners();
 
       case UserGroupEvent():
-        assert(debugLog("server event: user_group/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: user_group/${event.op}"));
         _groups.handleUserGroupEvent(event);
         if (event is UserGroupRemoveEvent) {
           autocompleteViewManager.handleUserGroupRemoveEvent(event);
@@ -1016,18 +1053,18 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case RealmUserAddEvent():
-        assert(debugLog("server event: realm_user/add"));
+        assert(_replayingEvents || debugLog("server event: realm_user/add"));
         _users.handleRealmUserEvent(event);
         notifyListeners();
 
       case RealmUserRemoveEvent():
-        assert(debugLog("server event: realm_user/remove"));
+        assert(_replayingEvents || debugLog("server event: realm_user/remove"));
         _users.handleRealmUserEvent(event);
         autocompleteViewManager.handleRealmUserRemoveEvent(event);
         notifyListeners();
 
       case RealmUserUpdateEvent():
-        assert(debugLog("server event: realm_user/update"));
+        assert(_replayingEvents || debugLog("server event: realm_user/update"));
         _groups.handleRealmUserUpdateEvent(event);
         _realm.handleRealmUserUpdateEvent(event);
         _users.handleRealmUserEvent(event);
@@ -1035,12 +1072,12 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case SavedSnippetsEvent():
-        assert(debugLog('server event: saved_snippets/${event.op}'));
+        assert(_replayingEvents || debugLog('server event: saved_snippets/${event.op}'));
         _savedSnippets.handleSavedSnippetsEvent(event);
         notifyListeners();
 
       case ChannelEvent():
-        assert(debugLog("server event: stream/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: stream/${event.op}"));
         if (event is ChannelDeleteEvent) {
           _messages.handleChannelDeleteEvent(event);
         }
@@ -1053,7 +1090,7 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case SubscriptionEvent():
-        assert(debugLog("server event: subscription/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: subscription/${event.op}"));
         if (event is SubscriptionRemoveEvent) {
           _messages.handleSubscriptionRemoveEvent(event);
         }
@@ -1061,24 +1098,24 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case ChannelFolderEvent():
-        assert(debugLog("server event: channel_folder/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: channel_folder/${event.op}"));
         _channels.handleChannelFolderEvent(event);
         break;
 
       case UserStatusEvent():
-        assert(debugLog("server event: user_status"));
+        assert(_replayingEvents || debugLog("server event: user_status"));
         _users.handleUserStatusEvent(event);
         notifyListeners();
 
       case UserTopicEvent():
-        assert(debugLog("server event: user_topic"));
+        assert(_replayingEvents || debugLog("server event: user_topic"));
         _messages.handleUserTopicEvent(event);
         // Update _channels last, so other handlers can compare to the old value.
         _channels.handleUserTopicEvent(event);
         notifyListeners();
 
       case MessageEvent():
-        assert(debugLog("server event: message ${jsonEncode(event.message.toJson())}"));
+        assert(_replayingEvents || debugLog("server event: message ${jsonEncode(event.message.toJson())}"));
         // Assert against malformed events that might be created in test code.
         assert(event.message.matchContent == null);
         assert(event.message.matchTopic == null);
@@ -1092,13 +1129,13 @@ class PerAccountStore extends PerAccountStoreBase with
         // it probably belongs in [reconcileMessages] too.
 
       case UpdateMessageEvent():
-        assert(debugLog("server event: update_message ${event.messageId}"));
+        assert(_replayingEvents || debugLog("server event: update_message ${event.messageId}"));
         _messages.handleUpdateMessageEvent(event);
         unreads.handleUpdateMessageEvent(event);
         topics.handleUpdateMessageEvent(event);
 
       case DeleteMessageEvent():
-        assert(debugLog("server event: delete_message ${event.messageIds}"));
+        assert(_replayingEvents || debugLog("server event: delete_message ${event.messageIds}"));
         bool shouldNotify = false;
         // This should be called before [_messages.handleDeleteMessageEvent(event)],
         // as we need to know about each message for [event.messageIds],
@@ -1110,38 +1147,38 @@ class PerAccountStore extends PerAccountStoreBase with
         if (shouldNotify) notifyListeners();
 
       case UpdateMessageFlagsEvent():
-        assert(debugLog("server event: update_message_flags/${event.op} ${event.flag.toJson()}"));
+        assert(_replayingEvents || debugLog("server event: update_message_flags/${event.op} ${event.flag.toJson()}"));
         bool shouldNotify = false;
         shouldNotify |= _messages.handleUpdateMessageFlagsEvent(event);
         unreads.handleUpdateMessageFlagsEvent(event);
         if (shouldNotify) notifyListeners();
 
       case SubmessageEvent():
-        assert(debugLog("server event: submessage ${event.content}"));
+        assert(_replayingEvents || debugLog("server event: submessage ${event.content}"));
         _messages.handleSubmessageEvent(event);
 
       case TypingEvent():
-        assert(debugLog("server event: typing/${event.op} ${event.messageType}"));
+        assert(_replayingEvents || debugLog("server event: typing/${event.op} ${event.messageType}"));
         typingStatus.handleTypingEvent(event);
 
       case PresenceEvent():
-        assert(debugLog("server event: presence ${event.userId}"));
+        assert(_replayingEvents || debugLog("server event: presence ${event.userId}"));
         // TODO(#1618) handle
         break;
 
       case ReactionEvent():
-        assert(debugLog("server event: reaction/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: reaction/${event.op}"));
         _messages.handleReactionEvent(event);
 
       case MutedUsersEvent():
-        assert(debugLog("server event: muted_users"));
+        assert(_replayingEvents || debugLog("server event: muted_users"));
         _messages.handleMutedUsersEvent(event);
         // Update _users last, so other handlers can compare to the old value.
         _users.handleMutedUsersEvent(event);
         notifyListeners();
 
       case UnexpectedEvent():
-        assert(debugLog("server event: ${jsonEncode(event.toJson())}")); // TODO log better
+        assert(_replayingEvents || debugLog("server event: ${jsonEncode(event.toJson())}")); // TODO log better
     }
   }
 
@@ -1279,9 +1316,9 @@ class LiveGlobalStore extends GlobalStore {
     // Loading this data takes roughly 80-100ms (measured on a Pixel 8).
     // That's only a small increment on the time spent loading server data,
     // so we don't worry about optimizing it further.
-    // In a future where we keep server data locally between runs (#477) --
-    // which will also mean having much more data to load from the database --
-    // we'd invest in this area more.  For example we'd try doing these
+    // The server data we keep locally between runs (#477) is much more data,
+    // so it isn't loaded here; [UpdateMachine.load] reads it for each account
+    // when needed.  If this part gets slow, we could try doing these queries
     // in parallel, or deferring some to be concurrent with loading server data.
     final stopwatch = Stopwatch()..start();
     final file = await _dbFile();
@@ -1465,8 +1502,11 @@ class LiveGlobalStore extends GlobalStore {
   AppDatabase get _db => (_backend as LiveGlobalStoreBackend)._db;
 
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
-    final updateMachine = await UpdateMachine.load(this, accountId);
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
+    final updateMachine = await UpdateMachine.load(this, accountId,
+      allowPersisted: allowPersisted);
     return updateMachine.store;
   }
 
@@ -1506,9 +1546,11 @@ class LiveGlobalStore extends GlobalStore {
 /// A [PerAccountStore] plus an event-polling loop to stay up to date.
 class UpdateMachine {
   UpdateMachine.fromInitialSnapshot({
-    required this.store,
+    required PerAccountStore store,
     required InitialSnapshot initialSnapshot,
-  }) : lastEventId = initialSnapshot.lastEventId {
+  }) : this._(store: store, lastEventId: initialSnapshot.lastEventId);
+
+  UpdateMachine._({required this.store, required this.lastEventId}) {
     store.updateMachine = this;
   }
 
@@ -1520,8 +1562,23 @@ class UpdateMachine {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
-  /// In the future this might load an old snapshot from local storage first.
-  static Future<UpdateMachine> load(GlobalStore globalStore, int accountId) async {
+  /// If [allowPersisted] is true, and the account has usable server data
+  /// stored on the device (see [ServerSnapshot]),
+  /// this instead loads the data from there, and resumes that data's event queue,
+  /// without waiting for the server.
+  /// Then if the event queue turns out to be gone, or the stored data is
+  /// too old or otherwise not worth catching up on through the event queue,
+  /// the store gets replaced through the usual reload path,
+  /// as when an event queue expires.
+  /// Stored data that's unusable is deleted.
+  static Future<UpdateMachine> load(GlobalStore globalStore, int accountId, {
+    required bool allowPersisted,
+  }) async {
+    if (allowPersisted) {
+      final updateMachine = await _loadPersisted(globalStore, accountId);
+      if (updateMachine != null) return updateMachine;
+    }
+
     final connection = globalStore.apiConnectionFromAccount(
       globalStore.getAccount(accountId)!);
 
@@ -1583,10 +1640,205 @@ class UpdateMachine {
     return updateMachine;
   }
 
+  /// Try loading data for the given account from the server data
+  /// stored on the device, and resuming its event queue.
+  ///
+  /// Returns null if there's no usable stored data;
+  /// unusable stored data is deleted.
+  ///
+  /// Throws [AccountNotFoundException] if after any async gap
+  /// the account has been removed.
+  static Future<UpdateMachine?> _loadPersisted(GlobalStore globalStore, int accountId) async {
+    void throwIfNoAccount() {
+      if (globalStore.getAccount(accountId) == null) {
+        assert(debugLog('Account logged out during UpdateMachine.load'));
+        throw AccountNotFoundException();
+      }
+    }
+
+    final packageInfo = await ZulipBinding.instance.packageInfo;
+    throwIfNoAccount();
+    if (packageInfo == null) return null;
+
+    final backend = globalStore._backend;
+    ApiConnection? connection;
+    PerAccountStore? store;
+    try {
+      final info = await backend.doLoadServerSnapshotInfo(accountId);
+      throwIfNoAccount();
+      if (info == null) return null;
+      if (info.appVersion != _appVersion(packageInfo)) {
+        throw _UnusableServerDataException(
+          'stored by app version ${info.appVersion}');
+      }
+
+      // If the event log is big, it'd take a while to read and replay,
+      // so leave it out, and get a fresh snapshot as soon as possible.
+      bool skipEventLog = info.eventBatchesSize > info.snapshotSize
+        && info.eventBatchesSize > (debugMaxStoredEventBatchesSize ?? _maxStoredEventBatchesSize);
+      // If the data is old, it'd likely take a lot of events to catch up,
+      // or the event queue is gone already; so get a fresh snapshot.
+      final now = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
+      bool replaceImmediately = skipEventLog
+        || now - info.timestamp > _maxStoredSnapshotAge.inSeconds;
+
+      final data = await backend.doLoadServerData(accountId,
+        includeEventBatches: !skipEventLog);
+      throwIfNoAccount();
+      if (data == null) return null;
+
+      final initialSnapshot = InitialSnapshot.fromJson(
+        jsonUtf8Decoder.convert(data.snapshot.data) as Map<String, dynamic>);
+      if (initialSnapshot.queueId != data.snapshot.queueId) {
+        throw _UnusableServerDataException('queue ID mismatch');
+      }
+      final zulipVersionData = ZulipVersionData.fromInitialSnapshot(initialSnapshot);
+      if (!zulipVersionData.matchesAccount(globalStore.getAccount(accountId)!)
+          || zulipVersionData.isNotAllowed) {
+        throw _UnusableServerDataException('server version mismatch');
+      }
+
+      if (data.snapshot.lastEventId - initialSnapshot.lastEventId
+          > (debugMaxStoredEventCount ?? _maxStoredEventCount)) {
+        skipEventLog = true;
+        replaceImmediately = true;
+      }
+      final eventBatches = <List<Event>>[];
+      if (!skipEventLog) {
+        for (final batch in data.eventBatches) {
+          final rawEvents = (jsonUtf8Decoder.convert(batch.data) as List<dynamic>)
+            .cast<Map<String, dynamic>>();
+          // We don't handle these events, but a fresh snapshot
+          // will have the updated data they're about.
+          replaceImmediately |= rawEvents.any((rawEvent) =>
+            const {'realm', 'restart'}.contains(rawEvent['type']));
+          eventBatches.add(rawEvents.map(Event.fromJson).toList());
+        }
+      }
+
+      connection = globalStore.apiConnectionFromAccount(
+        globalStore.getAccount(accountId)!);
+      store = PerAccountStore.fromInitialSnapshot(
+        globalStore: globalStore,
+        accountId: accountId,
+        connection: connection,
+        initialSnapshot: initialSnapshot,
+        startPushDevices: false,
+        persisted: true,
+      );
+      store._replayingEvents = true;
+      for (final batch in eventBatches) {
+        for (final event in batch) {
+          await store.handleEvent(event);
+        }
+        // Let the UI stay responsive.
+        await Future<void>.delayed(Duration.zero);
+        throwIfNoAccount();
+      }
+      store._replayingEvents = false;
+
+      final updateMachine = UpdateMachine._(store: store,
+        lastEventId: skipEventLog
+          ? initialSnapshot.lastEventId : data.snapshot.lastEventId);
+      updateMachine._serverSnapshotStored = Future.value(true);
+      if (replaceImmediately) {
+        updateMachine._replaceStoreImmediately = true;
+      } else {
+        updateMachine._eventQueueUnconfirmed = true;
+      }
+      // Show that the data may be stale, and make the first poll quick.
+      store.isRecoveringEventStream = true;
+      updateMachine.poll();
+      unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
+      store.presence.start(pingImmediately: true);
+      return updateMachine;
+    } catch (e) {
+      if (store != null) {
+        store.dispose();
+      } else {
+        connection?.close();
+      }
+      if (e is AccountNotFoundException) rethrow;
+      assert(debugLog('Discarding stored server data: $e')); // TODO(log)
+      try {
+        await backend.doClearServerData(accountId);
+      } catch (e) {
+        assert(debugLog('Error clearing server data: $e')); // TODO(log)
+      }
+      throwIfNoAccount();
+      return null;
+    }
+  }
+
+  /// If the stored event log has more events than this,
+  /// we skip it; see [load].
+  static const _maxStoredEventCount = 10000;
+
+  /// In debug mode, overrides the limit on stored events
+  /// that [load] will replay.
+  ///
+  /// Outside of debug mode, this is always `null` and the setter has no effect.
+  static int? get debugMaxStoredEventCount {
+    int? result;
+    assert(() {
+      result = _debugMaxStoredEventCount;
+      return true;
+    }());
+    return result;
+  }
+  static int? _debugMaxStoredEventCount;
+  static set debugMaxStoredEventCount(int? value) {
+    assert(() {
+      _debugMaxStoredEventCount = value;
+      return true;
+    }());
+  }
+
+  /// If the stored event log has more bytes than this,
+  /// and than the stored snapshot, we skip it; see [load].
+  static const _maxStoredEventBatchesSize = 1 << 20;
+
+  /// In debug mode, overrides the limit on the size of the stored event log
+  /// that [load] will replay.
+  ///
+  /// Outside of debug mode, this is always `null` and the setter has no effect.
+  static int? get debugMaxStoredEventBatchesSize {
+    int? result;
+    assert(() {
+      result = _debugMaxStoredEventBatchesSize;
+      return true;
+    }());
+    return result;
+  }
+  static int? _debugMaxStoredEventBatchesSize;
+  static set debugMaxStoredEventBatchesSize(int? value) {
+    assert(() {
+      _debugMaxStoredEventBatchesSize = value;
+      return true;
+    }());
+  }
+
+  /// If the stored snapshot is older than this,
+  /// [load] replaces the store loaded from it right away.
+  static const _maxStoredSnapshotAge = Duration(hours: 24);
+
   final PerAccountStore store;
   int lastEventId;
 
   bool _disposed = false;
+
+  /// True for a store loaded from stored server data
+  /// (see [_loadPersisted]) that should be replaced with one from
+  /// a fresh snapshot right away, before polling its event queue.
+  bool _replaceStoreImmediately = false;
+
+  /// True for a store loaded from stored server data
+  /// (see [_loadPersisted]), until we've received and handled
+  /// a first batch of events from its event queue.
+  ///
+  /// Until then, we don't know whether the server still has the event queue,
+  /// at the stored [lastEventId].
+  bool _eventQueueUnconfirmed = false;
 
   /// Make the register-queue request, with retries.
   ///
@@ -1751,6 +2003,14 @@ class UpdateMachine {
     _appLifecycleSubscription = ZulipBinding.instance.appLifecycleStateChanges
       .listen(_handleAppLifecycleStateChange);
     try {
+      if (_replaceStoreImmediately) {
+        // Replacing the store requires it to be installed in the global store,
+        // which [GlobalStore.perAccount] does once [load] returns.
+        await Future<void>.delayed(Duration.zero);
+        if (_disposed) return;
+        throw _ReplaceImmediatelyException();
+      }
+
       while (true) {
         if (_debugLoopSignal != null) {
           await _debugLoopWait();
@@ -1807,6 +2067,11 @@ class UpdateMachine {
             if (_disposed) return;
           }
           lastEventId = events.last.id;
+        }
+        if (_eventQueueUnconfirmed) {
+          _eventQueueUnconfirmed = false;
+          // Now the store's data about this device is up to date.
+          store.pushDevices.start();
         }
       }
     } catch (e, stackTrace) {
@@ -2143,6 +2408,22 @@ class UpdateMachine {
         // The old event queue is gone, so we need a new one.  This is normal.
         isUnexpected = false;
 
+      case ZulipApiException(httpStatus: 400, code: 'BAD_REQUEST')
+          when _eventQueueUnconfirmed:
+        assert(debugLog('Stored event queue for $store rejected: $error\n'
+          'Replacing…'));
+        // We resumed the event queue from stored data, and the server
+        // rejected the stored last event ID: it doesn't match what the
+        // server has pruned (it prunes events once acked).
+        // We store events before acking them, so this shouldn't happen;
+        // but if it does, the stored data is out of sync with the queue,
+        // so treat it like a lost event queue.
+        isUnexpected = false;
+
+      case _ReplaceImmediatelyException():
+        assert(debugLog('Replacing $store, loaded from stored data…'));
+        isUnexpected = false;
+
       case _EventHandlingException(:final cause, :final event):
         assert(debugLog('BUG: Error handling an event: $cause\n' // TODO(log)
           '  event: $event\n'
@@ -2261,6 +2542,20 @@ class UpdateMachine {
   @override
   String toString() => '${objectRuntimeType(this, 'UpdateMachine')}#${shortHash(this)}';
 }
+
+/// Stored server data can't be used; see [UpdateMachine._loadPersisted].
+class _UnusableServerDataException implements Exception {
+  final String reason;
+
+  _UnusableServerDataException(this.reason);
+
+  @override
+  String toString() => 'Unusable server data: $reason';
+}
+
+/// A store loaded from stored server data should be replaced right away;
+/// see [UpdateMachine._replaceStoreImmediately].
+class _ReplaceImmediatelyException implements Exception {}
 
 class _EventHandlingException implements Exception {
   final Object cause;

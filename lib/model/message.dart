@@ -269,9 +269,12 @@ class MessageStoreImpl extends HasChannelStore with MessageStore, _OutboxMessage
   MessageStoreImpl({
     required super.channels,
     required List<int> initialStarredMessages,
+    int firstLocalMessageId = 1,
   }) :
      messages = {},
-     starredMessages = Set.of(initialStarredMessages);
+     starredMessages = Set.of(initialStarredMessages) {
+    _nextLocalMessageId = firstLocalMessageId;
+  }
 
   @override
   final Map<int, Message> messages;

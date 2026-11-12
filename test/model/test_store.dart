@@ -446,7 +446,9 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
   Object? loadPerAccountException;
 
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     if (loadPerAccountDuration != null) {
       await Future<void>.delayed(loadPerAccountDuration!);
     }
@@ -465,6 +467,25 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
   }
 }
 
+/// How [UpdateMachineTestGlobalStore] should expect a load
+/// of an account's data to go, other than a reload.
+///
+/// This determines which API responses it prepares;
+/// see [UpdateMachineTestGlobalStore.doLoadPerAccount].
+enum ExpectedLoad {
+  /// A load from the server.
+  network,
+
+  /// A load from server data stored on the device,
+  /// resuming the stored event queue.
+  persisted,
+
+  /// A load from server data stored on the device,
+  /// replacing the store right away (by reloading from the server)
+  /// without polling the stored event queue.
+  persistedReplaced,
+}
+
 /// A [GlobalStore] that causes no database queries,
 /// and loads per-account data from API responses prepared by callers.
 ///
@@ -477,6 +498,11 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
 /// The implementation pauses the event-polling loop
 /// to avoid being a nuisance and does a boring
 /// [FakeApiConnection.prepare] for the register-token request.
+///
+/// Server data stored in [backend] (see [TestGlobalStoreBackend.seedServerData])
+/// lets [UpdateMachine.load] load from that data instead.
+/// Callers set [expectedLoad] to say whether it should,
+/// and so which API responses to prepare.
 ///
 /// See also:
 ///   * [TestGlobalStore], which prepares per-account data
@@ -520,25 +546,96 @@ class UpdateMachineTestGlobalStore extends GlobalStore with _ApiConnectionsMixin
     connection.prepare(json: eg.initialSnapshot().toJson());
   }
 
+  /// How the next load (other than a reload) should be expected to go.
+  ExpectedLoad expectedLoad = ExpectedLoad.network;
+
+  /// Prepares the response to the first poll request
+  /// on a resumed event queue, for [ExpectedLoad.persisted].
+  ///
+  /// Defaults to a response with no events.
+  void Function(FakeApiConnection)? prepareResumedPollResponse;
+
+  void _prepareResumedPollSuccess(FakeApiConnection connection) {
+    connection.prepare(json: GetEventsResult(events: [], queueId: null).toJson());
+  }
+
+  void _prepareLoadResponses(FakeApiConnection connection, ExpectedLoad expectedLoad) {
+    switch (expectedLoad) {
+      case ExpectedLoad.network:
+        (prepareRegisterQueueResponse ?? _prepareRegisterQueueSuccess)(connection);
+        connection.prepare(json: GetEventsResult(events: [HeartbeatEvent(id: 2)], queueId: null).toJson());
+      case ExpectedLoad.persisted:
+        (prepareResumedPollResponse ?? _prepareResumedPollSuccess)(connection);
+      case ExpectedLoad.persistedReplaced:
+        break;
+    }
+    connection.prepare(json: ServerEmojiData(codeToNames: {}).toJson());
+    if (NotificationService.instance.token.value != null) {
+      connection.prepare(json: {}); // register-token
+    }
+  }
+
+  /// During a load, prepares API responses
+  /// on any connection newly made by [apiConnection].
+  ///
+  /// Such a connection replaces one that was closed during the load,
+  /// as when [UpdateMachine.load] discards a store it built
+  /// from stored server data and falls back to loading from the server.
+  void Function(FakeApiConnection)? _prepareNewConnection;
+
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
+  FakeApiConnection apiConnection({
+      required Uri realmUrl, required int? zulipFeatureLevel,
+      String? email, String? apiKey}) {
+    final cached = _apiConnections[(realmUrl: realmUrl,
+      zulipFeatureLevel: zulipFeatureLevel, email: email, apiKey: apiKey)];
+    final connection = super.apiConnection(
+      realmUrl: realmUrl, zulipFeatureLevel: zulipFeatureLevel,
+      email: email, apiKey: apiKey);
+    if (!identical(connection, cached)) {
+      _prepareNewConnection?.call(connection);
+    }
+    return connection;
+  }
+
+  /// Load the account's data through [UpdateMachine.load],
+  /// preparing API responses as appropriate for [expectedLoad]
+  /// (or, if not [allowPersisted], for [ExpectedLoad.network]).
+  ///
+  /// The responses are prepared on the connection [UpdateMachine.load]
+  /// will get from [apiConnectionFromAccount], so a test can get it
+  /// in advance to prepare more responses, which will come first.
+  ///
+  /// When not [allowPersisted], as in a reload,
+  /// this first calls [clearCachedApiConnections],
+  /// so that the new store gets a fresh connection
+  /// as it would in the live app.
+  /// (The old store's connection is still open,
+  /// until the old store gets disposed.)
+  @override
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     final account = getAccount(accountId);
 
     // UpdateMachine.load should pick up the connection
     // with the network-request responses that we've prepared.
     assert(useCachedApiConnections);
 
+    if (!allowPersisted) clearCachedApiConnections();
     final connection = apiConnectionFromAccount(account!) as FakeApiConnection;
-    (prepareRegisterQueueResponse ?? _prepareRegisterQueueSuccess)(connection);
-    connection
-      ..prepare(json: GetEventsResult(events: [HeartbeatEvent(id: 2)], queueId: null).toJson())
-      ..prepare(json: ServerEmojiData(codeToNames: {}).toJson());
-    if (NotificationService.instance.token.value != null) {
-      connection.prepare(json: {}); // register-token
+    _prepareLoadResponses(connection,
+      allowPersisted ? expectedLoad : ExpectedLoad.network);
+    _prepareNewConnection = (connection) =>
+      _prepareLoadResponses(connection, ExpectedLoad.network);
+    try {
+      final updateMachine = await UpdateMachine.load(this, accountId,
+        allowPersisted: allowPersisted);
+      updateMachine.debugPauseLoop();
+      return updateMachine.store;
+    } finally {
+      _prepareNewConnection = null;
     }
-    final updateMachine = await UpdateMachine.load(this, accountId);
-    updateMachine.debugPauseLoop();
-    return updateMachine.store;
   }
 }
 
