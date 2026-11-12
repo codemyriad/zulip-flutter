@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../api/model/events.dart';
 import '../api/model/model.dart';
 import '../api/route/users.dart';
+import '../log.dart';
 import 'realm.dart';
 
 /// The model for tracking which users are online, idle, and offline.
@@ -41,12 +42,19 @@ class Presence extends HasRealmStore with ChangeNotifier {
     // TODO(#1611) Both of these reasons can be easily addressed by passing
     //   lastUpdateId. Do that, and stop sending `pingOnly: true`.
     //   (For the latter point, we'd ignore responses with a stale lastUpdateId.)
-    _maybePingAndRecordResponse(newState, pingOnly: true);
+    _maybePingAndRecordResponseGuarded(newState, pingOnly: true);
   }
 
   bool _hasStarted = false;
 
-  void start() async {
+  /// Start reporting this client's presence to the server,
+  /// and periodically refreshing presence data from the response.
+  ///
+  /// By default the first refresh comes after [serverPresencePingInterval],
+  /// because the data from /register is fresh.
+  /// Pass [pingImmediately] to refresh right away instead,
+  /// as when the data is not known to be fresh.
+  void start({bool pingImmediately = false}) async {
     if (!debugEnable) return;
     if (_hasStarted) {
       throw StateError('Presence.start should only be called once.');
@@ -56,7 +64,7 @@ class Presence extends HasRealmStore with ChangeNotifier {
     _appLifecycleListener = AppLifecycleListener(
       onStateChange: _handleLifecycleStateChange);
 
-    _poll();
+    _poll(pingImmediately: pingImmediately);
   }
 
   Future<void> _maybePingAndRecordResponse(AppLifecycleState? appLifecycleState, {
@@ -102,16 +110,36 @@ class Presence extends HasRealmStore with ChangeNotifier {
     }
   }
 
-  void _poll() async {
+  /// Like [_maybePingAndRecordResponse], but catches and logs any error.
+  ///
+  /// Failures are expected, for example when the device is offline;
+  /// the next ping will try again.
+  Future<void> _maybePingAndRecordResponseGuarded(
+    AppLifecycleState? appLifecycleState, {
+    required bool pingOnly,
+  }) async {
+    try {
+      await _maybePingAndRecordResponse(appLifecycleState, pingOnly: pingOnly);
+    } catch (e) {
+      assert(debugLog('Error updating presence: $e')); // TODO(log)
+    }
+  }
+
+  void _poll({required bool pingImmediately}) async {
     assert(!_disposed);
-    while (true) {
-      // We put the wait upfront because we already have data when [start] is
-      // called; it comes from /register.
+    if (!pingImmediately) {
+      // Normally we put the wait upfront, because we already have data when
+      // [start] is called; it comes from /register.
       await Future<void>.delayed(serverPresencePingInterval);
       if (_disposed) return;
+    }
 
-      await _maybePingAndRecordResponse(
+    while (true) {
+      await _maybePingAndRecordResponseGuarded(
         SchedulerBinding.instance.lifecycleState, pingOnly: false);
+      if (_disposed) return;
+
+      await Future<void>.delayed(serverPresencePingInterval);
       if (_disposed) return;
     }
   }
