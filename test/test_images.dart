@@ -24,8 +24,18 @@ FakeImageHttpClient prepareBoringImageHttpClient() {
 class FakeImageHttpClient extends Fake implements HttpClient {
   final FakeImageHttpClientRequest request = FakeImageHttpClientRequest();
 
+  /// The URLs requested so far, in order.
+  final List<Uri> requestedUrls = [];
+
+  /// If non-null, [getUrl] throws this, simulating a network failure.
+  Object? exception;
+
   @override
-  Future<HttpClientRequest> getUrl(Uri url) async => request;
+  Future<HttpClientRequest> getUrl(Uri url) async {
+    requestedUrls.add(url);
+    if (exception case final exception?) throw exception;
+    return request;
+  }
 }
 
 class FakeImageHttpClientRequest extends Fake implements HttpClientRequest {

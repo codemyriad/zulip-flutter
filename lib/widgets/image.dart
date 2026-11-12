@@ -4,9 +4,11 @@ import '../api/core.dart';
 import '../api/model/initial_snapshot.dart';
 import '../model/binding.dart';
 import '../model/content.dart';
+import 'realm_image_provider.dart';
 import 'store.dart';
 
-/// Like [Image.network], but includes [authHeader] if [src] is on-realm.
+/// Like [Image.network], but includes [authHeader] if [src] is on-realm,
+/// and caches the image on disk for use offline.
 ///
 /// Use this to present image content in the ambient realm: avatars, images in
 /// messages, etc. Must have a [PerAccountStoreWidget] ancestor.
@@ -17,8 +19,9 @@ import 'store.dart';
 ///
 /// If [src] is off-realm (e.g., a Gravatar URL), no auth header will be sent.
 ///
-/// The image will be cached according to the cache behavior of [Image.network],
-/// which may mean the cache is shared between realms.
+/// The image is cached in memory, keyed by account,
+/// and on disk according to [ImageDiskCachePolicy.forUrl];
+/// see [RealmImageProvider].
 class RealmContentNetworkImage extends StatelessWidget {
   const RealmContentNetworkImage(
     this.src, {
@@ -74,12 +77,26 @@ class RealmContentNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final account = PerAccountStoreWidget.of(context).account;
+    final store = PerAccountStoreWidget.of(context);
+    final account = store.account;
 
-    return Image.network(
-      src.toString(),
-
+    final provider = RealmImageProvider(
+      src,
+      accountId: store.accountId,
+      headers: {
+        // Only send the auth header to the server `auth` belongs to.
+        if (src.origin == account.realmUrl.origin) ...authHeader(
+          email: account.email, apiKey: account.apiKey,
+        ),
+        ...userAgentHeader(),
+      },
+      policy: ImageDiskCachePolicy.forUrl(src, realmUrl: account.realmUrl),
       scale: scale,
+    );
+
+    return Image(
+      image: ResizeImage.resizeIfNeeded(cacheWidth, cacheHeight, provider),
+
       frameBuilder: frameBuilder,
       loadingBuilder: loadingBuilder,
       errorBuilder: errorBuilder,
@@ -98,15 +115,6 @@ class RealmContentNetworkImage extends StatelessWidget {
       gaplessPlayback: gaplessPlayback,
       filterQuality: filterQuality,
       isAntiAlias: isAntiAlias,
-      headers: {
-        // Only send the auth header to the server `auth` belongs to.
-        if (src.origin == account.realmUrl.origin) ...authHeader(
-          email: account.email, apiKey: account.apiKey,
-        ),
-        ...userAgentHeader(),
-      },
-      cacheWidth: cacheWidth,
-      cacheHeight: cacheHeight,
     );
   }
 }
