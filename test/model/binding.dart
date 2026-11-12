@@ -17,6 +17,7 @@ import 'package:zulip/host/android_notifications.dart';
 import 'package:zulip/host/ios_notifications.g.dart';
 import 'package:zulip/host/notifications.dart';
 import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/image_disk_cache.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/widgets/app.dart';
 
@@ -88,6 +89,7 @@ class TestZulipBinding extends ZulipBinding {
     _resetPickImage();
     _resetPickMultipleMedia();
     _resetWakelock();
+    _resetImageDiskCache();
   }
 
   /// The current global store offered to a [GlobalStoreWidget].
@@ -580,8 +582,53 @@ class TestZulipBinding extends ZulipBinding {
   }
 
   @override
+  FakeImageDiskCache get imageDiskCache => _imageDiskCache;
+  FakeImageDiskCache _imageDiskCache = FakeImageDiskCache();
+
+  void _resetImageDiskCache() {
+    _imageDiskCache = FakeImageDiskCache();
+  }
+
+  @override
   // TODO(#1787) implement androidIntentEvents and write related tests
   Stream<AndroidIntentEvent> get androidIntentEvents => throw UnimplementedError();
+}
+
+/// An in-memory [ImageDiskCache], for [TestZulipBinding.imageDiskCache].
+class FakeImageDiskCache implements ImageDiskCache {
+  /// The stored entries, by account ID and then URL.
+  final Map<int, Map<Uri, Uint8List>> entries = {};
+
+  /// If non-null, every method throws this, simulating an I/O failure.
+  Object? exception;
+
+  void _maybeThrow() {
+    if (exception case final exception?) throw exception;
+  }
+
+  @override
+  Future<Uint8List?> get(int accountId, Uri url) async {
+    _maybeThrow();
+    return entries[accountId]?[url];
+  }
+
+  @override
+  Future<void> put(int accountId, Uri url, Uint8List bytes) async {
+    _maybeThrow();
+    (entries[accountId] ??= {})[url] = bytes;
+  }
+
+  @override
+  Future<void> remove(int accountId, Uri url) async {
+    _maybeThrow();
+    entries[accountId]?.remove(url);
+  }
+
+  @override
+  Future<void> removeAccount(int accountId) async {
+    _maybeThrow();
+    entries.remove(accountId);
+  }
 }
 
 class FakeSodium extends Fake implements sodium.Sodium {
