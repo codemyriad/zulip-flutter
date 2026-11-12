@@ -246,6 +246,30 @@ void main() {
         check(getPushKeyById(newKey.pushKeyId)!).supersededTimestamp.isNull();
       }));
 
+      test('no act on device event before start; act on start', () => awaitFakeAsync((async) async {
+        final now = testBinding.utcNow().millisecondsSinceEpoch ~/ 1000;
+        final oldKey = mkKey(now - 31 * secondsPerDay);
+        final newKey = mkKey(now - secondsPerDay);
+        globalStore = eg.globalStore(accounts: [eg.selfAccount],
+          pushKeys: [oldKey, newKey]);
+        store = eg.store(globalStore: globalStore, account: eg.selfAccount,
+          initialSnapshot: eg.initialSnapshot(devices: {
+            eg.selfAccount.deviceId!: eg.clientDevice(pushKeyId: null),
+          }),
+          startPushDevices: false);
+
+        await store.handleEvent(eg.deviceUpdateEvent(store.account.deviceId!,
+          pushKeyId: JsonNullable(newKey.pushKeyId)));
+        async.flushMicrotasks();
+        check(getPushKeyById(oldKey.pushKeyId)!).supersededTimestamp.isNull();
+
+        // Starting acts on the ack that came from the event.
+        store.pushDevices.start();
+        async.flushMicrotasks();
+        check(getPushKeyById(oldKey.pushKeyId)!).supersededTimestamp.equals(now);
+        check(getPushKeyById(newKey.pushKeyId)!).supersededTimestamp.isNull();
+      }));
+
       test('no re-mark already-superseded keys on acked new key', () => awaitFakeAsync((async) async {
         final now = testBinding.utcNow().millisecondsSinceEpoch ~/ 1000;
         final oldKey = mkKey(now - 32 * secondsPerDay,

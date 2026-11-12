@@ -17,15 +17,34 @@ import 'store.dart';
 /// Manages telling the server this device's push token,
 /// and tracking the server's responses on the status of devices and push tokens.
 class PushDeviceManager extends PerAccountStoreBase {
+  /// Construct a [PushDeviceManager],
+  /// calling [start] immediately unless the `start` parameter is false.
   PushDeviceManager({
     required super.core,
     required this._devices,
+    bool start = true,
   }) {
+    if (start) this.start();
+  }
+
+  bool _started = false;
+
+  /// Start managing push keys and tokens:
+  /// rotate push keys as needed, and tell the server this device's
+  /// push key and token, now and when they change.
+  ///
+  /// This makes API requests and database writes,
+  /// based on [devices].
+  /// So it should be called only once [devices] is up to date.
+  void start() {
+    assert(!_started && !_disposed);
+    _started = true;
     _init();
   }
 
   void _init() async {
     await _maybeRotatePushKeys();
+    if (_disposed) return;
     _registerTokenAndSubscribe();
   }
 
@@ -82,7 +101,8 @@ class PushDeviceManager extends PerAccountStoreBase {
 
         if (event.pushKeyId case final v?) {
           device.pushKeyId = v.value;
-          _maybeRotatePushKeys();
+          // Before [start], leave rotation to [start] itself.
+          if (_started) _maybeRotatePushKeys();
         }
         if (event.pushTokenId case final v?) {
           device.pushTokenId = v.value;
@@ -119,6 +139,7 @@ class PushDeviceManager extends PerAccountStoreBase {
     _debugMaybePause();
     if (_debugRegisterTokenProceed != null) {
       await _debugRegisterTokenProceed!.future;
+      if (_disposed) return;
     }
 
     if (account.deviceId == null
@@ -131,6 +152,7 @@ class PushDeviceManager extends PerAccountStoreBase {
       if (_disposed) return;
       await updateAccount(AccountsCompanion(
         deviceId: drift.Value(result.deviceId)));
+      if (_disposed) return;
       assert(account.deviceId != null);
     }
 

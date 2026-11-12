@@ -1538,6 +1538,7 @@ PerAccountStore store({
   User? selfUser,
   Account? account,
   InitialSnapshot? initialSnapshot,
+  bool startPushDevices = true,
 }) {
   assert(!(account != null && selfUser != null));
   final effectiveAccount = account
@@ -1546,6 +1547,7 @@ PerAccountStore store({
     globalStore: globalStore ?? _globalStore(accounts: [effectiveAccount]),
     accountId: effectiveAccount.id,
     initialSnapshot: initialSnapshot ?? _initialSnapshot(),
+    startPushDevices: startPushDevices,
   );
 }
 const _store = store;
