@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
@@ -962,9 +963,20 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     assert(_fetchInitialAbort == null);
     final abort = _fetchInitialAbort = Completer<void>();
 
+    // A fetch from the newest or first-unread message is what the user
+    // will want to see again on opening this narrow again later,
+    // so keep a copy, to show if the fetch then fails or is slow.
+    final cacheKey = messageFetchCacheKey(narrow);
+    final shouldStoreFetch = cacheKey != null && switch (anchor) {
+      AnchorCode.newest || AnchorCode.firstUnread => true,
+      _ => false,
+    };
+
     BackoffMachine? backoffMachine;
     GetMessagesResult result;
+    BytesBuilder? rawBody;
     while (true) {
+      rawBody = shouldStoreFetch ? BytesBuilder(copy: false) : null;
       try {
         result = await getMessages(store.connection,
           narrow: narrow.apiEncode(),
@@ -973,12 +985,18 @@ class MessageListView with ChangeNotifier, _MessageSequence {
           numAfter: kMessageListFetchBatchSize,
           allowEmptyTopicName: true,
           abortTrigger: abort.future,
+          rawBody: rawBody,
         );
         break;
       } catch (e) {
         if (isStale()) return;
         if (!_isRetryableFetchInitialError(e)) {
           _fetchInitialAbort = null;
+          if (cacheKey != null && e is ZulipApiException) {
+            // The narrow may be gone, or no longer accessible to the user;
+            // in any case, don't keep showing its stored messages.
+            unawaited(store.deleteCachedMessageFetch(cacheKey));
+          }
           rethrow;
         }
       }
@@ -1025,6 +1043,16 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
     if (haveNewest) {
       _syncOutboxMessagesFromStore();
+    }
+
+    if (rawBody != null) {
+      // Use the narrow as adjusted for any topic-permalink redirect.
+      final key = messageFetchCacheKey(narrow)!;
+      if (result.messages.isEmpty) {
+        unawaited(store.deleteCachedMessageFetch(key));
+      } else {
+        unawaited(store.storeCachedMessageFetch(key, rawBody.takeBytes()));
+      }
     }
 
     _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);

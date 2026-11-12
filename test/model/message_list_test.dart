@@ -16,6 +16,7 @@ import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/algorithms.dart';
 import 'package:zulip/model/content.dart';
+import 'package:zulip/model/database.dart';
 import 'package:zulip/model/message.dart';
 import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/narrow.dart';
@@ -29,6 +30,7 @@ import '../stdlib_checks.dart';
 import 'binding.dart';
 import 'content_checks.dart';
 import 'message_checks.dart';
+import 'store_checks.dart';
 import 'recent_senders_test.dart' as recent_senders_test;
 import 'test_store.dart';
 
@@ -65,6 +67,7 @@ void main() {
   // These variables are the common state operated on by each test.
   // Each test case calls [prepare] to initialize them.
   late Subscription subscription;
+  late TestGlobalStoreBackend backend;
   late PerAccountStore store;
   late FakeApiConnection connection;
   late MessageListView model;
@@ -91,7 +94,10 @@ void main() {
   }) async {
     stream ??= eg.stream(streamId: eg.defaultStreamMessageStreamId);
     subscription = eg.subscription(stream);
-    store = eg.store(initialSnapshot: eg.initialSnapshot(starredMessages: starredMessages));
+    final globalStore = eg.globalStore(accounts: [eg.selfAccount]);
+    backend = globalStore.backend;
+    store = eg.store(globalStore: globalStore,
+      initialSnapshot: eg.initialSnapshot(starredMessages: starredMessages));
     await store.addStream(stream);
     await store.addSubscription(subscription);
     await store.addUsers([...?users, eg.selfUser]);
@@ -696,6 +702,141 @@ void main() {
         check(async.pendingTimers).isEmpty();
         async.elapse(const Duration(seconds: 10));
         check(connection.takeRequests()).isEmpty();
+      }));
+    });
+  });
+
+  group('cached message fetches', () {
+    final channel = eg.stream(streamId: eg.defaultStreamMessageStreamId);
+
+    CachedMessageFetch? cachedFetchOf(Narrow narrow) =>
+      backend.cachedMessageFetchOf(eg.selfAccount.id, messageFetchCacheKey(narrow)!);
+
+    void seedCachedFetch(Narrow narrow, List<Message> messages) {
+      backend.seedCachedMessageFetch(eg.selfAccount.id, messageFetchCacheKey(narrow)!,
+        json: newestResult(foundOldest: true, messages: messages).toJson());
+    }
+
+    group('store after fetchInitial', () {
+      Future<void> checkStored(Narrow narrow, {
+        Anchor anchor = AnchorCode.newest,
+        required List<Message> messages,
+      }) async {
+        await prepare(narrow: narrow, anchor: anchor, stream: channel);
+        final json = newestResult(foundOldest: true, messages: messages).toJson();
+        connection.prepare(json: json);
+        await model.fetchInitial();
+        check(cachedFetchOf(narrow)).isNotNull()
+          .data.deepEquals(utf8.encode(jsonEncode(json)));
+      }
+
+      test('CombinedFeedNarrow', () => checkStored(const CombinedFeedNarrow(),
+        messages: [eg.streamMessage(stream: channel), eg.dmMessage(from: eg.otherUser, to: [eg.selfUser])]));
+
+      test('ChannelNarrow', () => checkStored(ChannelNarrow(channel.streamId),
+        messages: [eg.streamMessage(stream: channel)]));
+
+      test('TopicNarrow', () => checkStored(eg.topicNarrow(channel.streamId, 'topic'),
+        messages: [eg.streamMessage(stream: channel, topic: 'topic')]));
+
+      test('DmNarrow', () => checkStored(
+        DmNarrow.withUser(eg.otherUser.userId, selfUserId: eg.selfUser.userId),
+        messages: [eg.dmMessage(from: eg.otherUser, to: [eg.selfUser])]));
+
+      test('MentionsNarrow', () => checkStored(const MentionsNarrow(),
+        messages: [eg.streamMessage(stream: channel, flags: [MessageFlag.mentioned])]));
+
+      test('StarredMessagesNarrow', () => checkStored(const StarredMessagesNarrow(),
+        messages: [eg.streamMessage(stream: channel, flags: [MessageFlag.starred])]));
+
+      test('anchor firstUnread', () => checkStored(const CombinedFeedNarrow(),
+        anchor: AnchorCode.firstUnread,
+        messages: [eg.streamMessage(stream: channel)]));
+
+      Future<void> checkNotStored(Narrow narrow, Anchor anchor) async {
+        await prepare(narrow: narrow, anchor: anchor, stream: channel);
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [eg.streamMessage(stream: channel)]).toJson());
+        await model.fetchInitial();
+        check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).isEmpty();
+      }
+
+      test('not with anchor oldest', () =>
+        checkNotStored(const CombinedFeedNarrow(), AnchorCode.oldest));
+
+      test('not with numeric anchor', () =>
+        checkNotStored(const CombinedFeedNarrow(), NumericAnchor(1)));
+
+      test('not for keyword search', () =>
+        checkNotStored(KeywordSearchNarrow('hello'), AnchorCode.newest));
+
+      test('topic permalink: store under the narrow redirected to', () async {
+        final otherChannel = eg.stream();
+        final message = eg.streamMessage(stream: otherChannel, topic: 'other');
+        final narrow = TopicNarrow(channel.streamId, eg.t('topic'), with_: message.id);
+        await prepare(narrow: narrow, stream: channel);
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [message]).toJson());
+        await model.fetchInitial();
+        check(backend.cachedMessageFetchKeysOf(eg.selfAccount.id)).deepEquals([
+          messageFetchCacheKey(TopicNarrow(otherChannel.streamId, eg.t('other')))]);
+      });
+
+      test('after a retry', () => awaitFakeAsync((async) async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, stream: channel);
+        connection.prepare(httpException: const SocketException('failed'));
+        final json = newestResult(foundOldest: true,
+          messages: [eg.streamMessage(stream: channel)]).toJson();
+        connection.prepare(json: json);
+        final fetchFuture = model.fetchInitial();
+        async.elapse(const Duration(milliseconds: 100)); // max first backoff
+        await fetchFuture;
+        check(cachedFetchOf(narrow)).isNotNull()
+          .data.deepEquals(utf8.encode(jsonEncode(json)));
+      }));
+    });
+
+    group('delete', () {
+      test('on success with no messages', () async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: []).toJson());
+        await model.fetchInitial();
+        check(cachedFetchOf(narrow)).isNull();
+      });
+
+      test('on ZulipApiException', () async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        connection.prepare(apiException: eg.apiBadRequest());
+        await check(model.fetchInitial()).throws<ZulipApiException>();
+        check(cachedFetchOf(narrow)).isNull();
+      });
+
+      test('on ZulipApiException, even with numeric anchor', () async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, anchor: NumericAnchor(1), stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        connection.prepare(apiException: eg.apiBadRequest());
+        await check(model.fetchInitial()).throws<ZulipApiException>();
+        check(cachedFetchOf(narrow)).isNull();
+      });
+
+      test('not on retryable error', () => awaitFakeAsync((async) async {
+        final narrow = ChannelNarrow(channel.streamId);
+        await prepare(narrow: narrow, stream: channel);
+        seedCachedFetch(narrow, [eg.streamMessage(stream: channel)]);
+        connection.prepare(httpStatus: 500, body: 'splat');
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(cachedFetchOf(narrow)).isNotNull();
+
+        model.dispose();
+        await fetchFuture;
       }));
     });
   });
