@@ -1,5 +1,8 @@
 import 'package:flutter/foundation.dart';
 
+/// The name this build of the app shows for itself.
+const kAppName = 'CodeMyriad Chat';
+
 /// The Zulip server this build of the app is hardcoded to connect to.
 ///
 /// The add-account flow skips asking the user for a server URL,
