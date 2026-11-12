@@ -496,6 +496,7 @@ class _MainMenuHeaderState extends State<_MainMenuHeader> {
                     borderRadius: 4,
                     child: RealmContentNetworkImage(
                       store.resolvedRealmIcon,
+                      versionTracksContent: store.realmIconVersionTracksContent,
                       filterQuality: FilterQuality.medium,
                       fit: BoxFit.cover)),
                   Flexible(child: Text(store.realmName,

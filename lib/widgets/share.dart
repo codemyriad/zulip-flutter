@@ -248,6 +248,7 @@ class ShareSheet extends StatelessWidget {
                 borderRadius: 4,
                 child: RealmContentNetworkImage(
                   store.resolvedRealmIcon,
+                  versionTracksContent: store.realmIconVersionTracksContent,
                   filterQuality: FilterQuality.medium,
                   fit: BoxFit.cover)))),
           Expanded(child: TabBar(

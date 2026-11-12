@@ -25,25 +25,48 @@ enum ImageDiskCachePolicy {
 
   /// The policy to use for [url], an image URL on [realmUrl] or elsewhere.
   ///
-  /// Uses [cacheFirst] for on-realm URLs known to point to content
+  /// Uses [cacheFirst] for URLs known to point to content
   /// that never changes:
+  ///  * any URL, if [contentImmutable] is true;
   ///  * URLs with a `version` query parameter,
-  ///    which the server bumps when the content changes,
-  ///    as on uploaded avatars and the realm icon;
-  ///  * `/user_uploads/` URLs, for uploaded files and their thumbnails,
+  ///    if on the realm or if [versionTracksContent] is true;
+  ///  * on-realm `/user_uploads/` URLs, for uploaded files and their thumbnails,
   ///    whose paths include a random component chosen at upload.
   ///
   /// Otherwise uses [networkFirst].
   /// That includes the `/avatar/{user_id}` fallback avatar URL,
-  /// realm emoji, and all images from outside the realm.
-  /// In particular a Gravatar URL (see [GravatarUrl]) has a `version`,
-  /// but the user can change the image on Gravatar
+  /// realm emoji, and by default all images from outside the realm.
+  ///
+  /// Pass true for [contentImmutable] when [url] came from the server
+  /// as an image whose URL the server changes whenever the image changes,
+  /// wherever the image is hosted:
+  /// an avatar the server stores (see [UploadedAvatarUrl.contentImmutable]).
+  /// The server may keep those in S3-style storage, off the realm.
+  ///
+  /// Pass true for [versionTracksContent] when [url] came from the server
+  /// as an image whose `version` query parameter, if any,
+  /// the server bumps whenever the image changes,
+  /// wherever the image is hosted:
+  /// the realm icon, or an avatar URL other than Gravatar's
+  /// (see [UploadedAvatarUrl.versionTracksContent]).
+  /// Don't pass true for a Gravatar URL (see [GravatarUrl]):
+  /// it has a `version`, but the user can change the image on Gravatar
   /// without the server bumping it.
-  /// Avatars uploaded to S3-style storage off the realm are also excluded,
-  /// because their host can't be told apart from other image hosts.
-  static ImageDiskCachePolicy forUrl(Uri url, {required Uri realmUrl}) {
+  /// The parameter has no effect on a URL without a `version`.
+  ///
+  /// Off-realm URLs are network-first by default
+  /// because a `version` there need not say anything about the content,
+  /// as on Gravatar URLs, or on an external image linked from a message.
+  static ImageDiskCachePolicy forUrl(Uri url, {
+    required Uri realmUrl,
+    bool contentImmutable = false,
+    bool versionTracksContent = false,
+  }) {
+    if (contentImmutable) return cacheFirst;
+    final hasVersion = _hasQueryParameter(url, 'version');
+    if (versionTracksContent && hasVersion) return cacheFirst;
     if (url.origin != realmUrl.origin) return networkFirst;
-    if (_hasQueryParameter(url, 'version')) return cacheFirst;
+    if (hasVersion) return cacheFirst;
     if (url.path.startsWith('/user_uploads/')) return cacheFirst;
     return networkFirst;
   }
@@ -91,6 +114,15 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
   /// These are not part of the [ImageCache] key; see [accountId].
   final Map<String, String> headers;
 
+  /// How this image uses the disk cache.
+  ///
+  /// This is not part of the [ImageCache] key:
+  /// two providers for the same URL and account share an in-memory image
+  /// even if their policies differ.
+  /// That's harmless because a policy only affects
+  /// whether a stored copy of the same URL may be shown,
+  /// and [ImageDiskCachePolicy.cacheFirst] is chosen only for a URL
+  /// whose content never changes, wherever it is shown.
   final ImageDiskCachePolicy policy;
 
   final double scale;

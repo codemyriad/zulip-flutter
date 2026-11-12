@@ -20,12 +20,15 @@ import 'store.dart';
 /// If [src] is off-realm (e.g., a Gravatar URL), no auth header will be sent.
 ///
 /// The image is cached in memory, keyed by account,
-/// and on disk according to [ImageDiskCachePolicy.forUrl];
+/// and on disk according to [ImageDiskCachePolicy.forUrl]
+/// with [contentImmutable] and [versionTracksContent];
 /// see [RealmImageProvider].
 class RealmContentNetworkImage extends StatelessWidget {
   const RealmContentNetworkImage(
     this.src, {
     super.key,
+    this.contentImmutable = false,
+    this.versionTracksContent = false,
     this.scale = 1.0,
     this.frameBuilder,
     this.loadingBuilder,
@@ -51,6 +54,24 @@ class RealmContentNetworkImage extends StatelessWidget {
   });
 
   final Uri src;
+
+  /// Whether the server changes [src] whenever the image changes,
+  /// so that the image at [src] never changes, even if [src] is off-realm.
+  ///
+  /// Pass true for an avatar the server stores,
+  /// so that it's shown from the disk cache without a request
+  /// even when the server keeps it in S3-style storage.
+  /// See [ImageDiskCachePolicy.forUrl].
+  final bool contentImmutable;
+
+  /// Whether the server bumps the `version` query parameter in [src], if any,
+  /// whenever the image changes, even if [src] is off-realm.
+  ///
+  /// Pass true for the realm icon, which the server may keep
+  /// in S3-style storage, or an avatar URL other than Gravatar's.
+  /// Never pass true for a Gravatar URL.
+  /// See [ImageDiskCachePolicy.forUrl].
+  final bool versionTracksContent;
 
   final double scale;
   final ImageFrameBuilder? frameBuilder;
@@ -90,7 +111,9 @@ class RealmContentNetworkImage extends StatelessWidget {
         ),
         ...userAgentHeader(),
       },
-      policy: ImageDiskCachePolicy.forUrl(src, realmUrl: account.realmUrl),
+      policy: ImageDiskCachePolicy.forUrl(src, realmUrl: account.realmUrl,
+        contentImmutable: contentImmutable,
+        versionTracksContent: versionTracksContent),
       scale: scale,
     );
 

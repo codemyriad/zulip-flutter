@@ -20,9 +20,16 @@ void main() {
   group('ImageDiskCachePolicy.forUrl', () {
     final realmUrl = Uri.parse('https://chat.example/');
 
-    void checkPolicy(String url, ImageDiskCachePolicy expected) {
-      check(ImageDiskCachePolicy.forUrl(Uri.parse(url), realmUrl: realmUrl))
-        .equals(expected);
+    // As in the server's file name for an uploaded avatar.
+    const avatarHash = 'ff062b0fee41738b38c4312bb33bdf3fe2aad463';
+
+    void checkPolicy(String url, ImageDiskCachePolicy expected, {
+      bool contentImmutable = false,
+      bool versionTracksContent = false,
+    }) {
+      check(ImageDiskCachePolicy.forUrl(Uri.parse(url), realmUrl: realmUrl,
+        contentImmutable: contentImmutable,
+        versionTracksContent: versionTracksContent)).equals(expected);
     }
 
     test('cache-first for versioned URLs', () {
@@ -59,6 +66,43 @@ void main() {
         ImageDiskCachePolicy.networkFirst);
       checkPolicy('https://other.example/image.png?version=1',
         ImageDiskCachePolicy.networkFirst);
+    });
+
+    test('contentImmutable: cache-first wherever hosted', () {
+      // As for uploaded avatars, on the realm or in S3-style storage.
+      checkPolicy('https://chat.example/user_avatars/2/$avatarHash.png',
+        ImageDiskCachePolicy.cacheFirst, contentImmutable: true);
+      checkPolicy('https://chat.example/user_avatars/2/$avatarHash-medium.png',
+        ImageDiskCachePolicy.cacheFirst, contentImmutable: true);
+      checkPolicy('https://uploads.example/2/$avatarHash.png',
+        ImageDiskCachePolicy.cacheFirst, contentImmutable: true);
+      checkPolicy('https://uploads.example/2/$avatarHash-medium.png',
+        ImageDiskCachePolicy.cacheFirst, contentImmutable: true);
+    });
+
+    test('network-first for uploaded avatars without contentImmutable', () {
+      checkPolicy('https://chat.example/user_avatars/2/$avatarHash.png',
+        ImageDiskCachePolicy.networkFirst);
+      checkPolicy('https://uploads.example/2/$avatarHash.png',
+        ImageDiskCachePolicy.networkFirst, versionTracksContent: true);
+    });
+
+    test('versionTracksContent: cache-first for off-realm versioned URLs', () {
+      // As for the realm icon in S3-style storage,
+      // and the default avatar at a configured URL.
+      checkPolicy('https://uploads.example/2/realm/icon.png?version=2',
+        ImageDiskCachePolicy.cacheFirst, versionTracksContent: true);
+      checkPolicy('https://cdn.example/default-avatar.png?version=3',
+        ImageDiskCachePolicy.cacheFirst, versionTracksContent: true);
+    });
+
+    test('versionTracksContent: no effect without version', () {
+      checkPolicy('https://cdn.example/default-avatar.png',
+        ImageDiskCachePolicy.networkFirst, versionTracksContent: true);
+      checkPolicy('https://cdn.example/default-avatar.png?versions=1',
+        ImageDiskCachePolicy.networkFirst, versionTracksContent: true);
+      checkPolicy('https://chat.example/avatar/123',
+        ImageDiskCachePolicy.networkFirst, versionTracksContent: true);
     });
 
     test('network-first for query with invalid percent-escape', () {
@@ -230,6 +274,21 @@ void main() {
       await pumpImage(tester, networkFirstUrl);
       check(findError).findsOne();
       debugNetworkImageHttpClientProvider = null;
+    });
+
+    test('policy not part of in-memory key', () {
+      // The same URL can be shown both with and without
+      // contentImmutable or versionTracksContent,
+      // and it's fine to share the image.
+      final cacheFirst = RealmImageProvider(cacheFirstUrl,
+        accountId: eg.selfAccount.id, headers: {},
+        policy: ImageDiskCachePolicy.cacheFirst);
+      final networkFirst = RealmImageProvider(cacheFirstUrl,
+        accountId: eg.selfAccount.id, headers: {},
+        policy: ImageDiskCachePolicy.networkFirst);
+      check(cacheFirst)
+        ..equals(networkFirst)
+        ..has((x) => x.hashCode, 'hashCode').equals(networkFirst.hashCode);
     });
 
     testWidgets('entries separate per account', (tester) async {
