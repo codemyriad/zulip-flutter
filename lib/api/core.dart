@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
@@ -149,9 +150,16 @@ class ApiConnection {
 
   bool _isOpen = true;
 
+  /// Send [request], and parse the response with [fromJson].
+  ///
+  /// If [rawBody] is non-null, the bytes of the response body
+  /// are added to it as they arrive.
+  /// Its contents are the whole body if this returns normally;
+  /// if this throws, they may be partial or nothing.
   Future<T> send<T>(String routeName, T Function(Map<String, dynamic>) fromJson,
     http.BaseRequest request, {
     bool useAuth = true,
+    BytesBuilder? rawBody,
   }) async {
     assert(_isOpen);
 
@@ -185,7 +193,13 @@ class ApiConnection {
     try {
       // The stream-oriented `bind` method allows decoding to happen in chunks
       // while the response is still being downloaded, improving latency.
-      final jsonStream = jsonUtf8Decoder.bind(response.stream);
+      final Stream<List<int>> body = rawBody == null
+        ? response.stream
+        : response.stream.map((chunk) {
+            rawBody.add(chunk);
+            return chunk;
+          });
+      final jsonStream = jsonUtf8Decoder.bind(body);
       json = await jsonStream.single as Map<String, dynamic>?;
     } on http.ClientException catch (e) {
       // A network error, like the connection being interrupted
@@ -277,14 +291,19 @@ class ApiConnection {
         : Future.any([timeoutTrigger, abortTrigger])));
   }
 
+  /// Make a POST request to the given path with the given params.
+  ///
+  /// For [rawBody], see [send].
   Future<T> post<T>(String routeName, T Function(Map<String, dynamic>) fromJson,
-      String path, Map<String, dynamic>? params) async {
+      String path, Map<String, dynamic>? params, {
+    BytesBuilder? rawBody,
+  }) async {
     final url = realmUrl.replace(path: "/api/v1/$path");
     final request = http.Request('POST', url);
     if (params != null) {
       request.bodyFields = encodeParameters(params)!;
     }
-    return send(routeName, fromJson, request);
+    return send(routeName, fromJson, request, rawBody: rawBody);
   }
 
   Future<T> postFileFromStream<T>(String routeName, T Function(Map<String, dynamic>) fromJson,

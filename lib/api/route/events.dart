@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:json_annotation/json_annotation.dart';
 
 import '../core.dart';
@@ -14,8 +16,12 @@ part 'events.g.dart';
 /// that the server returns, mostly in enabling modern rather than legacy APIs.
 /// The types in [InitialSnapshot] and the [Event] subclasses, and their
 /// deserialization logic, are written for the settings chosen here.
+///
+/// If [rawBody] is non-null, the response body's bytes are added to it;
+/// see [ApiConnection.send].
 Future<InitialSnapshot> registerQueue(ApiConnection connection, {
   IdleQueueTimeout? idleQueueTimeout,
+  BytesBuilder? rawBody,
 }) {
   return connection.post('registerQueue', InitialSnapshot.fromJson, 'register', {
     'idle_queue_timeout': ?idleQueueTimeout,
@@ -43,7 +49,7 @@ Future<InitialSnapshot> registerQueue(ApiConnection connection, {
       'empty_topic_name': true,
       'individual_emoji_changes': true,
     },
-  });
+  }, rawBody: rawBody);
 }
 
 /// A value for `idleQueueTimeout` on [registerQueue].

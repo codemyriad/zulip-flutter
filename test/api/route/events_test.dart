@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
@@ -60,6 +61,18 @@ void main() {
     test('idleQueueTimeout mobile', () => FakeApiConnection.with_((connection) async {
       connection.prepare(json: eg.initialSnapshot().toJson());
       await checkRegisterQueue(connection, idleQueueTimeout: .mobile);
+    }));
+
+    test('rawBody', () => FakeApiConnection.with_((connection) async {
+      final body = jsonEncode({
+        ...eg.initialSnapshot(queueId: 'queue1').toJson(),
+        'some_unknown_field': [1, 2],
+      });
+      connection.prepare(body: body);
+      final rawBody = BytesBuilder();
+      final result = await registerQueue(connection, rawBody: rawBody);
+      check(result.queueId).equals('queue1');
+      check(rawBody.takeBytes()).deepEquals(utf8.encode(body));
     }));
   });
 }
