@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
 import '../api/backoff.dart';
+import '../api/exception.dart';
 import '../api/model/events.dart';
 import '../api/model/model.dart';
 import '../api/route/messages.dart';
@@ -209,6 +210,24 @@ mixin _MessageSequence {
   FetchingStatus _status = FetchingStatus.unstarted;
 
   BackoffMachine? _fetchBackoffMachine;
+
+  /// Completed to stop the request or backoff wait in progress, if any,
+  /// in the retry loop of [MessageListView.fetchInitial],
+  /// when the loop is no longer wanted.
+  ///
+  /// See [_cancelFetchInitial].
+  Completer<void>? _fetchInitialAbort;
+
+  /// Stop the retry loop of [MessageListView.fetchInitial], if running,
+  /// from waiting further on its request or backoff.
+  ///
+  /// The loop also needs to see, when it resumes, that it should stop;
+  /// for example because [generation] has changed.
+  void _cancelFetchInitial() {
+    final abort = _fetchInitialAbort;
+    _fetchInitialAbort = null;
+    abort?.complete();
+  }
 
   /// The parsed message contents, as a list parallel to [messages].
   ///
@@ -480,6 +499,7 @@ mixin _MessageSequence {
     _clearContents();
     _status = FetchingStatus.unstarted;
     _fetchBackoffMachine = null;
+    _cancelFetchInitial();
   }
 
   /// Clear [messages], [outboxMessages], and the data derived from them,
@@ -743,6 +763,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // Fetches in progress check this when they resume, so that they
     // don't act on, or notify listeners of, this disposed object.
     _disposed = true;
+    _cancelFetchInitial();
     super.dispose();
   }
 
@@ -910,6 +931,14 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   }
 
   /// Fetch messages, starting from scratch.
+  ///
+  /// If the request fails in a way that may be temporary,
+  /// such as a network failure or a 5xx error,
+  /// this retries with backoff until a request succeeds,
+  /// or until this view is disposed or reset (as by [renarrowAndFetch]),
+  /// or the store is disposed.
+  /// See [_isRetryableFetchInitialError].
+  /// On other errors, this throws.
   Future<void> fetchInitial() async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
@@ -929,15 +958,37 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _setStatus(FetchingStatus.fetchInitial, was: FetchingStatus.unstarted);
     // TODO schedule all this in another isolate
     final generation = this.generation;
-    // TODO(#2085): handle request failure
-    final result = await getMessages(store.connection,
-      narrow: narrow.apiEncode(),
-      anchor: anchor,
-      numBefore: kMessageListFetchBatchSize,
-      numAfter: kMessageListFetchBatchSize,
-      allowEmptyTopicName: true,
-    );
-    if (_disposed || this.generation > generation) return;
+    bool isStale() => _disposed || store.disposed || this.generation != generation;
+    assert(_fetchInitialAbort == null);
+    final abort = _fetchInitialAbort = Completer<void>();
+
+    BackoffMachine? backoffMachine;
+    GetMessagesResult result;
+    while (true) {
+      try {
+        result = await getMessages(store.connection,
+          narrow: narrow.apiEncode(),
+          anchor: anchor,
+          numBefore: kMessageListFetchBatchSize,
+          numAfter: kMessageListFetchBatchSize,
+          allowEmptyTopicName: true,
+          abortTrigger: abort.future,
+        );
+        break;
+      } catch (e) {
+        if (isStale()) return;
+        if (!_isRetryableFetchInitialError(e)) {
+          _fetchInitialAbort = null;
+          rethrow;
+        }
+      }
+      // TODO(log) the error
+      await (backoffMachine ??= BackoffMachine())
+        .wait(abortTrigger: abort.future);
+      if (isStale()) return;
+    }
+    if (isStale()) return;
+    _fetchInitialAbort = null;
 
     _oldestFetchedMessageId = result.messages.firstOrNull?.id;
     _newestFetchedMessageId = result.messages.lastOrNull?.id;
@@ -970,6 +1021,31 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
 
     _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+  }
+
+  /// Whether [fetchInitial] should retry after its request failed with [error].
+  ///
+  /// This is true for errors that may go away on their own:
+  /// network failures, server errors, rate limiting,
+  /// and malformed responses (as from a captive portal on the network).
+  /// It's false for other errors, like a 4xx error for a bad narrow,
+  /// which retrying won't fix,
+  /// and errors from bugs in our code, which shouldn't be retried silently.
+  bool _isRetryableFetchInitialError(Object error) {
+    switch (error) {
+      case NetworkException(:final cause):
+        // In tests, [FakeApiConnection] throws a [FlutterError]
+        // when a test forgot to prepare a response; don't hide that.
+        assert(cause is! FlutterError, 'Unexpected error in fetchInitial: $cause');
+        return true;
+      case Server5xxException():
+      case MalformedServerResponseException():
+      case ZulipApiException(code: 'RATE_LIMIT_HIT'):
+      case HttpException(httpStatus: 429):
+        return true;
+      default:
+        return false;
+    }
   }
 
   /// Update [narrow] for the result of a "with" narrow (topic permalink) fetch.

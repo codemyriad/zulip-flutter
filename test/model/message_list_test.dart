@@ -472,6 +472,180 @@ void main() {
           .equals(TopicNarrow(someChannel.streamId, eg.t(someTopic)));
       });
     });
+
+    group('retry', () {
+      void prepareNetworkException() {
+        connection.prepare(httpException: const SocketException('failed'));
+      }
+
+      void prepareSuccess(List<Message> messages) {
+        connection.prepare(json: newestResult(
+          foundOldest: true, messages: messages).toJson());
+      }
+
+      test('retry after failure, then succeed', () => awaitFakeAsync((async) async {
+        await prepare();
+        final message = eg.streamMessage();
+        prepareNetworkException();
+        prepareNetworkException();
+        prepareSuccess([message]);
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        check(model).fetched.isFalse();
+        check(async.pendingTimers).single; // the backoff
+
+        // Wait out the first and second backoffs, at most 100ms and 200ms.
+        async.elapse(const Duration(milliseconds: 300));
+        check(connection.takeRequests()).length.equals(2);
+        checkNotifiedOnce();
+        check(model)
+          ..fetched.isTrue()
+          ..messages.single.id.equals(message.id);
+        await fetchFuture;
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      void checkRetry(void Function() prepareError) {
+        awaitFakeAsync((async) async {
+          await prepare();
+          prepareError();
+          final fetchFuture = model.fetchInitial();
+          async.flushMicrotasks();
+          check(connection.takeRequests()).single;
+          checkNotNotified();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        });
+      }
+
+      test('retry on NetworkException from failed connection', () {
+        checkRetry(prepareNetworkException);
+      });
+
+      test('retry on NetworkException with NetworkExceptionKind.other', () {
+        checkRetry(() => connection.prepare(
+          httpException: const HandshakeException('handshake failed')));
+      });
+
+      test('retry on Server5xxException', () {
+        checkRetry(() => connection.prepare(httpStatus: 500, body: 'splat'));
+      });
+
+      test('retry on MalformedServerResponseException', () {
+        // As from a captive portal, serving its own page in place of ours.
+        checkRetry(() => connection.prepare(httpStatus: 200,
+          body: '<html><body>Please log in to this network.</body></html>'));
+      });
+
+      test('retry on rate limit: code RATE_LIMIT_HIT', () {
+        checkRetry(() => connection.prepare(httpStatus: 400, json: {
+          'result': 'error', 'code': 'RATE_LIMIT_HIT',
+          'msg': 'API usage exceeded rate limit',
+          'retry-after': 28.706807374954224}));
+      });
+
+      test('retry on rate limit: status 429 ZulipApiException', () {
+        checkRetry(() => connection.prepare(httpStatus: 429, json: {
+          'result': 'error', 'code': 'BAD_REQUEST', 'msg': 'Bad request'}));
+      });
+
+      test('no retry on generic ZulipApiException', () => awaitFakeAsync((async) async {
+        await prepare();
+        connection.prepare(apiException: eg.apiBadRequest());
+        await check(model.fetchInitial()).throws<ZulipApiException>();
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        check(model).fetched.isFalse();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('no retry when a test forgot to prepare a response', () => awaitFakeAsync((async) async {
+        await prepare();
+        await check(model.fetchInitial()).throws<AssertionError>();
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('disposed during request: request aborted', () => awaitFakeAsync((async) async {
+        await prepare();
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [eg.streamMessage()]).toJson(),
+          delay: const Duration(seconds: 60));
+        bool done = false;
+        unawaited(model.fetchInitial().whenComplete(() => done = true));
+        async.flushMicrotasks();
+        check(connection.takeRequests()).single;
+
+        model.dispose();
+        async.flushMicrotasks();
+        check(done).isTrue();
+        check(connection.takeRequests()).isEmpty();
+      }));
+
+      test('disposed during backoff: no retry, no timer left', () => awaitFakeAsync((async) async {
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        model.dispose();
+        async.flushMicrotasks();
+        check(async.pendingTimers).isEmpty();
+        await fetchFuture;
+        check(connection.takeRequests()).isEmpty();
+      }));
+
+      test('store disposed during backoff: no retry', () => awaitFakeAsync((async) async {
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        store.dispose();
+        async.elapse(const Duration(seconds: 1));
+        await fetchFuture;
+        check(connection.takeRequests()).isEmpty();
+        check(notifiedCount).equals(0);
+      }));
+
+      test('renarrowAndFetch during backoff: old loop stops', () => awaitFakeAsync((async) async {
+        final channel = eg.stream();
+        await prepare(stream: channel);
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        final message = eg.streamMessage(stream: channel);
+        prepareSuccess([message]);
+        model.renarrowAndFetch(ChannelNarrow(channel.streamId), AnchorCode.newest);
+        checkNotifiedOnce();
+        async.elapse(Duration.zero);
+        await fetchFuture;
+        check(connection.takeRequests()).single;
+        checkNotifiedOnce();
+        check(model)
+          ..narrow.equals(ChannelNarrow(channel.streamId))
+          ..messages.single.id.equals(message.id);
+
+        // The old loop's backoff was cut short, and it made no request.
+        check(async.pendingTimers).isEmpty();
+        async.elapse(const Duration(seconds: 10));
+        check(connection.takeRequests()).isEmpty();
+      }));
+    });
   });
 
   group('renarrowAndFetch', () {
@@ -2904,7 +3078,7 @@ void main() {
         checkNotifiedOnce();
       }));
 
-      test('fetchInitial, _reset, initial fetch finishes, move fetch finishes', () => awaitFakeAsync((async) async {
+      test('fetchInitial, _reset, initial fetch aborted, move fetch finishes', () => awaitFakeAsync((async) async {
         await prepareNarrow(narrow, null);
 
         connection.prepare(delay: const Duration(seconds: 1), json: newestResult(
@@ -2928,7 +3102,14 @@ void main() {
         check(model).fetched.isFalse();
         checkNotifiedOnce();
 
+        // The _reset aborted the initial fetch's request.
         await fetchFuture;
+        check(async.elapsed).equals(Duration.zero);
+        checkHasMessages([]);
+        check(model).fetched.isFalse();
+        checkNotNotified();
+
+        async.elapse(const Duration(seconds: 1));
         checkHasMessages([]);
         check(model).fetched.isFalse();
         checkNotNotified();
