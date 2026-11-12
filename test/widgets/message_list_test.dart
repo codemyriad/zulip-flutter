@@ -1096,6 +1096,36 @@ void main() {
       check(find.byType(BottomSheet)).findsOne();
     });
 
+    testWidgets('topic action sheet from app bar: resolve via a message the store has', (tester) async {
+      final narrow = eg.topicNarrow(channel.streamId, 'topic');
+      final storeMessage = eg.streamMessage(stream: channel, topic: 'topic');
+      final cacheOnlyMessage = eg.streamMessage(stream: channel, topic: 'topic');
+      await setupRetrying(tester, narrow: narrow, storeMessages: [storeMessage],
+        cachedMessages: [storeMessage, cacheOnlyMessage]);
+
+      await tester.longPress(find.descendant(of: find.byType(ZulipAppBar),
+        matching: find.textContaining('topic', findRichText: true)));
+      await tester.pump(const Duration(milliseconds: 250)); // bottom-sheet animation
+      connection.prepare(json: {});
+      await tester.tap(find.text('Mark as resolved'));
+      await tester.pump(); // [MenuItemButton.onPressed] called in a post-frame callback: flutter/flutter@e4a39fa2e
+      check(connection.takeRequests()).single.isA<http.Request>()
+        ..method.equals('PATCH')
+        ..url.path.equals('/api/v1/messages/${storeMessage.id}');
+      await tester.pump(Duration.zero);
+    });
+
+    testWidgets('topic action sheet from recipient header: no resolve via a cache-only message', (tester) async {
+      final cacheOnlyMessage = eg.streamMessage(stream: channel, topic: 'topic');
+      await setupRetrying(tester, cachedMessages: [cacheOnlyMessage]);
+
+      await tester.longPress(find.descendant(of: find.byType(RecipientHeader),
+        matching: find.textContaining('topic', findRichText: true)));
+      await tester.pump(const Duration(milliseconds: 250)); // bottom-sheet animation
+      check(find.byType(BottomSheet)).findsOne();
+      check(find.text('Mark as resolved')).findsNothing();
+    });
+
     testWidgets('autofocus compose box if fresh fetch finds no messages', (tester) async {
       final narrow = DmNarrow.withUser(eg.otherUser.userId,
         selfUserId: eg.selfUser.userId);

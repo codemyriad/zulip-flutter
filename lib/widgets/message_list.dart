@@ -689,8 +689,12 @@ class MessageListAppBarTitle extends StatelessWidget {
             GestureDetector(
               behavior: HitTestBehavior.translucent,
               onLongPress: () {
-                final someMessage = MessageListPage.ancestorOf(context)
-                  .model?.messages.lastOrNull;
+                final model = MessageListPage.ancestorOf(context).model;
+                // Skip messages known only from a cached fetch
+                // (see [MessageListView.showingCachedMessages]):
+                // they may have moved since, to a topic we'd then act on.
+                final someMessage = model?.messages.lastWhereOrNull(
+                  (message) => model.store.messages[message.id] != null);
                 // If someMessage is null, the topic action sheet won't have a
                 // resolve/unresolve button. That seems OK; in that case we're
                 // either still fetching messages (and the user can reopen the
@@ -2026,7 +2030,9 @@ class StreamMessageRecipientHeader extends StatelessWidget {
       onLongPress: () => showTopicActionSheet(context,
         channelId: streamId,
         topic: topic,
-        someMessageIdInTopic: message.id),
+        // A message known only from a cached fetch may have moved since.
+        someMessageIdInTopic:
+          store.messages[message.id] != null ? message.id : null),
       child: ColoredBox(
         color: backgroundColor,
         child: Row(
