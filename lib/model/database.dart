@@ -213,7 +213,8 @@ class PushKeys extends Table {
 /// without waiting for the network (#477).
 ///
 /// Each account has at most one row here.
-/// The events received since the snapshot are in [ServerEventBatches].
+/// The snapshot's data is in [ServerSnapshotBlobs],
+/// and the events received since the snapshot are in [ServerEventBatches].
 class ServerSnapshots extends Table {
   Column<int> get accountId => integer()
     .references(Accounts, #id, onDelete: .cascade)();
@@ -237,9 +238,23 @@ class ServerSnapshots extends Table {
   /// When the snapshot was registered, in seconds since the Unix epoch.
   Column<int> get timestamp => integer()();
 
+  @override
+  Set<Column<Object>> get primaryKey => {accountId};
+}
+
+/// The table of [ServerSnapshotBlob] records,
+/// each the data of the account's [ServerSnapshot].
+///
+/// This is a separate table from [ServerSnapshots]
+/// because [ServerSnapshot.lastEventId] gets updated
+/// for each batch of events received,
+/// and SQLite rewrites the whole row to update any of its columns.
+/// The data is large (often megabytes), and doesn't change.
+class ServerSnapshotBlobs extends Table {
+  Column<int> get accountId => integer()
+    .references(Accounts, #id, onDelete: .cascade)();
+
   /// The body of the server's response to [registerQueue], as UTF-8 JSON.
-  // Keep this column last, so the other columns can be read
-  // without reading the possibly large data.
   Column<Uint8List> get data => blob()();
 
   @override
@@ -265,7 +280,8 @@ class ServerEventBatches extends Table {
   Column<int> get lastEventId => integer()();
 
   /// The events, as a UTF-8 JSON array of the events' JSON objects.
-  // Keep this column last; see [ServerSnapshots.data].
+  // Keep this column last, so the other columns can be read
+  // without reading the possibly large data.
   Column<Uint8List> get data => blob()();
 }
 
@@ -278,7 +294,7 @@ class UriConverter extends TypeConverter<Uri, String> {
 const _allTables = [
   GlobalSettings, BoolGlobalSettings, IntGlobalSettings,
   Accounts, PushKeys,
-  ServerSnapshots, ServerEventBatches,
+  ServerSnapshots, ServerSnapshotBlobs, ServerEventBatches,
 ];
 
 /// Configure a newly opened connection to the app's database file.
@@ -418,6 +434,7 @@ class AppDatabase extends _$AppDatabase {
     },
     from16To17: (m, schema) async {
       await m.createTable(schema.serverSnapshots);
+      await m.createTable(schema.serverSnapshotBlobs);
       await m.createTable(schema.serverEventBatches);
       await m.createIndex(schema.idxServerEventBatchesAccountId);
     },
@@ -519,11 +536,13 @@ class AppDatabase extends _$AppDatabase {
     }
   }
 
-  /// Store [snapshot] as its account's [ServerSnapshot],
+  /// Store [snapshot] as its account's [ServerSnapshot], with [data],
   /// replacing any previous one and deleting its [ServerEventBatch]es.
   ///
   /// Returns false, storing nothing, if the account doesn't exist.
-  Future<bool> storeServerSnapshot(ServerSnapshot snapshot) {
+  Future<bool> storeServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  }) {
     return transaction(() async {
       final accountRow = await (selectOnly(accounts)
         ..addColumns([accounts.id])
@@ -535,6 +554,8 @@ class AppDatabase extends _$AppDatabase {
         ..where((b) => b.accountId.equals(snapshot.accountId))
       ).go();
       await into(serverSnapshots).insertOnConflictUpdate(snapshot);
+      await into(serverSnapshotBlobs).insertOnConflictUpdate(
+        ServerSnapshotBlob(accountId: snapshot.accountId, data: data));
       return true;
     });
   }
@@ -574,37 +595,38 @@ class AppDatabase extends _$AppDatabase {
   /// Returns null if there is no [ServerSnapshot] for the account.
   Future<ServerSnapshotInfo?> loadServerSnapshotInfo(int accountId) {
     return transaction(() async {
-      final snapshotSize = serverSnapshots.data.length;
-      final snapshotRow = await (selectOnly(serverSnapshots)
-        ..addColumns([
-          serverSnapshots.queueId, serverSnapshots.lastEventId,
-          serverSnapshots.appVersion, serverSnapshots.timestamp,
-          snapshotSize,
-        ])
-        ..where(serverSnapshots.accountId.equals(accountId))
+      final snapshot = await (select(serverSnapshots)
+        ..where((s) => s.accountId.equals(accountId))
       ).getSingleOrNull();
-      if (snapshotRow == null) return null;
-      final queueId = snapshotRow.read(serverSnapshots.queueId)!;
+      if (snapshot == null) return null;
+
+      final snapshotSize = serverSnapshotBlobs.data.length;
+      final snapshotBlobRow = await (selectOnly(serverSnapshotBlobs)
+        ..addColumns([snapshotSize])
+        ..where(serverSnapshotBlobs.accountId.equals(accountId))
+      ).getSingleOrNull();
+      if (snapshotBlobRow == null) return null;
 
       final eventBatchesSize = serverEventBatches.data.length.sum();
       final eventBatchesRow = await (selectOnly(serverEventBatches)
         ..addColumns([eventBatchesSize])
         ..where(serverEventBatches.accountId.equals(accountId)
-          & serverEventBatches.queueId.equals(queueId))
+          & serverEventBatches.queueId.equals(snapshot.queueId))
       ).getSingle();
 
       return (
-        queueId: queueId,
-        lastEventId: snapshotRow.read(serverSnapshots.lastEventId)!,
-        appVersion: snapshotRow.read(serverSnapshots.appVersion)!,
-        timestamp: snapshotRow.read(serverSnapshots.timestamp)!,
-        snapshotSize: snapshotRow.read(snapshotSize)!,
+        queueId: snapshot.queueId,
+        lastEventId: snapshot.lastEventId,
+        appVersion: snapshot.appVersion,
+        timestamp: snapshot.timestamp,
+        snapshotSize: snapshotBlobRow.read(snapshotSize)!,
         eventBatchesSize: eventBatchesRow.read(eventBatchesSize) ?? 0,
       );
     });
   }
 
-  /// Get the account's [ServerSnapshot] and its event batches, in order.
+  /// Get the account's [ServerSnapshot], its data,
+  /// and its event batches, in order.
   ///
   /// If [includeEventBatches] is false,
   /// the result's `eventBatches` is empty, and the batches aren't read.
@@ -618,8 +640,13 @@ class AppDatabase extends _$AppDatabase {
         ..where((s) => s.accountId.equals(accountId))
       ).getSingleOrNull();
       if (snapshot == null) return null;
+      final snapshotBlob = await (select(serverSnapshotBlobs)
+        ..where((s) => s.accountId.equals(accountId))
+      ).getSingleOrNull();
+      if (snapshotBlob == null) return null;
       if (!includeEventBatches) {
-        return (snapshot: snapshot, eventBatches: <ServerEventBatch>[]);
+        return (snapshot: snapshot, snapshotData: snapshotBlob.data,
+          eventBatches: <ServerEventBatch>[]);
       }
 
       final eventBatches = await (select(serverEventBatches)
@@ -627,15 +654,20 @@ class AppDatabase extends _$AppDatabase {
           & b.queueId.equals(snapshot.queueId))
         ..orderBy([(b) => OrderingTerm.asc(b.id)])
       ).get();
-      return (snapshot: snapshot, eventBatches: eventBatches);
+      return (snapshot: snapshot, snapshotData: snapshotBlob.data,
+        eventBatches: eventBatches);
     });
   }
 
-  /// Delete the account's [ServerSnapshot] and [ServerEventBatch]es, if any.
+  /// Delete the account's [ServerSnapshot], its data,
+  /// and its [ServerEventBatch]es, if any.
   Future<void> clearServerData(int accountId) {
     return transaction(() async {
       await (delete(serverEventBatches)
         ..where((b) => b.accountId.equals(accountId))
+      ).go();
+      await (delete(serverSnapshotBlobs)
+        ..where((s) => s.accountId.equals(accountId))
       ).go();
       await (delete(serverSnapshots)
         ..where((s) => s.accountId.equals(accountId))
@@ -647,7 +679,8 @@ class AppDatabase extends _$AppDatabase {
 /// Metadata about an account's [ServerSnapshot]
 /// and the [ServerEventBatch]es on its event queue.
 ///
-/// The `snapshotSize` is the size of [ServerSnapshot.data], in bytes,
+/// The `snapshotSize` is the size of the snapshot's [ServerSnapshotBlob.data],
+/// in bytes,
 /// and `eventBatchesSize` the total size of the batches'
 /// [ServerEventBatch.data], in bytes.
 /// The other fields are as on [ServerSnapshot].
@@ -662,12 +695,13 @@ typedef ServerSnapshotInfo = ({
   int eventBatchesSize,
 });
 
-/// An account's [ServerSnapshot]
+/// An account's [ServerSnapshot], its data (see [ServerSnapshotBlob.data]),
 /// and the [ServerEventBatch]es on its event queue, in order.
 ///
 /// See [AppDatabase.loadServerData].
 typedef ServerData = ({
   ServerSnapshot snapshot,
+  Uint8List snapshotData,
   List<ServerEventBatch> eventBatches,
 });
 

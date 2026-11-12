@@ -90,12 +90,14 @@ abstract class GlobalStoreBackend {
   Future<void> doRemovePushKey(int pushKeyId);
 
   /// Store a fresh initial snapshot as the account's [ServerSnapshot],
-  /// replacing any previous server data for the account.
+  /// with [data], replacing any previous server data for the account.
   ///
   /// Returns false, storing nothing, if the account doesn't exist.
   ///
   /// See [AppDatabase.storeServerSnapshot].
-  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot);
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  });
 
   /// Record a batch of events received on the account's stored event queue.
   ///
@@ -1251,8 +1253,10 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
   }
 
   @override
-  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot) {
-    return _db.storeServerSnapshot(snapshot);
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  }) {
+    return _db.storeServerSnapshot(snapshot, data: data);
   }
 
   @override
@@ -1688,7 +1692,7 @@ class UpdateMachine {
       if (data == null) return null;
 
       final initialSnapshot = InitialSnapshot.fromJson(
-        jsonUtf8Decoder.convert(data.snapshot.data) as Map<String, dynamic>);
+        jsonUtf8Decoder.convert(data.snapshotData) as Map<String, dynamic>);
       if (initialSnapshot.queueId != data.snapshot.queueId) {
         throw _UnusableServerDataException('queue ID mismatch');
       }
@@ -2148,13 +2152,14 @@ class UpdateMachine {
       try {
         final packageInfo = await ZulipBinding.instance.packageInfo;
         if (packageInfo == null) return false;
-        return await store._globalStore._backend.doStoreServerSnapshot(ServerSnapshot(
+        final snapshot = ServerSnapshot(
           accountId: store.accountId,
           queueId: store.queueId,
           lastEventId: lastEventId,
           appVersion: _appVersion(packageInfo),
-          timestamp: timestamp,
-          data: data));
+          timestamp: timestamp);
+        return await store._globalStore._backend.doStoreServerSnapshot(snapshot,
+          data: data);
       } catch (e) {
         assert(debugLog('Error storing server snapshot: $e')); // TODO(log)
         return false;

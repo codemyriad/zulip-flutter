@@ -1489,6 +1489,7 @@ final class Schema17 extends i0.VersionedSchema {
     accounts,
     pushKeys,
     serverSnapshots,
+    serverSnapshotBlobs,
     serverEventBatches,
     idxServerEventBatchesAccountId,
   ];
@@ -1569,19 +1570,23 @@ final class Schema17 extends i0.VersionedSchema {
       withoutRowId: false,
       isStrict: false,
       tableConstraints: ['PRIMARY KEY(account_id)'],
-      columns: [
-        _column_39,
-        _column_43,
-        _column_44,
-        _column_45,
-        _column_46,
-        _column_47,
-      ],
+      columns: [_column_39, _column_43, _column_44, _column_45, _column_46],
       attachedDatabase: database,
     ),
     alias: null,
   );
-  late final Shape14 serverEventBatches = Shape14(
+  late final Shape14 serverSnapshotBlobs = Shape14(
+    source: i0.VersionedTable(
+      entityName: 'server_snapshot_blobs',
+      withoutRowId: false,
+      isStrict: false,
+      tableConstraints: ['PRIMARY KEY(account_id)'],
+      columns: [_column_39, _column_47],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape15 serverEventBatches = Shape15(
     source: i0.VersionedTable(
       entityName: 'server_event_batches',
       withoutRowId: false,
@@ -1610,8 +1615,6 @@ class Shape13 extends i0.VersionedTable {
       columnsByName['app_version']! as i1.GeneratedColumn<String>;
   i1.GeneratedColumn<int> get timestamp =>
       columnsByName['timestamp']! as i1.GeneratedColumn<int>;
-  i1.GeneratedColumn<i2.Uint8List> get data =>
-      columnsByName['data']! as i1.GeneratedColumn<i2.Uint8List>;
 }
 
 i1.GeneratedColumn<String> _column_43(String aliasedName) =>
@@ -1646,6 +1649,15 @@ i1.GeneratedColumn<int> _column_46(String aliasedName) =>
       type: i1.DriftSqlType.int,
       $customConstraints: 'NOT NULL',
     );
+
+class Shape14 extends i0.VersionedTable {
+  Shape14({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<int> get accountId =>
+      columnsByName['account_id']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<i2.Uint8List> get data =>
+      columnsByName['data']! as i1.GeneratedColumn<i2.Uint8List>;
+}
+
 i1.GeneratedColumn<i2.Uint8List> _column_47(String aliasedName) =>
     i1.GeneratedColumn<i2.Uint8List>(
       'data',
@@ -1655,8 +1667,8 @@ i1.GeneratedColumn<i2.Uint8List> _column_47(String aliasedName) =>
       $customConstraints: 'NOT NULL',
     );
 
-class Shape14 extends i0.VersionedTable {
-  Shape14({required super.source, required super.alias}) : super.aliased();
+class Shape15 extends i0.VersionedTable {
+  Shape15({required super.source, required super.alias}) : super.aliased();
   i1.GeneratedColumn<int> get id =>
       columnsByName['id']! as i1.GeneratedColumn<int>;
   i1.GeneratedColumn<int> get accountId =>

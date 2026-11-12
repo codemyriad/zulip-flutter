@@ -25,6 +25,10 @@ void main() {
       backend = globalStore.backend;
     }
 
+    Future<bool> storeSnapshot(ServerSnapshot snapshot, {String data = '{}'}) {
+      return backend.doStoreServerSnapshot(snapshot, data: utf8.encode(data));
+    }
+
     Future<bool> append(int lastEventId, String? data, {String queueId = 'queue1'}) {
       return backend.doAppendServerEvents(eg.selfAccount.id,
         queueId: queueId, lastEventId: lastEventId,
@@ -33,28 +37,30 @@ void main() {
 
     test('store snapshot replaces snapshot and its batches', () async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1', lastEventId: 10));
       await append(11, '[{"id":11}]');
 
       final newSnapshot = eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue2', lastEventId: 20);
-      check(await backend.doStoreServerSnapshot(newSnapshot)).isTrue();
+      check(await storeSnapshot(newSnapshot, data: '{"b":2}')).isTrue();
       check(backend.serverSnapshotOf(eg.selfAccount.id)).equals(newSnapshot);
+      check(backend.serverSnapshotDataOf(eg.selfAccount.id)).isNotNull()
+        .deepEquals(utf8.encode('{"b":2}'));
       check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
     });
 
     test('no store snapshot when account missing', () async {
       prepare();
       final account = eg.account(user: eg.thirdUser);
-      check(await backend.doStoreServerSnapshot(
+      check(await storeSnapshot(
         eg.serverSnapshot(account: account))).isFalse();
       check(backend.serverSnapshotOf(account.id)).isNull();
     });
 
     test('append events', () async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1', lastEventId: 10));
       check(await append(11, '[{"id":11}]')).isTrue();
       check(await append(12, null)).isTrue();
@@ -79,9 +85,9 @@ void main() {
       prepare();
       final snapshot = eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1', lastEventId: 10,
-        appVersion: '2.0.0+3', timestamp: 1771389742,
-        data: utf8.encode('{"queue_id":"queue1","last_event_id":10}'));
-      await backend.doStoreServerSnapshot(snapshot);
+        appVersion: '2.0.0+3', timestamp: 1771389742);
+      await storeSnapshot(snapshot,
+        data: '{"queue_id":"queue1","last_event_id":10}');
       await append(11, '[{"id":11}]');
       await append(12, null);
       await append(14, '[{"id":13},{"id":14}]');
@@ -93,6 +99,8 @@ void main() {
       ));
       check(await backend.doLoadServerData(eg.selfAccount.id)).isNotNull()
         ..snapshot.equals(snapshot.copyWith(lastEventId: 14))
+        ..snapshotData.deepEquals(
+            utf8.encode('{"queue_id":"queue1","last_event_id":10}'))
         ..eventBatches.deepEquals(<Condition<Object?>>[
           (it) => it.isA<ServerEventBatch>().lastEventId.equals(11),
           (it) => it.isA<ServerEventBatch>().lastEventId.equals(14),
@@ -107,22 +115,25 @@ void main() {
 
     test('clear server data', () async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount));
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.otherAccount));
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount));
+      await storeSnapshot(eg.serverSnapshot(account: eg.otherAccount));
       await backend.doClearServerData(eg.selfAccount.id);
       check(backend.serverSnapshotOf(eg.selfAccount.id)).isNull();
+      check(backend.serverSnapshotDataOf(eg.selfAccount.id)).isNull();
       check(backend.serverSnapshotOf(eg.otherAccount.id)).isNotNull();
+      check(backend.serverSnapshotDataOf(eg.otherAccount.id)).isNotNull();
     });
 
     test('remove account clears server data', () async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1'));
       await append(11, '[{"id":11}]');
       await globalStore.removeAccount(eg.selfAccount.id);
       check(backend.serverSnapshotOf(eg.selfAccount.id)).isNull();
+      check(backend.serverSnapshotDataOf(eg.selfAccount.id)).isNull();
       check(backend.serverEventBatchesOf(eg.selfAccount.id)).isEmpty();
-      check(await backend.doStoreServerSnapshot(
+      check(await storeSnapshot(
         eg.serverSnapshot(account: eg.selfAccount))).isFalse();
     });
 
@@ -130,7 +141,7 @@ void main() {
       globalStore = TestGlobalStore(accounts: []);
       backend = globalStore.backend;
       await globalStore.add(eg.selfAccount, eg.initialSnapshot());
-      check(await backend.doStoreServerSnapshot(
+      check(await storeSnapshot(
         eg.serverSnapshot(account: eg.selfAccount))).isTrue();
     });
 
@@ -138,9 +149,9 @@ void main() {
       prepare();
       final error = Exception('oops');
       backend.storeServerSnapshotError = error;
-      await check(backend.doStoreServerSnapshot(
+      await check(storeSnapshot(
         eg.serverSnapshot(account: eg.selfAccount))).throws<Exception>();
-      check(await backend.doStoreServerSnapshot(
+      check(await storeSnapshot(
         eg.serverSnapshot(account: eg.selfAccount, queueId: 'queue1'))).isTrue();
 
       backend.appendServerEventsError = error;
@@ -159,7 +170,7 @@ void main() {
 
     test('append waits for gate', () => awaitFakeAsync((async) async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1', lastEventId: 10));
       final gate = Completer<void>();
       backend.appendServerEventsGate = gate.future;
@@ -178,7 +189,7 @@ void main() {
 
     test('load waits for gate', () => awaitFakeAsync((async) async {
       prepare();
-      await backend.doStoreServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+      await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
         queueId: 'queue1', lastEventId: 10));
       final gate = Completer<void>();
       backend.loadServerDataGate = gate.future;
@@ -207,8 +218,8 @@ void main() {
         ..snapshot.which((it) => it
           ..queueId.equals('queue1')
           ..lastEventId.equals(13)
-          ..appVersion.equals('1.0.0+1')
-          ..data.deepEquals(utf8.encode(jsonEncode(snapshotJson))))
+          ..appVersion.equals('1.0.0+1'))
+        ..snapshotData.deepEquals(utf8.encode(jsonEncode(snapshotJson)))
         ..eventBatches.deepEquals(<Condition<Object?>>[
           (it) => it.isA<ServerEventBatch>()
             ..lastEventId.equals(11)
@@ -224,7 +235,7 @@ void main() {
     test('new global store with same backend', () async {
       prepare();
       final snapshot = eg.serverSnapshot(account: eg.selfAccount);
-      await backend.doStoreServerSnapshot(snapshot);
+      await storeSnapshot(snapshot);
 
       final newGlobalStore = TestGlobalStore(backend: backend,
         accounts: [eg.selfAccount, eg.otherAccount]);

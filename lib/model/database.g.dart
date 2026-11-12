@@ -2160,15 +2160,6 @@ class $ServerSnapshotsTable extends ServerSnapshots
     type: DriftSqlType.int,
     requiredDuringInsert: true,
   );
-  static const VerificationMeta _dataMeta = const VerificationMeta('data');
-  @override
-  late final GeneratedColumn<Uint8List> data = GeneratedColumn<Uint8List>(
-    'data',
-    aliasedName,
-    false,
-    type: DriftSqlType.blob,
-    requiredDuringInsert: true,
-  );
   @override
   List<GeneratedColumn> get $columns => [
     accountId,
@@ -2176,7 +2167,6 @@ class $ServerSnapshotsTable extends ServerSnapshots
     lastEventId,
     appVersion,
     timestamp,
-    data,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -2231,14 +2221,6 @@ class $ServerSnapshotsTable extends ServerSnapshots
     } else if (isInserting) {
       context.missing(_timestampMeta);
     }
-    if (data.containsKey('data')) {
-      context.handle(
-        _dataMeta,
-        this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
-      );
-    } else if (isInserting) {
-      context.missing(_dataMeta);
-    }
     return context;
   }
 
@@ -2267,10 +2249,6 @@ class $ServerSnapshotsTable extends ServerSnapshots
       timestamp: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}timestamp'],
-      )!,
-      data: attachedDatabase.typeMapping.read(
-        DriftSqlType.blob,
-        data['${effectivePrefix}data'],
       )!,
     );
   }
@@ -2302,16 +2280,12 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
 
   /// When the snapshot was registered, in seconds since the Unix epoch.
   final int timestamp;
-
-  /// The body of the server's response to [registerQueue], as UTF-8 JSON.
-  final Uint8List data;
   const ServerSnapshot({
     required this.accountId,
     required this.queueId,
     required this.lastEventId,
     required this.appVersion,
     required this.timestamp,
-    required this.data,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -2321,7 +2295,6 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
     map['last_event_id'] = Variable<int>(lastEventId);
     map['app_version'] = Variable<String>(appVersion);
     map['timestamp'] = Variable<int>(timestamp);
-    map['data'] = Variable<Uint8List>(data);
     return map;
   }
 
@@ -2332,7 +2305,6 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       lastEventId: Value(lastEventId),
       appVersion: Value(appVersion),
       timestamp: Value(timestamp),
-      data: Value(data),
     );
   }
 
@@ -2347,7 +2319,6 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       lastEventId: serializer.fromJson<int>(json['lastEventId']),
       appVersion: serializer.fromJson<String>(json['appVersion']),
       timestamp: serializer.fromJson<int>(json['timestamp']),
-      data: serializer.fromJson<Uint8List>(json['data']),
     );
   }
   @override
@@ -2359,7 +2330,6 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
       'lastEventId': serializer.toJson<int>(lastEventId),
       'appVersion': serializer.toJson<String>(appVersion),
       'timestamp': serializer.toJson<int>(timestamp),
-      'data': serializer.toJson<Uint8List>(data),
     };
   }
 
@@ -2369,14 +2339,12 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
     int? lastEventId,
     String? appVersion,
     int? timestamp,
-    Uint8List? data,
   }) => ServerSnapshot(
     accountId: accountId ?? this.accountId,
     queueId: queueId ?? this.queueId,
     lastEventId: lastEventId ?? this.lastEventId,
     appVersion: appVersion ?? this.appVersion,
     timestamp: timestamp ?? this.timestamp,
-    data: data ?? this.data,
   );
   ServerSnapshot copyWithCompanion(ServerSnapshotsCompanion data) {
     return ServerSnapshot(
@@ -2389,7 +2357,6 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           ? data.appVersion.value
           : this.appVersion,
       timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
-      data: data.data.present ? data.data.value : this.data,
     );
   }
 
@@ -2400,21 +2367,14 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp, ')
-          ..write('data: $data')
+          ..write('timestamp: $timestamp')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
-    accountId,
-    queueId,
-    lastEventId,
-    appVersion,
-    timestamp,
-    $driftBlobEquality.hash(data),
-  );
+  int get hashCode =>
+      Object.hash(accountId, queueId, lastEventId, appVersion, timestamp);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -2423,8 +2383,7 @@ class ServerSnapshot extends DataClass implements Insertable<ServerSnapshot> {
           other.queueId == this.queueId &&
           other.lastEventId == this.lastEventId &&
           other.appVersion == this.appVersion &&
-          other.timestamp == this.timestamp &&
-          $driftBlobEquality.equals(other.data, this.data));
+          other.timestamp == this.timestamp);
 }
 
 class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
@@ -2433,14 +2392,12 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
   final Value<int> lastEventId;
   final Value<String> appVersion;
   final Value<int> timestamp;
-  final Value<Uint8List> data;
   const ServerSnapshotsCompanion({
     this.accountId = const Value.absent(),
     this.queueId = const Value.absent(),
     this.lastEventId = const Value.absent(),
     this.appVersion = const Value.absent(),
     this.timestamp = const Value.absent(),
-    this.data = const Value.absent(),
   });
   ServerSnapshotsCompanion.insert({
     this.accountId = const Value.absent(),
@@ -2448,19 +2405,16 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     required int lastEventId,
     required String appVersion,
     required int timestamp,
-    required Uint8List data,
   }) : queueId = Value(queueId),
        lastEventId = Value(lastEventId),
        appVersion = Value(appVersion),
-       timestamp = Value(timestamp),
-       data = Value(data);
+       timestamp = Value(timestamp);
   static Insertable<ServerSnapshot> custom({
     Expression<int>? accountId,
     Expression<String>? queueId,
     Expression<int>? lastEventId,
     Expression<String>? appVersion,
     Expression<int>? timestamp,
-    Expression<Uint8List>? data,
   }) {
     return RawValuesInsertable({
       if (accountId != null) 'account_id': accountId,
@@ -2468,7 +2422,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
       if (lastEventId != null) 'last_event_id': lastEventId,
       if (appVersion != null) 'app_version': appVersion,
       if (timestamp != null) 'timestamp': timestamp,
-      if (data != null) 'data': data,
     });
   }
 
@@ -2478,7 +2431,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     Value<int>? lastEventId,
     Value<String>? appVersion,
     Value<int>? timestamp,
-    Value<Uint8List>? data,
   }) {
     return ServerSnapshotsCompanion(
       accountId: accountId ?? this.accountId,
@@ -2486,7 +2438,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
       lastEventId: lastEventId ?? this.lastEventId,
       appVersion: appVersion ?? this.appVersion,
       timestamp: timestamp ?? this.timestamp,
-      data: data ?? this.data,
     );
   }
 
@@ -2508,9 +2459,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
     if (timestamp.present) {
       map['timestamp'] = Variable<int>(timestamp.value);
     }
-    if (data.present) {
-      map['data'] = Variable<Uint8List>(data.value);
-    }
     return map;
   }
 
@@ -2521,7 +2469,214 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshot> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp, ')
+          ..write('timestamp: $timestamp')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $ServerSnapshotBlobsTable extends ServerSnapshotBlobs
+    with TableInfo<$ServerSnapshotBlobsTable, ServerSnapshotBlob> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ServerSnapshotBlobsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<int> accountId = GeneratedColumn<int>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES accounts (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _dataMeta = const VerificationMeta('data');
+  @override
+  late final GeneratedColumn<Uint8List> data = GeneratedColumn<Uint8List>(
+    'data',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [accountId, data];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'server_snapshot_blobs';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ServerSnapshotBlob> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    }
+    if (data.containsKey('data')) {
+      context.handle(
+        _dataMeta,
+        this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dataMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {accountId};
+  @override
+  ServerSnapshotBlob map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ServerSnapshotBlob(
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}account_id'],
+      )!,
+      data: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}data'],
+      )!,
+    );
+  }
+
+  @override
+  $ServerSnapshotBlobsTable createAlias(String alias) {
+    return $ServerSnapshotBlobsTable(attachedDatabase, alias);
+  }
+}
+
+class ServerSnapshotBlob extends DataClass
+    implements Insertable<ServerSnapshotBlob> {
+  final int accountId;
+
+  /// The body of the server's response to [registerQueue], as UTF-8 JSON.
+  final Uint8List data;
+  const ServerSnapshotBlob({required this.accountId, required this.data});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['account_id'] = Variable<int>(accountId);
+    map['data'] = Variable<Uint8List>(data);
+    return map;
+  }
+
+  ServerSnapshotBlobsCompanion toCompanion(bool nullToAbsent) {
+    return ServerSnapshotBlobsCompanion(
+      accountId: Value(accountId),
+      data: Value(data),
+    );
+  }
+
+  factory ServerSnapshotBlob.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ServerSnapshotBlob(
+      accountId: serializer.fromJson<int>(json['accountId']),
+      data: serializer.fromJson<Uint8List>(json['data']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'accountId': serializer.toJson<int>(accountId),
+      'data': serializer.toJson<Uint8List>(data),
+    };
+  }
+
+  ServerSnapshotBlob copyWith({int? accountId, Uint8List? data}) =>
+      ServerSnapshotBlob(
+        accountId: accountId ?? this.accountId,
+        data: data ?? this.data,
+      );
+  ServerSnapshotBlob copyWithCompanion(ServerSnapshotBlobsCompanion data) {
+    return ServerSnapshotBlob(
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      data: data.data.present ? data.data.value : this.data,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshotBlob(')
+          ..write('accountId: $accountId, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(accountId, $driftBlobEquality.hash(data));
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ServerSnapshotBlob &&
+          other.accountId == this.accountId &&
+          $driftBlobEquality.equals(other.data, this.data));
+}
+
+class ServerSnapshotBlobsCompanion extends UpdateCompanion<ServerSnapshotBlob> {
+  final Value<int> accountId;
+  final Value<Uint8List> data;
+  const ServerSnapshotBlobsCompanion({
+    this.accountId = const Value.absent(),
+    this.data = const Value.absent(),
+  });
+  ServerSnapshotBlobsCompanion.insert({
+    this.accountId = const Value.absent(),
+    required Uint8List data,
+  }) : data = Value(data);
+  static Insertable<ServerSnapshotBlob> custom({
+    Expression<int>? accountId,
+    Expression<Uint8List>? data,
+  }) {
+    return RawValuesInsertable({
+      if (accountId != null) 'account_id': accountId,
+      if (data != null) 'data': data,
+    });
+  }
+
+  ServerSnapshotBlobsCompanion copyWith({
+    Value<int>? accountId,
+    Value<Uint8List>? data,
+  }) {
+    return ServerSnapshotBlobsCompanion(
+      accountId: accountId ?? this.accountId,
+      data: data ?? this.data,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (accountId.present) {
+      map['account_id'] = Variable<int>(accountId.value);
+    }
+    if (data.present) {
+      map['data'] = Variable<Uint8List>(data.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshotBlobsCompanion(')
+          ..write('accountId: $accountId, ')
           ..write('data: $data')
           ..write(')'))
         .toString();
@@ -2913,6 +3068,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $ServerSnapshotsTable serverSnapshots = $ServerSnapshotsTable(
     this,
   );
+  late final $ServerSnapshotBlobsTable serverSnapshotBlobs =
+      $ServerSnapshotBlobsTable(this);
   late final $ServerEventBatchesTable serverEventBatches =
       $ServerEventBatchesTable(this);
   late final Index idxServerEventBatchesAccountId = Index(
@@ -2930,6 +3087,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     accounts,
     pushKeys,
     serverSnapshots,
+    serverSnapshotBlobs,
     serverEventBatches,
     idxServerEventBatchesAccountId,
   ];
@@ -2948,6 +3106,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('server_snapshots', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'accounts',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('server_snapshot_blobs', kind: UpdateKind.delete)],
     ),
     WritePropagation(
       on: TableUpdateQuery.onTableName(
@@ -3620,6 +3785,30 @@ final class $$AccountsTableReferences
     );
   }
 
+  static MultiTypedResultKey<
+    $ServerSnapshotBlobsTable,
+    List<ServerSnapshotBlob>
+  >
+  _serverSnapshotBlobsRefsTable(_$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(
+        db.serverSnapshotBlobs,
+        aliasName: 'accounts__id__server_snapshot_blobs__account_id',
+      );
+
+  $$ServerSnapshotBlobsTableProcessedTableManager get serverSnapshotBlobsRefs {
+    final manager = $$ServerSnapshotBlobsTableTableManager(
+      $_db,
+      $_db.serverSnapshotBlobs,
+    ).filter((f) => f.accountId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(
+      _serverSnapshotBlobsRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+
   static MultiTypedResultKey<$ServerEventBatchesTable, List<ServerEventBatch>>
   _serverEventBatchesRefsTable(_$AppDatabase db) =>
       MultiTypedResultKey.fromTable(
@@ -3754,6 +3943,31 @@ class $$AccountsTableFilterComposer
           }) => $$ServerSnapshotsTableFilterComposer(
             $db: $db,
             $table: $db.serverSnapshots,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> serverSnapshotBlobsRefs(
+    Expression<bool> Function($$ServerSnapshotBlobsTableFilterComposer f) f,
+  ) {
+    final $$ServerSnapshotBlobsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.serverSnapshotBlobs,
+      getReferencedColumn: (t) => t.accountId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$ServerSnapshotBlobsTableFilterComposer(
+            $db: $db,
+            $table: $db.serverSnapshotBlobs,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -3962,6 +4176,32 @@ class $$AccountsTableAnnotationComposer
     return f(composer);
   }
 
+  Expression<T> serverSnapshotBlobsRefs<T extends Object>(
+    Expression<T> Function($$ServerSnapshotBlobsTableAnnotationComposer a) f,
+  ) {
+    final $$ServerSnapshotBlobsTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.id,
+          referencedTable: $db.serverSnapshotBlobs,
+          getReferencedColumn: (t) => t.accountId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$ServerSnapshotBlobsTableAnnotationComposer(
+                $db: $db,
+                $table: $db.serverSnapshotBlobs,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
+
   Expression<T> serverEventBatchesRefs<T extends Object>(
     Expression<T> Function($$ServerEventBatchesTableAnnotationComposer a) f,
   ) {
@@ -4005,6 +4245,7 @@ class $$AccountsTableTableManager
           PrefetchHooks Function({
             bool pushKeysRefs,
             bool serverSnapshotsRefs,
+            bool serverSnapshotBlobsRefs,
             bool serverEventBatchesRefs,
           })
         > {
@@ -4087,6 +4328,7 @@ class $$AccountsTableTableManager
               ({
                 pushKeysRefs = false,
                 serverSnapshotsRefs = false,
+                serverSnapshotBlobsRefs = false,
                 serverEventBatchesRefs = false,
               }) {
                 return PrefetchHooks(
@@ -4094,6 +4336,7 @@ class $$AccountsTableTableManager
                   explicitlyWatchedTables: [
                     if (pushKeysRefs) db.pushKeys,
                     if (serverSnapshotsRefs) db.serverSnapshots,
+                    if (serverSnapshotBlobsRefs) db.serverSnapshotBlobs,
                     if (serverEventBatchesRefs) db.serverEventBatches,
                   ],
                   addJoins: null,
@@ -4135,6 +4378,27 @@ class $$AccountsTableTableManager
                                 table,
                                 p0,
                               ).serverSnapshotsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.accountId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
+                      if (serverSnapshotBlobsRefs)
+                        await $_getPrefetchedData<
+                          Account,
+                          $AccountsTable,
+                          ServerSnapshotBlob
+                        >(
+                          currentTable: table,
+                          referencedTable: $$AccountsTableReferences
+                              ._serverSnapshotBlobsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$AccountsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).serverSnapshotBlobsRefs,
                           referencedItemsForCurrentItem:
                               (item, referencedItems) => referencedItems.where(
                                 (e) => e.accountId == item.id,
@@ -4185,6 +4449,7 @@ typedef $$AccountsTableProcessedTableManager =
       PrefetchHooks Function({
         bool pushKeysRefs,
         bool serverSnapshotsRefs,
+        bool serverSnapshotBlobsRefs,
         bool serverEventBatchesRefs,
       })
     >;
@@ -4512,7 +4777,6 @@ typedef $$ServerSnapshotsTableCreateCompanionBuilder =
       required int lastEventId,
       required String appVersion,
       required int timestamp,
-      required Uint8List data,
     });
 typedef $$ServerSnapshotsTableUpdateCompanionBuilder =
     ServerSnapshotsCompanion Function({
@@ -4521,7 +4785,6 @@ typedef $$ServerSnapshotsTableUpdateCompanionBuilder =
       Value<int> lastEventId,
       Value<String> appVersion,
       Value<int> timestamp,
-      Value<Uint8List> data,
     });
 
 final class $$ServerSnapshotsTableReferences
@@ -4580,11 +4843,6 @@ class $$ServerSnapshotsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
-  ColumnFilters<Uint8List> get data => $composableBuilder(
-    column: $table.data,
-    builder: (column) => ColumnFilters(column),
-  );
-
   $$AccountsTableFilterComposer get accountId {
     final $$AccountsTableFilterComposer composer = $composerBuilder(
       composer: this,
@@ -4638,11 +4896,6 @@ class $$ServerSnapshotsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<Uint8List> get data => $composableBuilder(
-    column: $table.data,
-    builder: (column) => ColumnOrderings(column),
-  );
-
   $$AccountsTableOrderingComposer get accountId {
     final $$AccountsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -4691,9 +4944,6 @@ class $$ServerSnapshotsTableAnnotationComposer
 
   GeneratedColumn<int> get timestamp =>
       $composableBuilder(column: $table.timestamp, builder: (column) => column);
-
-  GeneratedColumn<Uint8List> get data =>
-      $composableBuilder(column: $table.data, builder: (column) => column);
 
   $$AccountsTableAnnotationComposer get accountId {
     final $$AccountsTableAnnotationComposer composer = $composerBuilder(
@@ -4754,14 +5004,12 @@ class $$ServerSnapshotsTableTableManager
                 Value<int> lastEventId = const Value.absent(),
                 Value<String> appVersion = const Value.absent(),
                 Value<int> timestamp = const Value.absent(),
-                Value<Uint8List> data = const Value.absent(),
               }) => ServerSnapshotsCompanion(
                 accountId: accountId,
                 queueId: queueId,
                 lastEventId: lastEventId,
                 appVersion: appVersion,
                 timestamp: timestamp,
-                data: data,
               ),
           createCompanionCallback:
               ({
@@ -4770,14 +5018,12 @@ class $$ServerSnapshotsTableTableManager
                 required int lastEventId,
                 required String appVersion,
                 required int timestamp,
-                required Uint8List data,
               }) => ServerSnapshotsCompanion.insert(
                 accountId: accountId,
                 queueId: queueId,
                 lastEventId: lastEventId,
                 appVersion: appVersion,
                 timestamp: timestamp,
-                data: data,
               ),
           withReferenceMapper: (p0) => p0
               .map(
@@ -4842,6 +5088,273 @@ typedef $$ServerSnapshotsTableProcessedTableManager =
       $$ServerSnapshotsTableUpdateCompanionBuilder,
       (ServerSnapshot, $$ServerSnapshotsTableReferences),
       ServerSnapshot,
+      PrefetchHooks Function({bool accountId})
+    >;
+typedef $$ServerSnapshotBlobsTableCreateCompanionBuilder =
+    ServerSnapshotBlobsCompanion Function({
+      Value<int> accountId,
+      required Uint8List data,
+    });
+typedef $$ServerSnapshotBlobsTableUpdateCompanionBuilder =
+    ServerSnapshotBlobsCompanion Function({
+      Value<int> accountId,
+      Value<Uint8List> data,
+    });
+
+final class $$ServerSnapshotBlobsTableReferences
+    extends
+        BaseReferences<
+          _$AppDatabase,
+          $ServerSnapshotBlobsTable,
+          ServerSnapshotBlob
+        > {
+  $$ServerSnapshotBlobsTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $AccountsTable _accountIdTable(_$AppDatabase db) => db.accounts
+      .createAlias('server_snapshot_blobs__account_id__accounts__id');
+
+  $$AccountsTableProcessedTableManager get accountId {
+    final $_column = $_itemColumn<int>('account_id')!;
+
+    final manager = $$AccountsTableTableManager(
+      $_db,
+      $_db.accounts,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_accountIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$ServerSnapshotBlobsTableFilterComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotBlobsTable> {
+  $$ServerSnapshotBlobsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$AccountsTableFilterComposer get accountId {
+    final $$AccountsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableFilterComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotBlobsTableOrderingComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotBlobsTable> {
+  $$ServerSnapshotBlobsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<Uint8List> get data => $composableBuilder(
+    column: $table.data,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$AccountsTableOrderingComposer get accountId {
+    final $$AccountsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableOrderingComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotBlobsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ServerSnapshotBlobsTable> {
+  $$ServerSnapshotBlobsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<Uint8List> get data =>
+      $composableBuilder(column: $table.data, builder: (column) => column);
+
+  $$AccountsTableAnnotationComposer get accountId {
+    final $$AccountsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.accountId,
+      referencedTable: $db.accounts,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$AccountsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.accounts,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$ServerSnapshotBlobsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ServerSnapshotBlobsTable,
+          ServerSnapshotBlob,
+          $$ServerSnapshotBlobsTableFilterComposer,
+          $$ServerSnapshotBlobsTableOrderingComposer,
+          $$ServerSnapshotBlobsTableAnnotationComposer,
+          $$ServerSnapshotBlobsTableCreateCompanionBuilder,
+          $$ServerSnapshotBlobsTableUpdateCompanionBuilder,
+          (ServerSnapshotBlob, $$ServerSnapshotBlobsTableReferences),
+          ServerSnapshotBlob,
+          PrefetchHooks Function({bool accountId})
+        > {
+  $$ServerSnapshotBlobsTableTableManager(
+    _$AppDatabase db,
+    $ServerSnapshotBlobsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ServerSnapshotBlobsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ServerSnapshotBlobsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$ServerSnapshotBlobsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback: ({
+            Value<int> accountId = const Value.absent(),
+            Value<Uint8List> data = const Value.absent(),
+          }) => ServerSnapshotBlobsCompanion(accountId: accountId, data: data),
+          createCompanionCallback:
+              ({
+                Value<int> accountId = const Value.absent(),
+                required Uint8List data,
+              }) => ServerSnapshotBlobsCompanion.insert(
+                accountId: accountId,
+                data: data,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$ServerSnapshotBlobsTable, ServerSnapshotBlob>(
+                    table,
+                  ),
+                  $$ServerSnapshotBlobsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({accountId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (accountId) {
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.accountId,
+                        referencedTable: $$ServerSnapshotBlobsTableReferences
+                            ._accountIdTable(db),
+                        referencedColumn: $$ServerSnapshotBlobsTableReferences
+                            ._accountIdTable(db)
+                            .id,
+                      ) as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$ServerSnapshotBlobsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ServerSnapshotBlobsTable,
+      ServerSnapshotBlob,
+      $$ServerSnapshotBlobsTableFilterComposer,
+      $$ServerSnapshotBlobsTableOrderingComposer,
+      $$ServerSnapshotBlobsTableAnnotationComposer,
+      $$ServerSnapshotBlobsTableCreateCompanionBuilder,
+      $$ServerSnapshotBlobsTableUpdateCompanionBuilder,
+      (ServerSnapshotBlob, $$ServerSnapshotBlobsTableReferences),
+      ServerSnapshotBlob,
       PrefetchHooks Function({bool accountId})
     >;
 typedef $$ServerEventBatchesTableCreateCompanionBuilder =
@@ -5187,6 +5700,8 @@ class $AppDatabaseManager {
       $$PushKeysTableTableManager(_db, _db.pushKeys);
   $$ServerSnapshotsTableTableManager get serverSnapshots =>
       $$ServerSnapshotsTableTableManager(_db, _db.serverSnapshots);
+  $$ServerSnapshotBlobsTableTableManager get serverSnapshotBlobs =>
+      $$ServerSnapshotBlobsTableTableManager(_db, _db.serverSnapshotBlobs);
   $$ServerEventBatchesTableTableManager get serverEventBatches =>
       $$ServerEventBatchesTableTableManager(_db, _db.serverEventBatches);
 }

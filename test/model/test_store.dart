@@ -124,6 +124,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
 
   final Set<int> _accountIds = {};
   final Map<int, ServerSnapshot> _serverSnapshots = {};
+  final Map<int, Uint8List> _serverSnapshotData = {};
   final Map<int, List<ServerEventBatch>> _serverEventBatches = {};
   int _nextServerEventBatchId = 1;
 
@@ -134,11 +135,15 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   void _removeAccount(int accountId) {
     _accountIds.remove(accountId);
     _serverSnapshots.remove(accountId);
+    _serverSnapshotData.remove(accountId);
     _serverEventBatches.remove(accountId);
   }
 
   /// The account's stored [ServerSnapshot], if any.
   ServerSnapshot? serverSnapshotOf(int accountId) => _serverSnapshots[accountId];
+
+  /// The data of the account's stored [ServerSnapshot], if any.
+  Uint8List? serverSnapshotDataOf(int accountId) => _serverSnapshotData[accountId];
 
   /// The account's stored [ServerEventBatch]es, in order.
   List<ServerEventBatch> serverEventBatchesOf(int accountId) =>
@@ -182,8 +187,8 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
       appVersion: appVersion
         ?? '${packageInfo.version}+${packageInfo.buildNumber}',
       timestamp: timestamp
-        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000,
-      data: utf8.encode(jsonEncode(snapshotJson)));
+        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000);
+    _serverSnapshotData[accountId] = utf8.encode(jsonEncode(snapshotJson));
     _serverEventBatches[accountId] = batches;
   }
 
@@ -210,7 +215,9 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   Future<void>? loadServerDataGate;
 
   @override
-  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot) async {
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  }) async {
     if (storeServerSnapshotError case final error?) {
       storeServerSnapshotError = null;
       throw error;
@@ -218,6 +225,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     if (!_accountIds.contains(snapshot.accountId)) return false;
     _serverEventBatches.remove(snapshot.accountId);
     _serverSnapshots[snapshot.accountId] = snapshot;
+    _serverSnapshotData[snapshot.accountId] = data;
     return true;
   }
 
@@ -266,7 +274,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
       lastEventId: snapshot.lastEventId,
       appVersion: snapshot.appVersion,
       timestamp: snapshot.timestamp,
-      snapshotSize: snapshot.data.length,
+      snapshotSize: _serverSnapshotData[accountId]!.length,
       eventBatchesSize: _serverEventBatchesOnQueue(snapshot)
         .fold(0, (sum, batch) => sum + batch.data.length),
     );
@@ -287,6 +295,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
     if (snapshot == null) return null;
     return (
       snapshot: snapshot,
+      snapshotData: _serverSnapshotData[accountId]!,
       eventBatches: includeEventBatches
         ? _serverEventBatchesOnQueue(snapshot).toList()
         : <ServerEventBatch>[],
@@ -296,6 +305,7 @@ class TestGlobalStoreBackend implements GlobalStoreBackend {
   @override
   Future<void> doClearServerData(int accountId) async {
     _serverSnapshots.remove(accountId);
+    _serverSnapshotData.remove(accountId);
     _serverEventBatches.remove(accountId);
   }
 }

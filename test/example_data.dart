@@ -470,28 +470,37 @@ PushKey pushKey({
   );
 }
 
-/// A [ServerSnapshot], by default of an [initialSnapshot]
-/// with the given [queueId] and [lastEventId],
-/// stored by the app version of the default [packageInfo].
+/// A [ServerSnapshot], stored by the app version of the default [packageInfo].
+///
+/// For its data, see [serverSnapshotData].
 ServerSnapshot serverSnapshot({
   required Account account,
   String? queueId,
   int? lastEventId,
   String? appVersion,
   int? timestamp,
-  Uint8List? data,
 }) {
-  queueId ??= '1:2345';
-  lastEventId ??= -1;
   return ServerSnapshot(
     accountId: account.id,
-    queueId: queueId,
-    lastEventId: lastEventId,
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
     appVersion: appVersion ?? '1.0.0+1',
     timestamp: timestamp ?? 1771389742,
-    data: data ?? utf8.encode(jsonEncode(
-      initialSnapshot(queueId: queueId, lastEventId: lastEventId).toJson())),
   );
+}
+
+const _defaultServerSnapshotQueueId = '1:2345';
+const _defaultServerSnapshotLastEventId = -1;
+
+/// Data for a [ServerSnapshot]: an [initialSnapshot], as UTF-8 JSON,
+/// with the given [queueId] and [lastEventId].
+///
+/// The defaults match those of [serverSnapshot].
+Uint8List serverSnapshotData({String? queueId, int? lastEventId}) {
+  return utf8.encode(jsonEncode(initialSnapshot(
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
+  ).toJson()));
 }
 
 int _nextSavedSnippetId() => _lastSavedSnippetId++;

@@ -1860,8 +1860,9 @@ void main() {
         ..queueId.equals('queue1')
         ..lastEventId.equals(1)
         ..appVersion.equals('2.3.4+567')
-        ..timestamp.equals(now.millisecondsSinceEpoch ~/ 1000)
-        ..data.deepEquals(utf8.encode(body));
+        ..timestamp.equals(now.millisecondsSinceEpoch ~/ 1000);
+      check(globalStore.backend.serverSnapshotDataOf(eg.selfAccount.id))
+        .isNotNull().deepEquals(utf8.encode(body));
       check(storedEventBatches()).isEmpty();
     }));
 
@@ -1872,7 +1873,8 @@ void main() {
           ..prepare(body: body.substring(0, 100),
             bodyException: http.ClientException('connection reset'))
           ..prepare(body: body));
-      check(storedSnapshot()).isNotNull().data.deepEquals(utf8.encode(body));
+      check(globalStore.backend.serverSnapshotDataOf(eg.selfAccount.id))
+        .isNotNull().deepEquals(utf8.encode(body));
     }));
 
     test('nothing stored when app version unknown', () => awaitFakeAsync((async) async {
@@ -2440,8 +2442,9 @@ void main() {
 
     test('discard undecodable data', () {
       checkDiscarded(() async {
-        await globalStore.backend.doStoreServerSnapshot(eg.serverSnapshot(
-          account: eg.selfAccount, data: utf8.encode('{"queue_id":')));
+        await globalStore.backend.doStoreServerSnapshot(
+          eg.serverSnapshot(account: eg.selfAccount),
+          data: utf8.encode('{"queue_id":'));
       });
     });
 

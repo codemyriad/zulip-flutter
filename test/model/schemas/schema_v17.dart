@@ -1715,14 +1715,6 @@ class ServerSnapshots extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
-  late final GeneratedColumn<i2.Uint8List> data = GeneratedColumn<i2.Uint8List>(
-    'data',
-    aliasedName,
-    false,
-    type: DriftSqlType.blob,
-    requiredDuringInsert: true,
-    $customConstraints: 'NOT NULL',
-  );
   @override
   List<GeneratedColumn> get $columns => [
     accountId,
@@ -1730,7 +1722,6 @@ class ServerSnapshots extends Table
     lastEventId,
     appVersion,
     timestamp,
-    data,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1763,10 +1754,6 @@ class ServerSnapshots extends Table
         DriftSqlType.int,
         data['${effectivePrefix}timestamp'],
       )!,
-      data: attachedDatabase.typeMapping.read(
-        DriftSqlType.blob,
-        data['${effectivePrefix}data'],
-      )!,
     );
   }
 
@@ -1788,14 +1775,12 @@ class ServerSnapshotsData extends DataClass
   final int lastEventId;
   final String appVersion;
   final int timestamp;
-  final i2.Uint8List data;
   const ServerSnapshotsData({
     required this.accountId,
     required this.queueId,
     required this.lastEventId,
     required this.appVersion,
     required this.timestamp,
-    required this.data,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1805,7 +1790,6 @@ class ServerSnapshotsData extends DataClass
     map['last_event_id'] = Variable<int>(lastEventId);
     map['app_version'] = Variable<String>(appVersion);
     map['timestamp'] = Variable<int>(timestamp);
-    map['data'] = Variable<i2.Uint8List>(data);
     return map;
   }
 
@@ -1816,7 +1800,6 @@ class ServerSnapshotsData extends DataClass
       lastEventId: Value(lastEventId),
       appVersion: Value(appVersion),
       timestamp: Value(timestamp),
-      data: Value(data),
     );
   }
 
@@ -1831,7 +1814,6 @@ class ServerSnapshotsData extends DataClass
       lastEventId: serializer.fromJson<int>(json['lastEventId']),
       appVersion: serializer.fromJson<String>(json['appVersion']),
       timestamp: serializer.fromJson<int>(json['timestamp']),
-      data: serializer.fromJson<i2.Uint8List>(json['data']),
     );
   }
   @override
@@ -1843,7 +1825,6 @@ class ServerSnapshotsData extends DataClass
       'lastEventId': serializer.toJson<int>(lastEventId),
       'appVersion': serializer.toJson<String>(appVersion),
       'timestamp': serializer.toJson<int>(timestamp),
-      'data': serializer.toJson<i2.Uint8List>(data),
     };
   }
 
@@ -1853,14 +1834,12 @@ class ServerSnapshotsData extends DataClass
     int? lastEventId,
     String? appVersion,
     int? timestamp,
-    i2.Uint8List? data,
   }) => ServerSnapshotsData(
     accountId: accountId ?? this.accountId,
     queueId: queueId ?? this.queueId,
     lastEventId: lastEventId ?? this.lastEventId,
     appVersion: appVersion ?? this.appVersion,
     timestamp: timestamp ?? this.timestamp,
-    data: data ?? this.data,
   );
   ServerSnapshotsData copyWithCompanion(ServerSnapshotsCompanion data) {
     return ServerSnapshotsData(
@@ -1873,7 +1852,6 @@ class ServerSnapshotsData extends DataClass
           ? data.appVersion.value
           : this.appVersion,
       timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
-      data: data.data.present ? data.data.value : this.data,
     );
   }
 
@@ -1884,21 +1862,14 @@ class ServerSnapshotsData extends DataClass
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp, ')
-          ..write('data: $data')
+          ..write('timestamp: $timestamp')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
-    accountId,
-    queueId,
-    lastEventId,
-    appVersion,
-    timestamp,
-    $driftBlobEquality.hash(data),
-  );
+  int get hashCode =>
+      Object.hash(accountId, queueId, lastEventId, appVersion, timestamp);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1907,8 +1878,7 @@ class ServerSnapshotsData extends DataClass
           other.queueId == this.queueId &&
           other.lastEventId == this.lastEventId &&
           other.appVersion == this.appVersion &&
-          other.timestamp == this.timestamp &&
-          $driftBlobEquality.equals(other.data, this.data));
+          other.timestamp == this.timestamp);
 }
 
 class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
@@ -1917,14 +1887,12 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
   final Value<int> lastEventId;
   final Value<String> appVersion;
   final Value<int> timestamp;
-  final Value<i2.Uint8List> data;
   const ServerSnapshotsCompanion({
     this.accountId = const Value.absent(),
     this.queueId = const Value.absent(),
     this.lastEventId = const Value.absent(),
     this.appVersion = const Value.absent(),
     this.timestamp = const Value.absent(),
-    this.data = const Value.absent(),
   });
   ServerSnapshotsCompanion.insert({
     this.accountId = const Value.absent(),
@@ -1932,19 +1900,16 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     required int lastEventId,
     required String appVersion,
     required int timestamp,
-    required i2.Uint8List data,
   }) : queueId = Value(queueId),
        lastEventId = Value(lastEventId),
        appVersion = Value(appVersion),
-       timestamp = Value(timestamp),
-       data = Value(data);
+       timestamp = Value(timestamp);
   static Insertable<ServerSnapshotsData> custom({
     Expression<int>? accountId,
     Expression<String>? queueId,
     Expression<int>? lastEventId,
     Expression<String>? appVersion,
     Expression<int>? timestamp,
-    Expression<i2.Uint8List>? data,
   }) {
     return RawValuesInsertable({
       if (accountId != null) 'account_id': accountId,
@@ -1952,7 +1917,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
       if (lastEventId != null) 'last_event_id': lastEventId,
       if (appVersion != null) 'app_version': appVersion,
       if (timestamp != null) 'timestamp': timestamp,
-      if (data != null) 'data': data,
     });
   }
 
@@ -1962,7 +1926,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     Value<int>? lastEventId,
     Value<String>? appVersion,
     Value<int>? timestamp,
-    Value<i2.Uint8List>? data,
   }) {
     return ServerSnapshotsCompanion(
       accountId: accountId ?? this.accountId,
@@ -1970,7 +1933,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
       lastEventId: lastEventId ?? this.lastEventId,
       appVersion: appVersion ?? this.appVersion,
       timestamp: timestamp ?? this.timestamp,
-      data: data ?? this.data,
     );
   }
 
@@ -1992,9 +1954,6 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
     if (timestamp.present) {
       map['timestamp'] = Variable<int>(timestamp.value);
     }
-    if (data.present) {
-      map['data'] = Variable<i2.Uint8List>(data.value);
-    }
     return map;
   }
 
@@ -2005,7 +1964,190 @@ class ServerSnapshotsCompanion extends UpdateCompanion<ServerSnapshotsData> {
           ..write('queueId: $queueId, ')
           ..write('lastEventId: $lastEventId, ')
           ..write('appVersion: $appVersion, ')
-          ..write('timestamp: $timestamp, ')
+          ..write('timestamp: $timestamp')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ServerSnapshotBlobs extends Table
+    with TableInfo<ServerSnapshotBlobs, ServerSnapshotBlobsData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ServerSnapshotBlobs(this.attachedDatabase, [this._alias]);
+  late final GeneratedColumn<int> accountId = GeneratedColumn<int>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL REFERENCES accounts(id)ON DELETE CASCADE',
+  );
+  late final GeneratedColumn<i2.Uint8List> data = GeneratedColumn<i2.Uint8List>(
+    'data',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [accountId, data];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'server_snapshot_blobs';
+  @override
+  Set<GeneratedColumn> get $primaryKey => {accountId};
+  @override
+  ServerSnapshotBlobsData map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ServerSnapshotBlobsData(
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}account_id'],
+      )!,
+      data: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}data'],
+      )!,
+    );
+  }
+
+  @override
+  ServerSnapshotBlobs createAlias(String alias) {
+    return ServerSnapshotBlobs(attachedDatabase, alias);
+  }
+
+  @override
+  List<String> get customConstraints => const ['PRIMARY KEY(account_id)'];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ServerSnapshotBlobsData extends DataClass
+    implements Insertable<ServerSnapshotBlobsData> {
+  final int accountId;
+  final i2.Uint8List data;
+  const ServerSnapshotBlobsData({required this.accountId, required this.data});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['account_id'] = Variable<int>(accountId);
+    map['data'] = Variable<i2.Uint8List>(data);
+    return map;
+  }
+
+  ServerSnapshotBlobsCompanion toCompanion(bool nullToAbsent) {
+    return ServerSnapshotBlobsCompanion(
+      accountId: Value(accountId),
+      data: Value(data),
+    );
+  }
+
+  factory ServerSnapshotBlobsData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ServerSnapshotBlobsData(
+      accountId: serializer.fromJson<int>(json['accountId']),
+      data: serializer.fromJson<i2.Uint8List>(json['data']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'accountId': serializer.toJson<int>(accountId),
+      'data': serializer.toJson<i2.Uint8List>(data),
+    };
+  }
+
+  ServerSnapshotBlobsData copyWith({int? accountId, i2.Uint8List? data}) =>
+      ServerSnapshotBlobsData(
+        accountId: accountId ?? this.accountId,
+        data: data ?? this.data,
+      );
+  ServerSnapshotBlobsData copyWithCompanion(ServerSnapshotBlobsCompanion data) {
+    return ServerSnapshotBlobsData(
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      data: data.data.present ? data.data.value : this.data,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshotBlobsData(')
+          ..write('accountId: $accountId, ')
+          ..write('data: $data')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(accountId, $driftBlobEquality.hash(data));
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ServerSnapshotBlobsData &&
+          other.accountId == this.accountId &&
+          $driftBlobEquality.equals(other.data, this.data));
+}
+
+class ServerSnapshotBlobsCompanion
+    extends UpdateCompanion<ServerSnapshotBlobsData> {
+  final Value<int> accountId;
+  final Value<i2.Uint8List> data;
+  const ServerSnapshotBlobsCompanion({
+    this.accountId = const Value.absent(),
+    this.data = const Value.absent(),
+  });
+  ServerSnapshotBlobsCompanion.insert({
+    this.accountId = const Value.absent(),
+    required i2.Uint8List data,
+  }) : data = Value(data);
+  static Insertable<ServerSnapshotBlobsData> custom({
+    Expression<int>? accountId,
+    Expression<i2.Uint8List>? data,
+  }) {
+    return RawValuesInsertable({
+      if (accountId != null) 'account_id': accountId,
+      if (data != null) 'data': data,
+    });
+  }
+
+  ServerSnapshotBlobsCompanion copyWith({
+    Value<int>? accountId,
+    Value<i2.Uint8List>? data,
+  }) {
+    return ServerSnapshotBlobsCompanion(
+      accountId: accountId ?? this.accountId,
+      data: data ?? this.data,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (accountId.present) {
+      map['account_id'] = Variable<int>(accountId.value);
+    }
+    if (data.present) {
+      map['data'] = Variable<i2.Uint8List>(data.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ServerSnapshotBlobsCompanion(')
+          ..write('accountId: $accountId, ')
           ..write('data: $data')
           ..write(')'))
         .toString();
@@ -2324,6 +2466,9 @@ class DatabaseAtV17 extends GeneratedDatabase {
   late final Accounts accounts = Accounts(this);
   late final PushKeys pushKeys = PushKeys(this);
   late final ServerSnapshots serverSnapshots = ServerSnapshots(this);
+  late final ServerSnapshotBlobs serverSnapshotBlobs = ServerSnapshotBlobs(
+    this,
+  );
   late final ServerEventBatches serverEventBatches = ServerEventBatches(this);
   late final Index idxServerEventBatchesAccountId = Index(
     'idx_server_event_batches_account_id',
@@ -2340,6 +2485,7 @@ class DatabaseAtV17 extends GeneratedDatabase {
     accounts,
     pushKeys,
     serverSnapshots,
+    serverSnapshotBlobs,
     serverEventBatches,
     idxServerEventBatchesAccountId,
   ];
@@ -2358,6 +2504,13 @@ class DatabaseAtV17 extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('server_snapshots', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'accounts',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('server_snapshot_blobs', kind: UpdateKind.delete)],
     ),
     WritePropagation(
       on: TableUpdateQuery.onTableName(

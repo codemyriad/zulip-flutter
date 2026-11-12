@@ -46,6 +46,10 @@ extension ServerSnapshotChecks on Subject<ServerSnapshot> {
   Subject<int> get lastEventId => has((x) => x.lastEventId, 'lastEventId');
   Subject<String> get appVersion => has((x) => x.appVersion, 'appVersion');
   Subject<int> get timestamp => has((x) => x.timestamp, 'timestamp');
+}
+
+extension ServerSnapshotBlobChecks on Subject<ServerSnapshotBlob> {
+  Subject<int> get accountId => has((x) => x.accountId, 'accountId');
   Subject<Uint8List> get data => has((x) => x.data, 'data');
 }
 
@@ -58,6 +62,7 @@ extension ServerEventBatchChecks on Subject<ServerEventBatch> {
 
 extension ServerDataChecks on Subject<ServerData> {
   Subject<ServerSnapshot> get snapshot => has((x) => x.snapshot, 'snapshot');
+  Subject<Uint8List> get snapshotData => has((x) => x.snapshotData, 'snapshotData');
   Subject<List<ServerEventBatch>> get eventBatches => has((x) => x.eventBatches, 'eventBatches');
 }
 

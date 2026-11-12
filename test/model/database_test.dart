@@ -321,6 +321,10 @@ void main() {
           data: data == null ? null : utf8.encode(data));
       }
 
+      Future<bool> storeSnapshot(ServerSnapshot snapshot, {String data = '{}'}) {
+        return db.storeServerSnapshot(snapshot, data: utf8.encode(data));
+      }
+
       Future<ServerData?> load(Account account) => db.loadServerData(account.id);
 
       Condition<Object?> isBatch(int lastEventId, String data) {
@@ -335,43 +339,47 @@ void main() {
         await prepare();
         final snapshot = eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10);
-        check(await db.storeServerSnapshot(snapshot)).isTrue();
+        check(await storeSnapshot(snapshot, data: '{"a":1}')).isTrue();
         check(await load(eg.selfAccount)).isNotNull()
           ..snapshot.equals(snapshot)
+          ..snapshotData.deepEquals(utf8.encode('{"a":1}'))
           ..eventBatches.isEmpty();
         check(await load(eg.otherAccount)).isNull();
       });
 
       test('no store snapshot when account missing', () async {
         await db.createAccount(eg.otherAccount.toCompanion(false));
-        check(await db.storeServerSnapshot(
+        check(await storeSnapshot(
           eg.serverSnapshot(account: eg.selfAccount))).isFalse();
         check(await db.select(db.serverSnapshots).get()).isEmpty();
+        check(await db.select(db.serverSnapshotBlobs).get()).isEmpty();
       });
 
       test('store snapshot replaces snapshot and its batches', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
-          queueId: 'queue1', lastEventId: 10));
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+          queueId: 'queue1', lastEventId: 10), data: '{"a":1}');
         await append(eg.selfAccount, 11, '[{"id":11}]');
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.otherAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.otherAccount,
           queueId: 'queue1', lastEventId: 10));
         await append(eg.otherAccount, 11, '[{"id":11}]');
 
         final newSnapshot = eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue2', lastEventId: 20);
-        check(await db.storeServerSnapshot(newSnapshot)).isTrue();
+        check(await storeSnapshot(newSnapshot, data: '{"b":2}')).isTrue();
         check(await load(eg.selfAccount)).isNotNull()
           ..snapshot.equals(newSnapshot)
+          ..snapshotData.deepEquals(utf8.encode('{"b":2}'))
           ..eventBatches.isEmpty();
         check(await db.select(db.serverSnapshots).get()).length.equals(2);
+        check(await db.select(db.serverSnapshotBlobs).get()).length.equals(2);
         check(await db.select(db.serverEventBatches).get())
           .single.accountId.equals(eg.otherAccount.id);
       });
 
       test('append events with data', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
         check(await append(eg.selfAccount, 12, '[{"id":11},{"id":12}]')).isTrue();
         check(await load(eg.selfAccount)).isNotNull()
@@ -381,7 +389,7 @@ void main() {
 
       test('append events without data advances lastEventId only', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
         check(await append(eg.selfAccount, 12, null)).isTrue();
         check(await load(eg.selfAccount)).isNotNull()
@@ -394,7 +402,7 @@ void main() {
         await prepare();
         final snapshot = eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10);
-        await db.storeServerSnapshot(snapshot);
+        await storeSnapshot(snapshot);
         await append(eg.selfAccount, 11, '[{"id":11}]');
 
         check(await append(eg.selfAccount, 12, '[{"id":12}]', queueId: 'queue0'))
@@ -420,9 +428,9 @@ void main() {
 
       test('load data gives event batches in order', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.otherAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.otherAccount,
           queueId: 'queue1', lastEventId: 10));
         await append(eg.selfAccount, 11, '[{"id":11}]');
         await append(eg.otherAccount, 11, '[{"id":11}]');
@@ -442,7 +450,7 @@ void main() {
         await prepare();
         final snapshot = eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10);
-        await db.storeServerSnapshot(snapshot);
+        await storeSnapshot(snapshot);
         await append(eg.selfAccount, 11, '[{"id":11}]');
         check(await db.loadServerData(eg.selfAccount.id, includeEventBatches: false))
           .isNotNull()
@@ -454,7 +462,7 @@ void main() {
         // The other methods don't leave any such batches,
         // but loading doesn't rely on that.
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
         await append(eg.selfAccount, 11, '[{"id":11}]');
         await db.into(db.serverEventBatches).insert(ServerEventBatchesCompanion.insert(
@@ -469,10 +477,10 @@ void main() {
 
       test('load snapshot info', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
-          queueId: 'queue1', lastEventId: 10,
-          appVersion: '2.0.0+3', timestamp: 1771389742,
-          data: utf8.encode('{"queue_id":"queue1","last_event_id":10}')));
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+            queueId: 'queue1', lastEventId: 10,
+            appVersion: '2.0.0+3', timestamp: 1771389742),
+          data: '{"queue_id":"queue1","last_event_id":10}');
         check(await db.loadServerSnapshotInfo(eg.selfAccount.id)).equals((
           queueId: 'queue1', lastEventId: 10,
           appVersion: '2.0.0+3', timestamp: 1771389742,
@@ -496,16 +504,18 @@ void main() {
 
       test('clear server data', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
         await append(eg.selfAccount, 11, '[{"id":11}]');
         final otherSnapshot = eg.serverSnapshot(account: eg.otherAccount,
           queueId: 'queue1', lastEventId: 10);
-        await db.storeServerSnapshot(otherSnapshot);
+        await storeSnapshot(otherSnapshot);
         await append(eg.otherAccount, 11, '[{"id":11}]');
 
         await db.clearServerData(eg.selfAccount.id);
         check(await load(eg.selfAccount)).isNull();
+        check(await db.select(db.serverSnapshotBlobs).get())
+          .single.accountId.equals(eg.otherAccount.id);
         check(await db.loadServerSnapshotInfo(eg.selfAccount.id)).isNull();
         check(await load(eg.otherAccount)).isNotNull()
           ..snapshot.equals(otherSnapshot.copyWith(lastEventId: 11))
@@ -520,15 +530,17 @@ void main() {
 
       test('delete account cascades to server data', () async {
         await prepare();
-        await db.storeServerSnapshot(eg.serverSnapshot(account: eg.selfAccount,
+        await storeSnapshot(eg.serverSnapshot(account: eg.selfAccount,
           queueId: 'queue1', lastEventId: 10));
         await append(eg.selfAccount, 11, '[{"id":11}]');
         check(await db.select(db.serverSnapshots).get()).length.equals(1);
+        check(await db.select(db.serverSnapshotBlobs).get()).length.equals(1);
         check(await db.select(db.serverEventBatches).get()).length.equals(1);
 
         await (db.delete(db.accounts)..where((a) => a.id.equals(eg.selfAccount.id)))
           .go();
         check(await db.select(db.serverSnapshots).get()).isEmpty();
+        check(await db.select(db.serverSnapshotBlobs).get()).isEmpty();
         check(await db.select(db.serverEventBatches).get()).isEmpty();
       });
     });

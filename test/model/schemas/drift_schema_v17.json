@@ -493,6 +493,51 @@
             "default_dart": null,
             "default_client_dart": null,
             "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "explicit_pk": [
+          "account_id"
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "references": [
+        3
+      ],
+      "type": "table",
+      "data": {
+        "name": "server_snapshot_blobs",
+        "was_declared_in_moor": false,
+        "columns": [
+          {
+            "name": "account_id",
+            "getter_name": "accountId",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": null,
+            "defaultConstraints": "REFERENCES accounts (id) ON DELETE CASCADE",
+            "dialectAwareDefaultConstraints": {
+              "sqlite": "REFERENCES accounts (id) ON DELETE CASCADE"
+            },
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              {
+                "foreign_key": {
+                  "to": {
+                    "table": "accounts",
+                    "column": "id"
+                  },
+                  "initially_deferred": false,
+                  "on_update": null,
+                  "on_delete": "cascade"
+                }
+              }
+            ]
           },
           {
             "name": "data",
@@ -514,7 +559,7 @@
       }
     },
     {
-      "id": 6,
+      "id": 7,
       "references": [
         3
       ],
@@ -602,13 +647,13 @@
       }
     },
     {
-      "id": 7,
+      "id": 8,
       "references": [
-        6
+        7
       ],
       "type": "index",
       "data": {
-        "on": 6,
+        "on": 7,
         "name": "idx_server_event_batches_account_id",
         "sql": null,
         "unique": false,
@@ -672,7 +717,16 @@
       "sql": [
         {
           "dialect": "sqlite",
-          "sql": "CREATE TABLE IF NOT EXISTS \"server_snapshots\" (\"account_id\" INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE, \"queue_id\" TEXT NOT NULL, \"last_event_id\" INTEGER NOT NULL, \"app_version\" TEXT NOT NULL, \"timestamp\" INTEGER NOT NULL, \"data\" BLOB NOT NULL, PRIMARY KEY (\"account_id\"));"
+          "sql": "CREATE TABLE IF NOT EXISTS \"server_snapshots\" (\"account_id\" INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE, \"queue_id\" TEXT NOT NULL, \"last_event_id\" INTEGER NOT NULL, \"app_version\" TEXT NOT NULL, \"timestamp\" INTEGER NOT NULL, PRIMARY KEY (\"account_id\"));"
+        }
+      ]
+    },
+    {
+      "name": "server_snapshot_blobs",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"server_snapshot_blobs\" (\"account_id\" INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE, \"data\" BLOB NOT NULL, PRIMARY KEY (\"account_id\"));"
         }
       ]
     },
