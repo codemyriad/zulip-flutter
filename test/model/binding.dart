@@ -13,6 +13,7 @@ import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:sodium/sodium.dart' as sodium;
 import 'package:test/fake.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
+import 'package:zulip/codemyriad.dart';
 import 'package:zulip/host/android_intents.dart';
 import 'package:zulip/host/android_notifications.dart';
 import 'package:zulip/host/ios_notifications.g.dart';
@@ -67,6 +68,7 @@ class TestZulipBinding extends ZulipBinding {
   void initInstance() {
     super.initInstance();
     _instance = this;
+    _resetFixedRealmUrl();
   }
 
   /// Reset all test data to a clean state.
@@ -78,6 +80,7 @@ class TestZulipBinding extends ZulipBinding {
   void reset() {
     ZulipApp.debugReset();
     MessageListView.debugOnLiveRevalidationChanged = null;
+    _resetFixedRealmUrl();
     _resetStore();
     _resetCanLaunchUrl();
     _resetLaunchUrl();
@@ -93,6 +96,12 @@ class TestZulipBinding extends ZulipBinding {
     _resetPickMultipleMedia();
     _resetWakelock();
     _resetImageDiskCache();
+  }
+
+  /// Tests get the usual flow where the user enters a server URL,
+  /// unless they set [debugFixedRealmUrlEnabled].
+  void _resetFixedRealmUrl() {
+    debugFixedRealmUrlEnabled = false;
   }
 
   /// The current global store offered to a [GlobalStoreWidget].

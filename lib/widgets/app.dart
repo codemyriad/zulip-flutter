@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../codemyriad.dart';
 import '../generated/l10n/zulip_localizations.dart';
 import '../log.dart';
 import '../model/actions.dart';
@@ -213,10 +214,13 @@ class _ZulipAppState extends State<ZulipApp> with WidgetsBindingObserver {
     final lastVisitedAccountId = globalStore.lastVisitedAccount?.id;
 
     return [
-      if (lastVisitedAccountId == null)
+      if (lastVisitedAccountId == null) ...[
         // There are no accounts, or the last-visited account was logged out.
-        MaterialWidgetRoute(page: const ChooseAccountPage())
-      else
+        MaterialWidgetRoute(page: const ChooseAccountPage()),
+        if (fixedRealmUrl != null && globalStore.accounts.isEmpty)
+          // There's only the one server, so start logging in to it.
+          AddAccountPage.buildRoute(),
+      ] else
         HomePage.buildRoute(accountId: lastVisitedAccountId),
     ];
   }

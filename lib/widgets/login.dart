@@ -10,6 +10,7 @@ import '../api/exception.dart';
 import '../api/model/web_auth.dart';
 import '../api/route/account.dart';
 import '../api/route/realm.dart';
+import '../codemyriad.dart';
 import '../generated/l10n/zulip_localizations.dart';
 import '../log.dart';
 import '../model/binding.dart';
@@ -143,6 +144,9 @@ class _AddAccountPageState extends State<AddAccountPage> {
   final ServerUrlTextEditingController _controller = ServerUrlTextEditingController();
   late ServerUrlParseResult _parseResult;
 
+  /// The error from the last attempt to connect to [fixedRealmUrl], if any.
+  String? _fixedRealmError;
+
   void _serverUrlChanged() {
     setState(() {
       _parseResult = _controller.tryParse();
@@ -154,6 +158,11 @@ class _AddAccountPageState extends State<AddAccountPage> {
     super.initState();
     _parseResult = _controller.tryParse();
     _controller.addListener(_serverUrlChanged);
+    if (fixedRealmUrl != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _connect(context, fixedRealmUrl!);
+      });
+    }
   }
 
   @override
@@ -173,15 +182,20 @@ class _AddAccountPageState extends State<AddAccountPage> {
       return;
     }
     assert(url != null);
+    await _connect(context, url!);
+  }
 
+  Future<void> _connect(BuildContext context, Uri url) async {
+    final zulipLocalizations = ZulipLocalizations.of(context);
     setState(() {
       _inProgress = true;
+      _fixedRealmError = null;
     });
     try {
       final GetServerSettingsResult serverSettings;
       try {
         final globalStore = GlobalStoreWidget.of(context);
-        serverSettings = await globalStore.fetchServerSettings(url!);
+        serverSettings = await globalStore.fetchServerSettings(url);
 
         final zulipVersionData = ZulipVersionData.fromServerSettings(serverSettings);
         if (zulipVersionData.isNotAllowed) {
@@ -204,6 +218,12 @@ class _AddAccountPageState extends State<AddAccountPage> {
             //   in zulip-mobile's src/message/fetchActions.js.
             message = zulipLocalizations.errorLoginCouldNotConnect(url.toString());
         }
+        if (fixedRealmUrl != null) {
+          setState(() {
+            _fixedRealmError = message;
+          });
+          return;
+        }
         showErrorDialog(context: context,
           title: zulipLocalizations.errorCouldNotConnectTitle,
           message: message,
@@ -212,13 +232,43 @@ class _AddAccountPageState extends State<AddAccountPage> {
       }
       if (!context.mounted) return;
 
-      unawaited(Navigator.push(context,
-        LoginPage.buildRoute(serverSettings: serverSettings)));
+      final route = LoginPage.buildRoute(serverSettings: serverSettings);
+      if (fixedRealmUrl != null) {
+        // This page has nothing more to offer, so leave it out of
+        // the back stack.
+        unawaited(Navigator.pushReplacement(context, route));
+      } else {
+        unawaited(Navigator.push(context, route));
+      }
     } finally {
-      setState(() {
-        _inProgress = false;
-      });
+      if (mounted) {
+        setState(() {
+          _inProgress = false;
+        });
+      }
     }
+  }
+
+  Widget _buildFixedRealmBody(BuildContext context) {
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final error = _fixedRealmError;
+    if (error == null) {
+      // The app bar shows a progress indicator meanwhile.
+      return Text(fixedRealmUrl.toString());
+    }
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Text(zulipLocalizations.errorCouldNotConnectTitle,
+        style: Theme.of(context).textTheme.titleLarge),
+      const SizedBox(height: 8),
+      Text(error, textAlign: TextAlign.center),
+      const SizedBox(height: 16),
+      ElevatedButton(
+        onPressed: !_inProgress
+          ? () => _connect(context, fixedRealmUrl!)
+          : null,
+        // A "Refresh" label fits a retry button, and is already translated.
+        child: Text(zulipLocalizations.composeBoxBannerButtonRefresh)),
+    ]);
   }
 
   @override
@@ -242,7 +292,9 @@ class _AddAccountPageState extends State<AddAccountPage> {
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 400),
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            child: fixedRealmUrl != null
+              ? _buildFixedRealmBody(context)
+              : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
               // TODO(#111) Perhaps give tappable realm URL suggestions based on text typed so far
               TextField(
                 controller: _controller,
