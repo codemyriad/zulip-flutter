@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:checks/checks.dart';
 import 'package:drift/drift.dart' as drift;
@@ -11,6 +12,7 @@ import 'package:zulip/api/core.dart';
 import 'package:zulip/api/model/web_auth.dart';
 import 'package:zulip/api/route/account.dart';
 import 'package:zulip/api/route/realm.dart';
+import 'package:zulip/codemyriad.dart';
 import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/localizations.dart';
 import 'package:zulip/model/store.dart';
@@ -23,6 +25,7 @@ import '../api/fake_api.dart';
 import '../api/route/route_checks.dart';
 import '../example_data.dart' as eg;
 import '../model/binding.dart';
+import '../model/store_checks.dart';
 import '../stdlib_checks.dart';
 import '../test_images.dart';
 import '../test_navigation.dart';
@@ -188,6 +191,109 @@ void main() {
     });
 
     // TODO other errors
+  });
+
+  group('AddAccountPage with fixed server', () {
+    late List<Route<dynamic>> pushedRoutes;
+    late List<Route<dynamic>> poppedRoutes;
+    late TestNavigatorObserver testNavObserver;
+
+    List<Route<dynamic>> takePushedRoutes() {
+      final routes = pushedRoutes.toList();
+      pushedRoutes.clear();
+      return routes;
+    }
+
+    final realmUrl = Uri.parse(kFixedRealmUrl);
+
+    FakeApiConnection prepareConnection() {
+      testBinding.globalStore.useCachedApiConnections = true;
+      return testBinding.globalStore.apiConnection(
+        realmUrl: realmUrl, zulipFeatureLevel: null);
+    }
+
+    Future<void> prepare(WidgetTester tester) async {
+      addTearDown(testBinding.reset);
+      debugFixedRealmUrlEnabled = true;
+
+      pushedRoutes = [];
+      poppedRoutes = [];
+      testNavObserver = TestNavigatorObserver();
+      testNavObserver.onPushed = (route, prevRoute) => pushedRoutes.add(route);
+      testNavObserver.onPopped = (route, prevRoute) => poppedRoutes.add(route);
+      testNavObserver.onReplaced = (route, prevRoute) {
+        poppedRoutes.add(prevRoute!);
+        pushedRoutes.add(route!);
+      };
+      await tester.pumpWidget(ZulipApp(navigatorObservers: [testNavObserver]));
+      await tester.pump();
+    }
+
+    void checkFetchedServerSettings(FakeApiConnection connection) {
+      check(connection.takeRequests()).single.isA<http.Request>()
+        ..method.equals('GET')
+        ..url.equals(realmUrl.resolve('/api/v1/server_settings'));
+    }
+
+    testWidgets('with no accounts, start at login page', (tester) async {
+      final connection = prepareConnection();
+      connection.prepare(json: eg.serverSettings(realmUrl: realmUrl).toJson());
+      await prepare(tester);
+      check(takePushedRoutes()).deepEquals(<Condition<Object?>>[
+        (it) => it.isA<WidgetRoute>().page.isA<ChooseAccountPage>(),
+        (it) => it.isA<WidgetRoute>().page.isA<AddAccountPage>(),
+      ]);
+
+      await tester.pump(Duration.zero);
+      checkFetchedServerSettings(connection);
+      checkNoDialog(tester);
+      check(takePushedRoutes()).single.isA<WidgetRoute>().page.isA<LoginPage>()
+        .serverSettings.realmUrl.equals(realmUrl);
+      check(poppedRoutes).single.isA<WidgetRoute>().page.isA<AddAccountPage>();
+      await testNavObserver.pumpPastTransition(tester);
+      check(find.byType(AddAccountPage)).findsNothing();
+    });
+
+    testWidgets('"Add an account" goes to login page', (tester) async {
+      await testBinding.globalStore.insertAccount(eg.selfAccount.toCompanion(false));
+      check(testBinding.globalStore).lastVisitedAccount.isNull();
+      await prepare(tester);
+      check(takePushedRoutes()).single.isA<WidgetRoute>().page.isA<ChooseAccountPage>();
+
+      final connection = prepareConnection();
+      connection.prepare(json: eg.serverSettings(realmUrl: realmUrl).toJson());
+      await tester.tap(find.text('Add an account'));
+      check(takePushedRoutes()).single.isA<WidgetRoute>().page.isA<AddAccountPage>();
+      await tester.pump(); // build the page, which starts the fetch
+      check(find.byType(TextField)).findsNothing();
+
+      await tester.pump(Duration.zero);
+      checkFetchedServerSettings(connection);
+      check(takePushedRoutes()).single.isA<WidgetRoute>().page.isA<LoginPage>()
+        .serverSettings.realmUrl.equals(realmUrl);
+    });
+
+    testWidgets('on error, show it and offer retry', (tester) async {
+      var connection = prepareConnection();
+      connection.prepare(httpException: SocketException('failed'));
+      await prepare(tester);
+      takePushedRoutes();
+
+      await tester.pump(Duration.zero);
+      checkFetchedServerSettings(connection);
+      checkNoDialog(tester);
+      check(takePushedRoutes()).isEmpty();
+      check(find.text('Could not connect')).findsOne();
+      check(find.text('Failed to connect to server:\n$realmUrl')).findsOne();
+
+      connection = prepareConnection();
+      connection.prepare(json: eg.serverSettings(realmUrl: realmUrl).toJson());
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Refresh'));
+      await tester.pump(Duration.zero);
+      checkFetchedServerSettings(connection);
+      check(takePushedRoutes()).single.isA<WidgetRoute>().page.isA<LoginPage>()
+        .serverSettings.realmUrl.equals(realmUrl);
+    });
   });
 
   group('LoginPage', () {
