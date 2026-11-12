@@ -482,7 +482,7 @@ enum ExpectedLoad {
 
   /// A load from server data stored on the device,
   /// replacing the store right away (by reloading from the server)
-  /// without polling the stored event queue.
+  /// without polling the stored event queue or making other requests.
   persistedReplaced,
 }
 
@@ -567,7 +567,8 @@ class UpdateMachineTestGlobalStore extends GlobalStore with _ApiConnectionsMixin
       case ExpectedLoad.persisted:
         (prepareResumedPollResponse ?? _prepareResumedPollSuccess)(connection);
       case ExpectedLoad.persistedReplaced:
-        break;
+        // The store makes no requests before it's replaced.
+        return;
     }
     connection.prepare(json: ServerEmojiData(codeToNames: {}).toJson());
     if (NotificationService.instance.token.value != null) {

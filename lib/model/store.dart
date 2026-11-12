@@ -1748,8 +1748,11 @@ class UpdateMachine {
       // Show that the data may be stale, and make the first poll quick.
       store.isRecoveringEventStream = true;
       updateMachine.poll();
-      unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
-      store.presence.start(pingImmediately: true);
+      if (!replaceImmediately) {
+        // (If replacing, the replacement store will do these.)
+        unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
+        store.presence.start(pingImmediately: true);
+      }
       return updateMachine;
     } catch (e) {
       if (store != null) {

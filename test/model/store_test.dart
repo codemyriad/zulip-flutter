@@ -2566,7 +2566,7 @@ void main() {
           expectReplayed
             ? check(store.streams[channel.streamId]).isNotNull()
             : check(store.streams[channel.streamId]).isNull();
-          check(connection.takeRequests()).single.which(isEmojiDataRequest());
+          check(connection.takeRequests()).isEmpty();
 
           async.elapse(Duration.zero);
           check(connection.takeRequests()).isEmpty();
