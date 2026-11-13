@@ -179,7 +179,7 @@ enum BoolGlobalSetting {
 
   /// An experimental flag to enable the local message database and
   /// offline message coverage.
-  messageDatabase(GlobalSettingType.experimentalFeatureFlag, false),
+  messageDatabase(GlobalSettingType.experimentalFeatureFlag, true),
 
   // Former settings which might exist in the database,
   // whose names should therefore not be reused:

@@ -91,6 +91,15 @@ void main() {
       assert(!BoolGlobalSetting.placeholderIgnore.default_);
     });
 
+    test('messageDatabase is enabled by default', () async {
+      check(BoolGlobalSetting.messageDatabase.default_).isTrue();
+      final globalSettings = eg.globalStore(boolGlobalSettings: {}).settings;
+      check(globalSettings).getBool(BoolGlobalSetting.messageDatabase).isTrue();
+
+      await globalSettings.setBool(BoolGlobalSetting.messageDatabase, false);
+      check(globalSettings).getBool(BoolGlobalSetting.messageDatabase).isFalse();
+    });
+
     test('get from initial load', () {
       final globalSettings = eg.globalStore(boolGlobalSettings: {
         BoolGlobalSetting.placeholderIgnore: true,
