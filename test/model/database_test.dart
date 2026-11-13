@@ -14,6 +14,7 @@ import 'schemas/schema_v4.dart' as v4;
 import 'schemas/schema_v5.dart' as v5;
 import 'schemas/schema_v10.dart' as v10;
 import 'schemas/schema_v11.dart' as v11;
+import 'schemas/schema_v18.dart' as v18;
 import 'store_checks.dart';
 
 void main() {
@@ -519,6 +520,63 @@ void main() {
     // v15 covered by "existing Account row" above
 
     // v16 covered by "existing Account row" above
+
+    // v17 only adds new tables; the "migrate without data" test covers it
+
+    // v18 only adds a new table; the "migrate without data" test covers it
+
+    test('upgrade from v18 to v19: drop retired prototype tables and preserve accounts', () async {
+      final schema = await verifier.schemaAt(18);
+      final before = v18.DatabaseAtV18(schema.newConnection());
+      final accountId = await before.into(before.accounts).insert(
+        v18.AccountsCompanion.insert(
+          realmUrl: 'https://chat.codemyriad.io/',
+          userId: 1,
+          email: 'user@codemyriad.io',
+          apiKey: 'secret',
+          zulipVersion: '12.4',
+          zulipMergeBase: const Value('12.4'),
+          zulipFeatureLevel: 370,
+        ));
+      await before.into(before.serverSnapshots).insert(
+        v18.ServerSnapshotsCompanion.insert(
+          accountId: Value(accountId),
+          queueId: 'queue1',
+          lastEventId: 10,
+          appVersion: '30.0.275+275',
+          timestamp: 1700000000,
+        ));
+      await before.into(before.serverSnapshotBlobs).insert(
+        v18.ServerSnapshotBlobsCompanion.insert(
+          accountId: Value(accountId),
+          data: Uint8List.fromList([1, 2, 3]),
+        ));
+      await before.into(before.serverEventBatches).insert(
+        v18.ServerEventBatchesCompanion.insert(
+          accountId: accountId,
+          queueId: 'queue1',
+          lastEventId: 11,
+          data: Uint8List.fromList([4, 5]),
+        ));
+      await before.into(before.cachedMessageFetches).insert(
+        v18.CachedMessageFetchesCompanion.insert(
+          accountId: accountId,
+          narrowKey: 'channel:1',
+          lastWritten: 1700000001,
+          data: Uint8List.fromList([6, 7]),
+        ));
+      await before.close();
+
+      final after = AppDatabase(schema.newConnection());
+      await verifier.migrateAndValidate(after, 19,
+        options: const ValidationOptions(validateDropped: true));
+      final accounts = await after.select(after.accounts).get();
+      check(accounts).single
+        ..id.equals(accountId)
+        ..realmUrl.equals(Uri.parse('https://chat.codemyriad.io/'))
+        ..email.equals('user@codemyriad.io');
+      await after.close();
+    });
   });
 }
 

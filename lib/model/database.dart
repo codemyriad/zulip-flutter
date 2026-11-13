@@ -253,7 +253,7 @@ class AppDatabase extends _$AppDatabase {
   //  * Fix resulting analyzer errors; in particular,
   //    write a migration in `_migrationSteps` below.
   //  * Write tests.
-  static const int latestSchemaVersion = 16; // See note.
+  static const int latestSchemaVersion = 19; // See note.
 
   @override
   int get schemaVersion => latestSchemaVersion;
@@ -363,6 +363,21 @@ class AppDatabase extends _$AppDatabase {
     },
     from15To16: (m, schema) async {
       await m.addColumn(schema.accounts, schema.accounts.possibleLegacyPushToken);
+    },
+    from16To17: (m, schema) async {
+      await m.createTable(schema.serverSnapshots);
+      await m.createTable(schema.serverSnapshotBlobs);
+      await m.createTable(schema.serverEventBatches);
+      await m.createIndex(schema.idxServerEventBatchesAccountId);
+    },
+    from17To18: (m, schema) async {
+      await m.createTable(schema.cachedMessageFetches);
+    },
+    from18To19: (m, schema) async {
+      await m.deleteTable('cached_message_fetches');
+      await m.deleteTable('server_event_batches');
+      await m.deleteTable('server_snapshot_blobs');
+      await m.deleteTable('server_snapshots');
     },
   );
 
