@@ -1256,25 +1256,44 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     bool initialLocalSuperseded = false;
     Timer? staleTimer;
     if (!skipInitialLocal) {
-      if (narrow is KeywordSearchNarrow && store.coverageEnabled
-          && !store.connectivityMonitor.hasConnectivity) {
-        final searchQuery = (narrow as KeywordSearchNarrow).keyword;
-        unawaited(store.searchSavedMessages(
-          query: searchQuery,
-          limit: kMessageListFetchBatchSize,
-        ).then((savedSearch) {
-          if (networkDone || initialLocalSuperseded || isStale()
-              || _status != FetchingStatus.fetchInitial
-              || _revalidation != RevalidationState.none) {
-            return;
-          }
-          if (savedSearch == null) return;
-          initialLocalSuperseded = true;
-          _showSavedSearchResults(
-            savedSearch,
-            revalidation: RevalidationState.inFlight,
+      if (narrow is KeywordSearchNarrow && store.coverageEnabled) {
+        void runSavedSearch() {
+          final searchQuery = (narrow as KeywordSearchNarrow).keyword;
+          unawaited(store.searchSavedMessages(
+            query: searchQuery,
+            limit: kMessageListFetchBatchSize,
+          ).then((savedSearch) {
+            if (networkDone || initialLocalSuperseded || isStale()
+                || _status != FetchingStatus.fetchInitial
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            if (savedSearch == null) return;
+            initialLocalSuperseded = true;
+            _showSavedSearchResults(
+              savedSearch,
+              revalidation: RevalidationState.inFlight,
+            );
+          }).catchError((_) {}));
+        }
+        if (!store.connectivityMonitor.hasConnectivity) {
+          runSavedSearch();
+        } else {
+          staleTimer = _fetchInitialStaleTimer = Timer(
+            const Duration(milliseconds: 500),
+            () {
+              if (identical(_fetchInitialStaleTimer, staleTimer)) {
+                _fetchInitialStaleTimer = null;
+              }
+              if (networkDone || initialLocalSuperseded || isStale()
+                  || _status != FetchingStatus.fetchInitial
+                  || _revalidation != RevalidationState.none) {
+                return;
+              }
+              runSavedSearch();
+            },
           );
-        }).catchError((_) {}));
+        }
       } else if (store.dbActive) {
         final localStopwatch = ZulipBinding.instance.stopwatch()..start();
         unawaited(_findLocalWindowAsync(afterFailure: false).then((found) {

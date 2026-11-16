@@ -5656,6 +5656,39 @@ void main() {
       check(model.showingSavedSearchResults).isFalse();
     }));
 
+    test('show saved search results after 500ms when request hangs', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('espresso'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final localMatch = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Coffee', content: '<p>espresso tonic</p>');
+      await store.handleEvent(eg.messageEvent(localMatch));
+
+      // Hung request while hasConnectivity is still true (e.g. dead Wi-Fi/VPN).
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 50, stream: stream, topic: 'Server', content: '<p>espresso server</p>'),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 400));
+      check(model.fetched).isFalse();
+
+      async.elapse(const Duration(milliseconds: 100));
+      check(model)
+        ..fetched.isTrue()
+        ..revalidation.equals(RevalidationState.inFlight);
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+      check(model.showingSavedSearchResults).isTrue();
+
+      async.elapse(const Duration(seconds: 30));
+      check(model).revalidation.equals(RevalidationState.none);
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50]);
+      check(model.showingSavedSearchResults).isFalse();
+    }));
+
     test('paginates older saved search results offline until exhausted', () => awaitFakeAsync((async) async {
       BackoffMachine.debugDuration = const Duration(seconds: 10);
       addTearDown(() => BackoffMachine.debugDuration = null);
