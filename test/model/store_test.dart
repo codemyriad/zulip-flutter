@@ -802,6 +802,40 @@ void main() {
       checkLastRequest();
       check(store.debugServerEmojiData).deepEquals(data);
     }));
+
+    test('stop when disposed during fetch', () => awaitFakeAsync((async) async {
+      prepareStore();
+
+      connection.prepare(delay: const Duration(seconds: 1),
+        json: ServerEmojiData(codeToNames: data).toJson());
+      final future = updateMachine.fetchEmojiData(emojiDataUrl);
+      bool complete = false;
+      unawaited(future.whenComplete(() => complete = true));
+      async.flushMicrotasks();
+      checkLastRequest();
+
+      store.dispose();
+      async.elapse(const Duration(seconds: 1));
+      check(complete).isTrue();
+      check(store.debugServerEmojiData).isNull();
+    }));
+
+    test('stop when disposed during backoff', () => awaitFakeAsync((async) async {
+      prepareStore();
+
+      connection.prepare(httpException: Exception('failed'));
+      final future = updateMachine.fetchEmojiData(emojiDataUrl);
+      bool complete = false;
+      unawaited(future.whenComplete(() => complete = true));
+      async.flushMicrotasks();
+      checkLastRequest();
+      check(complete).isFalse();
+
+      store.dispose();
+      async.elapse(const Duration(minutes: 5));
+      check(complete).isTrue();
+      check(connection.takeRequests()).isEmpty();
+    }));
   });
 
   group('UpdateMachine.poll', () {
