@@ -112,7 +112,8 @@ class TopicNarrow extends Narrow implements SendableNarrow {
   bool containsMessage(MessageBase message) {
     final conversation = message.conversation;
     return conversation is StreamConversation
-      && conversation.streamId == channelId && conversation.topic.isSameAs(topic);
+      && conversation.streamId == channelId
+      && serverTopicFold(conversation.topic.apiName) == serverTopicFold(topic.apiName);
   }
 
   @override
@@ -397,4 +398,56 @@ class KeywordSearchNarrow extends Narrow {
 
   @override
   int get hashCode => Object.hash('KeywordSearchNarrow', keyword);
+}
+
+/// Folds a topic name to match the Zulip server's case-insensitive matching.
+///
+/// The server matches topics with PostgreSQL `UPPER(subject)` under `C.UTF-8`,
+/// which applies Unicode's *simple* per-code-point uppercase mapping.
+/// Dart's [String.toUpperCase] applies *full* mappings (e.g. `ß` -> `SS`),
+/// so we map each code point individually and keep it unchanged when its
+/// uppercase expansion is more than one code point.
+String serverTopicFold(String topic) {
+  bool isAscii = true;
+  final codeUnits = topic.codeUnits;
+  for (int i = 0; i < codeUnits.length; i++) {
+    if (codeUnits[i] >= 0x80) {
+      isAscii = false;
+      break;
+    }
+  }
+  if (isAscii) return topic.toUpperCase();
+
+  final buffer = StringBuffer();
+  for (final rune in topic.runes) {
+    final ch = String.fromCharCode(rune);
+    final upper = ch.toUpperCase();
+    if (upper.runes.length == 1) {
+      buffer.write(upper);
+    } else {
+      buffer.write(ch);
+    }
+  }
+  return buffer.toString();
+}
+
+/// A canonical key identifying [narrow] for message coverage,
+/// or null if [narrow] does not participate in coverage.
+///
+/// The key depends only on what messages the narrow contains,
+/// not on how the narrow is encoded for a given server:
+/// it's the same across server feature levels,
+/// it ignores [TopicNarrow.with_],
+/// and it folds topic names with [serverTopicFold] to match the server.
+String? coverageKey(Narrow narrow) {
+  return switch (narrow) {
+    ChannelNarrow(:final channelId) => 'channel:$channelId',
+    TopicNarrow(:final channelId, :final topic) =>
+      'topic:$channelId:${serverTopicFold(topic.apiName)}',
+    DmNarrow(:final allRecipientIds) => 'dm:${allRecipientIds.join(',')}',
+    CombinedFeedNarrow() ||
+    MentionsNarrow() ||
+    StarredMessagesNarrow() ||
+    KeywordSearchNarrow() => null,
+  };
 }
