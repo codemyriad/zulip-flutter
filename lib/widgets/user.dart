@@ -87,6 +87,8 @@ class AvatarImage extends StatelessWidget {
 
     return RealmContentNetworkImage(
       avatarUrl.get(physicalSize),
+      contentImmutable: avatarUrl.contentImmutable,
+      versionTracksContent: avatarUrl.versionTracksContent,
       filterQuality: FilterQuality.medium,
       fit: BoxFit.cover,
       errorBuilder: (_, _, _) => _AvatarPlaceholder(size: size),

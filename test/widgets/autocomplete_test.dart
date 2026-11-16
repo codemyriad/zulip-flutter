@@ -19,6 +19,7 @@ import 'package:zulip/widgets/compose_box.dart';
 import 'package:zulip/widgets/icons.dart';
 import 'package:zulip/widgets/image.dart';
 import 'package:zulip/widgets/message_list.dart';
+import 'package:zulip/widgets/realm_image_provider.dart';
 import 'package:zulip/widgets/text.dart';
 import 'package:zulip/widgets/user.dart';
 
@@ -144,7 +145,8 @@ Future<Finder> setupToTopicInput(WidgetTester tester, {
 
 Finder findNetworkImage(String url) {
   return find.byWidgetPredicate((widget) => switch(widget) {
-    Image(image: NetworkImage(url: var imageUrl)) when imageUrl == url
+    Image(image: RealmImageProvider(url: var imageUrl))
+        when imageUrl.toString() == url
       => true,
     _ => false,
   });
@@ -501,7 +503,7 @@ void main() {
       check(find.descendant(
         of: find.byType(EmojiAutocompleteItem),
         matching: find.byWidgetPredicate((widget) => switch(widget) {
-          Image(image: NetworkImage()) => true,
+          Image(image: RealmImageProvider()) => true,
           _ => false,
         }))).findsNothing();
 
