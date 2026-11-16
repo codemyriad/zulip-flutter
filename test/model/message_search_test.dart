@@ -748,5 +748,97 @@ void main() {
 
       store.dispose();
     }));
+
+    test('is:starred and is:mentioned bypass muting, also in savedMessagesForNarrow', () => awaitFakeAsync((async) async {
+      UpdateMachine.debugEnableFetchEmojiData = false;
+      final publicStream = eg.stream(streamId: 10, name: 'Public', inviteOnly: false);
+      final mutedStream = eg.stream(streamId: 11, name: 'MutedCh', inviteOnly: false);
+      final unsubPrivate = eg.stream(streamId: 12, name: 'Secret', inviteOnly: true);
+      final otherUser = eg.user(userId: 50);
+      final mutedUser = eg.user(userId: 51);
+      final snap = eg.initialSnapshot(
+        queueId: 'q1',
+        lastEventId: 10,
+        maxMessageId: 100,
+        realmUsers: [eg.selfUser, otherUser, mutedUser],
+        streams: [publicStream, mutedStream, unsubPrivate],
+        subscriptions: [
+          eg.subscription(publicStream),
+          eg.subscription(mutedStream, isMuted: true),
+        ],
+        mutedUsers: [
+          MutedUserItem(id: mutedUser.userId),
+        ],
+        userTopics: [
+          UserTopicItem(
+            streamId: publicStream.streamId,
+            topicName: eg.t('muted topic'),
+            lastUpdated: 100,
+            visibilityPolicy: UserTopicVisibilityPolicy.muted,
+          ),
+        ],
+        starredMessages: [1, 2, 3, 4],
+      );
+      final setup = await startDbStore(snap: snap);
+      addTearDown(() async {
+        await setup.global.backend.closeMessageDb();
+        setup.global.dispose();
+      });
+      async.elapse(Duration.zero);
+
+      final mPublicMention = eg.streamMessage(
+        id: 1, stream: publicStream, topic: 'muted topic', sender: otherUser,
+        content: '<p>ping</p>', flags: [MessageFlag.read, MessageFlag.mentioned, MessageFlag.starred],
+      );
+      final mMutedChannelMention = eg.streamMessage(
+        id: 2, stream: mutedStream, topic: 'chat', sender: otherUser,
+        content: '<p>muted ch mention</p>',
+        flags: [MessageFlag.read, MessageFlag.streamWildcardMentioned, MessageFlag.starred],
+      );
+      final mMutedDmStarredMention = eg.dmMessage(
+        id: 3, from: mutedUser, to: [eg.selfUser],
+        content: '<p>muted dm</p>',
+        flags: [MessageFlag.read, MessageFlag.mentioned, MessageFlag.starred],
+      );
+      final mSecretStarred = eg.streamMessage(
+        id: 4, stream: unsubPrivate, topic: 'priv', sender: otherUser,
+        content: '<p>secret</p>', flags: [MessageFlag.read, MessageFlag.starred],
+      );
+      final mPublicVisible = eg.streamMessage(
+        id: 5, stream: publicStream, topic: 'general', sender: otherUser,
+        content: '<p>visible</p>', flags: [MessageFlag.read],
+      );
+      final mDmVisible = eg.dmMessage(
+        id: 6, from: otherUser, to: [eg.selfUser],
+        content: '<p>dm visible</p>', flags: [MessageFlag.read],
+      );
+
+      reconcileWithRaw(setup.um.store, ChannelNarrow(publicStream.streamId), [mPublicMention, mPublicVisible]);
+      reconcileWithRaw(setup.um.store, ChannelNarrow(mutedStream.streamId), [mMutedChannelMention]);
+      reconcileWithRaw(setup.um.store, DmNarrow.withUser(mutedUser.userId, selfUserId: eg.selfUser.userId), [mMutedDmStarredMention]);
+      reconcileWithRaw(setup.um.store, ChannelNarrow(unsubPrivate.streamId), [mSecretStarred]);
+      reconcileWithRaw(setup.um.store, DmNarrow.withUser(otherUser.userId, selfUserId: eg.selfUser.userId), [mDmVisible]);
+      await setup.global.backend.messageDbWriterForAccount(eg.selfAccount.id).drainForTesting();
+      final store = setup.um.store;
+
+      // Search parity: is:starred bypasses channel, topic, and DM muting;
+      // is:mentioned bypasses channel and topic muting while respecting DM muting.
+      final starredSearch = await store.searchSavedMessages(query: 'is:starred', limit: 10);
+      check(starredSearch!.messages.map((m) => m.id)).deepEquals([1, 2, 3]);
+      final mentionedSearch = await store.searchSavedMessages(query: 'is:mentioned', limit: 10);
+      check(mentionedSearch!.messages.map((m) => m.id)).deepEquals([1, 2]);
+
+      // Synthesized narrows match their live counterparts from DB/RAM cache:
+      final combined = await store.savedMessagesForNarrow(const CombinedFeedNarrow(), limit: 10);
+      check(combined!.messages.map((m) => m.id)).deepEquals([5, 6]);
+      final mentions = await store.savedMessagesForNarrow(const MentionsNarrow(), limit: 10);
+      check(mentions!.messages.map((m) => m.id)).deepEquals([1, 2]);
+      final starred = await store.savedMessagesForNarrow(const StarredMessagesNarrow(), limit: 10);
+      check(starred!.messages.map((m) => m.id)).deepEquals([1, 2, 3]);
+      check(await store.savedMessagesForNarrow(ChannelNarrow(publicStream.streamId), limit: 10))
+        .isNull();
+
+      store.dispose();
+    }));
   });
 }

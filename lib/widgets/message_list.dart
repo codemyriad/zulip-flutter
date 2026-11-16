@@ -1192,7 +1192,7 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     final Widget content;
     if (model.items.isEmpty
         && ((model.haveNewest && model.haveOldest)
-            || model.showingSavedSearchResults)) {
+            || model.showingSavedMessages)) {
       content = _EmptyMessageListPlaceholder(narrow: widget.narrow);
     } else {
       // Pad the left and right insets, for small devices in landscape.

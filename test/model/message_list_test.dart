@@ -3419,7 +3419,9 @@ void main() {
               checkNotified(count: localFirst ? 3 : 1);
               async.elapse(const Duration(seconds: 2));
               checkHasMessages(notMovedMessages + postMoveMessages);
-              checkNotifiedOnce();
+              final savedFallbackDuringElapse =
+                store.debugCoverageEnabled && narrow is CombinedFeedNarrow;
+              checkNotified(count: savedFallbackDuringElapse ? 2 : 1);
           }
         }));
       }
@@ -3513,7 +3515,7 @@ void main() {
 
         async.elapse(const Duration(seconds: 2));
         checkHasMessages(initialMessages + otherChannelMessages);
-        checkNotifiedOnce();
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
       }));
     });
 
@@ -5744,6 +5746,277 @@ void main() {
       async.elapse(const Duration(seconds: 10));
     }));
   });
+
+  group('CombinedFeedNarrow, MentionsNarrow, and StarredMessagesNarrow offline synthesis', () {
+    test('CombinedFeedNarrow: saved channel and DM messages offline, paginate older', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      final mutedStream = eg.stream(streamId: 11, name: 'Muted');
+      final otherUser = eg.user(userId: 50);
+      final mutedUser = eg.user(userId: 51);
+      await prepare(
+        narrow: const CombinedFeedNarrow(),
+        stream: stream,
+        users: [otherUser, mutedUser],
+        mutedUserIds: [mutedUser.userId],
+      );
+      await store.addStream(mutedStream);
+      await store.addSubscription(eg.subscription(mutedStream, isMuted: true));
+      store.debugSetCoverageEnabled(true);
+
+      // Seed more than one batch of visible messages, plus muted channel/DM messages.
+      final totalVisible = kMessageListFetchBatchSize + 10;
+      for (var i = 1; i <= totalVisible; i++) {
+        await store.handleEvent(eg.messageEvent(i.isEven
+          ? eg.dmMessage(id: i, from: otherUser, to: [eg.selfUser], content: '<p>dm $i</p>')
+          : eg.streamMessage(id: i, stream: stream, topic: 'T', content: '<p>msg $i</p>')));
+      }
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(
+        id: totalVisible + 1, stream: mutedStream, topic: 'Mute', content: '<p>hidden</p>')));
+      await store.handleEvent(eg.messageEvent(eg.dmMessage(
+        id: totalVisible + 2, from: mutedUser, to: [eg.selfUser], content: '<p>muted dm</p>')));
+
+      connection.prepare(
+        delay: const Duration(seconds: 2),
+        httpException: SocketException('offline'),
+      );
+      unawaited(model.fetchInitial());
+      async.flushMicrotasks();
+
+      check(model)
+        ..fetched.isTrue()
+        ..fetchInitialFailing.isFalse()
+        ..revalidation.equals(RevalidationState.inFlight)
+        ..showingSavedMessages.isTrue()
+        ..showingSavedSearchResults.isFalse()
+        ..showStaleOfflineBanner.isFalse()
+        ..showOfflineOlderNotice.isFalse();
+      check(model.messages.length).equals(kMessageListFetchBatchSize);
+      check(model.messages.first.id).equals(11);
+      check(model.messages.last.id).equals(totalVisible);
+
+      async.elapse(const Duration(seconds: 2));
+      check(model)
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isFalse();
+
+      await model.fetchOlder();
+      check(model.messages.length).equals(totalVisible);
+      check(model.messages.first.id).equals(1);
+      check(model.showOfflineOlderNotice).isTrue();
+
+      // Recovery replaces synthesized results cleanly and clears stale/saved state.
+      final freshServerMsg = eg.streamMessage(
+        id: 500, stream: stream, topic: 'Fresh', content: '<p>fresh</p>');
+      connection.prepare(json: newestResult(foundOldest: true, messages: [
+        freshServerMsg,
+      ]).toJson());
+      async.elapse(const Duration(seconds: 10));
+      check(model)
+        ..revalidation.equals(RevalidationState.none)
+        ..showingSavedMessages.isFalse()
+        ..showStaleOfflineBanner.isFalse()
+        ..haveOldest.isTrue()
+        ..haveNewest.isTrue();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([500]);
+    }));
+
+    test('CombinedFeedNarrow: fall back after 500ms on hung fetch', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final cached = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Cached', content: '<p>cached</p>');
+      await store.handleEvent(eg.messageEvent(cached));
+
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 50, stream: stream, topic: 'Live', content: '<p>live</p>'),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 400));
+      check(model.fetched).isFalse();
+
+      async.elapse(const Duration(milliseconds: 100));
+      check(model)
+        ..fetched.isTrue()
+        ..revalidation.equals(RevalidationState.inFlight)
+        ..showingSavedMessages.isTrue()
+        ..showingSavedSearchResults.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+
+      async.elapse(const Duration(seconds: 30));
+      check(model)
+        ..revalidation.equals(RevalidationState.none)
+        ..showingSavedMessages.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50]);
+    }));
+
+    test('CombinedFeedNarrow: keep messages arriving while saved messages show', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(), stream: stream);
+      store.debugSetCoverageEnabled(true);
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 10, stream: stream)));
+
+      // The server computes its response before message 60 is sent.
+      final live = eg.streamMessage(id: 50, stream: stream);
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [live]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 500));
+      check(model).showingSavedMessages.isTrue();
+
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 60, stream: stream)));
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10, 60]);
+
+      async.elapse(const Duration(seconds: 30));
+      check(model).showingSavedMessages.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50, 60]);
+    }));
+
+    test('CombinedFeedNarrow: no saved-messages fallback when anchored at first unread', () => awaitFakeAsync((async) async {
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(),
+        anchor: AnchorCode.firstUnread, stream: stream);
+      store.debugSetCoverageEnabled(true);
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 10, stream: stream)));
+
+      connection.prepare(
+        delay: const Duration(seconds: 2),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 10, stream: stream),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.flushMicrotasks();
+      check(model).showingSavedMessages.isFalse();
+
+      async.elapse(const Duration(seconds: 2));
+      check(model)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isFalse();
+    }));
+
+    test('MentionsNarrow and StarredMessagesNarrow: saved messages offline', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      final otherUser = eg.user(userId: 50);
+      await prepare(
+        narrow: const MentionsNarrow(),
+        stream: stream,
+        users: [otherUser],
+        starredMessages: [20],
+      );
+      store.debugSetCoverageEnabled(true);
+
+      final mMention = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Ping', sender: otherUser,
+        content: '<p>@self</p>', flags: [MessageFlag.read, MessageFlag.mentioned]);
+      final mStarred = eg.streamMessage(
+        id: 20, stream: stream, topic: 'Star', sender: otherUser,
+        content: '<p>star</p>', flags: [MessageFlag.read, MessageFlag.starred]);
+      final mPlain = eg.streamMessage(
+        id: 30, stream: stream, topic: 'Plain', sender: otherUser,
+        content: '<p>plain</p>', flags: [MessageFlag.read]);
+      for (final m in [mMention, mStarred, mPlain]) {
+        await store.handleEvent(eg.messageEvent(m));
+      }
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(model)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isTrue()
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isTrue();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+
+      final starredModel = MessageListView.init(
+        store: store,
+        narrow: const StarredMessagesNarrow(),
+        anchor: AnchorCode.newest,
+      );
+      addTearDown(starredModel.dispose);
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(starredModel.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(starredModel)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isTrue()
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isTrue();
+      check(starredModel.messages.map((m) => m.id).toList()).deepEquals([20]);
+
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      async.elapse(const Duration(seconds: 10));
+    }));
+
+    test('CombinedFeedNarrow: keep channel coverage when fetch omits pre-subscription history', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'Public', inviteOnly: false);
+      final channelModel = (await () async {
+        await prepare(narrow: ChannelNarrow(stream.streamId), stream: stream);
+        return model;
+      }());
+      store.debugSetCoverageEnabled(true);
+
+      // Historical message 5 fetched in ChannelNarrow before recent message 20.
+      final m5 = eg.streamMessage(id: 5, stream: stream, topic: 'Old', content: '<p>old</p>');
+      final m20 = eg.streamMessage(id: 20, stream: stream, topic: 'New', content: '<p>new</p>');
+      await prepareMessages(foundOldest: true, messages: [m5, m20]);
+      check(store.messages[5]).isNotNull();
+
+      // CombinedFeedNarrow returns only m20 (omitting pre-subscription m5).
+      final combinedModel = MessageListView.init(
+        store: store,
+        narrow: const CombinedFeedNarrow(),
+        anchor: AnchorCode.newest,
+      );
+      addTearDown(combinedModel.dispose);
+      connection.prepare(json: newestResult(foundOldest: true, messages: [m20]).toJson());
+      await combinedModel.fetchInitial();
+
+      // m5 remains in store and channel coverage stays intact.
+      check(store.messages[5]).isNotNull();
+      final channelChains = store.debugCoverage.chains(CoverageKeys.channel(stream.streamId));
+      check(channelChains).single
+        ..has((c) => c.reachesOldest, 'reachesOldest').isTrue()
+        ..has((c) => c.isOpen, 'isOpen').isTrue();
+      check(channelModel.messages.map((m) => m.id).toList()).deepEquals([5, 20]);
+    }));
+  });
+}
+
+extension SavedMessagesFlagChecks on Subject<MessageListView> {
+  Subject<bool> get showingSavedMessages =>
+    has((x) => x.showingSavedMessages, 'showingSavedMessages');
+  Subject<bool> get showingSavedSearchResults =>
+    has((x) => x.showingSavedSearchResults, 'showingSavedSearchResults');
+  Subject<bool> get showStaleOfflineBanner =>
+    has((x) => x.showStaleOfflineBanner, 'showStaleOfflineBanner');
+  Subject<bool> get showOfflineOlderNotice =>
+    has((x) => x.showOfflineOlderNotice, 'showOfflineOlderNotice');
 }
 
 MessageListView? _lastModel;

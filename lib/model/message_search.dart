@@ -654,6 +654,9 @@ class ParsedMessageSearchQuery {
         } else if (requiredMuted == false) {
           if (!hasExplicitChannelScope && sub == null) return false;
           if (isMuted) return false;
+        } else if (requiredStarred == true || requiredMentioned == true) {
+          // Starred and mentions filters include messages even in muted
+          // channels and topics (channel content access was checked above).
         } else {
           if (hasExplicitChannelScope && hasExplicitTopicScope) {
             // Explicit `channel:` + `topic:` bypasses channel and topic muting.
@@ -711,7 +714,7 @@ class ParsedMessageSearchQuery {
           if (!dmMuted) return false;
         } else if (requiredMuted == false) {
           if (dmMuted) return false;
-        } else if (!hasExplicitDmConversationScope) {
+        } else if (!hasExplicitDmConversationScope && requiredStarred != true) {
           if (dmMuted) return false;
         }
     }
