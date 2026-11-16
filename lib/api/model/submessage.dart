@@ -23,6 +23,7 @@ part 'submessage.g.dart';
 @JsonSerializable(fieldRename: FieldRename.snake)
 class Submessage {
   const Submessage({
+    required this.id,
     required this.senderId,
     required this.msgType,
     required this.content,
@@ -30,7 +31,7 @@ class Submessage {
 
   // TODO(server): should we be sorting a message's submessages by ID?  Web seems to:
   //   https://github.com/zulip/zulip/blob/40f59a05c55e0e4f26ca87d2bca646770e94bff0/web/src/submessage.ts#L88
-  // final int id;  // ignored because we don't use it
+  final int id;
 
   /// The sender of this submessage (not necessarily of the [Message] it's on).
   final int senderId;
@@ -64,7 +65,7 @@ class Submessage {
           widgetData: widgetData,
           pollEventSubmessages: submessages.skip(1),
           messageSenderId: messageSenderId,
-          debugSubmessages: kDebugMode ? submessages : null,
+          submessages: submessages,
         );
       case UnsupportedWidgetData():
         assert(debugLog('Unsupported widgetData: ${widgetData.json}'));
@@ -366,13 +367,13 @@ class Poll extends ChangeNotifier {
     required PollWidgetData widgetData,
     required Iterable<Submessage> pollEventSubmessages,
     required int messageSenderId,
-    required List<Submessage>? debugSubmessages,
+    required List<Submessage> submessages,
   }) {
     final poll = Poll._(
       messageSenderId: messageSenderId,
       question: widgetData.extraData.question,
       options: widgetData.extraData.options,
-      debugSubmessages: debugSubmessages,
+      submessages: submessages,
     );
 
     for (final submessage in pollEventSubmessages) {
@@ -386,22 +387,21 @@ class Poll extends ChangeNotifier {
     required this.messageSenderId,
     required this.question,
     required List<String> options,
-    required List<Submessage>? debugSubmessages,
-  }) {
+    required List<Submessage> submessages,
+  }) : _submessages = submessages,
+       _seenSubmessageIds = {for (final s in submessages) s.id} {
     for (int index = 0; index < options.length; index += 1) {
       // Initial poll options use a placeholder senderId.
       // See [PollEventSubmessage.optionKey] for details.
       _addOption(senderId: null, idx: index, option: options[index]);
-    }
-    if (kDebugMode) {
-      _debugSubmessages = debugSubmessages;
     }
   }
 
   final int messageSenderId;
   String question;
 
-  List<Submessage>? _debugSubmessages;
+  final List<Submessage> _submessages;
+  final Set<int> _seenSubmessageIds;
 
   /// The limit of options any single user can add to a poll.
   ///
@@ -414,6 +414,7 @@ class Poll extends ChangeNotifier {
   final Map<PollOptionKey, PollOption> _options = {};
 
   void handleSubmessageEvent(SubmessageEvent event) {
+    if (!_seenSubmessageIds.add(event.submessageId)) return;
     final PollEventSubmessage? pollEventSubmessage;
     try {
       pollEventSubmessage = PollEventSubmessage.fromJson(jsonDecode(event.content) as Map<String, Object?>);
@@ -422,15 +423,12 @@ class Poll extends ChangeNotifier {
       return;
     }
     _applyEvent(event.senderId, pollEventSubmessage);
+    _submessages.add(Submessage(
+      id: event.submessageId,
+      senderId: event.senderId,
+      msgType: event.msgType,
+      content: event.content));
     notifyListeners();
-
-    if (kDebugMode) {
-      assert(_debugSubmessages != null);
-      _debugSubmessages!.add(Submessage(
-        senderId: event.senderId,
-        msgType: event.msgType,
-        content: event.content));
-    }
   }
 
   void _applyEvent(int senderId, PollEventSubmessage event) {
@@ -486,18 +484,7 @@ class Poll extends ChangeNotifier {
   }
 
   static List<Submessage> toJson(Poll? poll) {
-    List<Submessage>? result;
-
-    if (kDebugMode) {
-      // Useful for setting up a message list with a poll message, which goes
-      // through this codepath (when preparing a fetch response).
-      result = poll?._debugSubmessages;
-    }
-
-    // In prod, rather than maintaining a up-to-date submessages list,
-    // return as if it is empty, because we are not sending the submessages
-    // to the server anyway.
-    return result ?? [];
+    return poll?._submessages ?? [];
   }
 }
 

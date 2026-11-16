@@ -1009,12 +1009,17 @@ PollWidgetData pollWidgetData({
     extraData: PollWidgetExtraData(question: question, options: options));
 }
 
+int _lastSubmessageId = 100;
+int _nextSubmessageId() => _lastSubmessageId++;
+
 Submessage submessage({
+  int? id,
   SubmessageType? msgType,
   required SubmessageData? content,
   int? senderId,
 }) {
   return Submessage(
+    id: id ?? _nextSubmessageId(),
     msgType: msgType ?? SubmessageType.widget,
     content: jsonEncode(content),
     senderId: senderId ?? selfUser.userId,
@@ -1277,6 +1282,7 @@ UpdateMessageFlagsRemoveEvent updateMessageFlagsRemoveEvent(
 SubmessageEvent submessageEvent(
   int messageId,
   int senderId, {
+  int? submessageId,
   required SubmessageData? content,
 }) {
   return SubmessageEvent(
@@ -1285,7 +1291,7 @@ SubmessageEvent submessageEvent(
     content: jsonEncode(content),
     messageId: messageId,
     senderId: senderId,
-    submessageId: 100,
+    submessageId: submessageId ?? _nextSubmessageId(),
   );
 }
 

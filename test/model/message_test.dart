@@ -2346,6 +2346,32 @@ void main() {
           checkPollNotNotified();
           checkPoll(message).options.deepEquals([conditionPollOption('foo')]);
         });
+
+        test('skip already-applied submessageId', () async {
+          message = await preparePollMessage(
+            optionVoterIdsPairs: [('foo', [])]);
+          final voteEvent = eg.submessageEvent(message.id, eg.otherUser.userId,
+            submessageId: 777,
+            content: PollVoteEventSubmessage(
+              key: PollEventSubmessage.optionKey(senderId: null, idx: 0),
+              op: PollVoteOp.add));
+          await store.handleEvent(voteEvent);
+          checkPollNotifiedOnce();
+          checkPoll(message).options.deepEquals([
+            conditionPollOption('foo', voters: [eg.otherUser.userId]),
+          ]);
+
+          // Re-applying the same submessageId is a no-op (even if content differs).
+          await store.handleEvent(eg.submessageEvent(message.id, eg.otherUser.userId,
+            submessageId: 777,
+            content: PollVoteEventSubmessage(
+              key: PollEventSubmessage.optionKey(senderId: null, idx: 0),
+              op: PollVoteOp.remove)));
+          checkPollNotNotified();
+          checkPoll(message).options.deepEquals([
+            conditionPollOption('foo', voters: [eg.otherUser.userId]),
+          ]);
+        });
       });
     });
 
@@ -2440,6 +2466,7 @@ void main() {
       test('content with invalid widget_type', () async {
         message = eg.streamMessage(sender: eg.otherUser, submessages: [
           Submessage(
+            id: 1,
             msgType: SubmessageType.widget,
             content: jsonEncode({'widget_type': 'other'}),
             senderId: eg.otherUser.userId,
