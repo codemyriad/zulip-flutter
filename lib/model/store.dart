@@ -2568,6 +2568,10 @@ class UpdateMachine {
         // (If replacing, the replacement store will do these.)
         unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
         store.presence.start(pingImmediately: true);
+      } else {
+        // Still load cached emoji data so Unicode emoji UIs work offline while
+        // waiting for the replacement store.
+        unawaited(updateMachine._tryLoadCachedEmojiData(initialSnapshot.serverEmojiDataUrl));
       }
       return updateMachine;
     } catch (e) {
@@ -2779,6 +2783,35 @@ class UpdateMachine {
     }
   }
 
+  /// Whether [fetchEmojiData] has succeeded,
+  /// so that cached emoji data shouldn't replace its result.
+  bool _haveFetchedEmojiData = false;
+
+  Future<void> _tryLoadCachedEmojiData(Uri serverEmojiDataUrl) async {
+    if (!debugEnableFetchEmojiData) return;
+    try {
+      final bytes = await ZulipBinding.instance.imageDiskCache.get(
+        store.accountId, serverEmojiDataUrl);
+      if (_disposed || _haveFetchedEmojiData || bytes == null || bytes.isEmpty) return;
+      final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      final cached = ServerEmojiData.fromJson(json);
+      if (_disposed || _haveFetchedEmojiData) return;
+      store.setServerEmojiData(cached);
+    } catch (_) {
+      // Ignore corrupt or unreadable cache entries; network fetch will refresh.
+    }
+  }
+
+  Future<void> _tryStoreCachedEmojiData(Uri serverEmojiDataUrl, ServerEmojiData data) async {
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(jsonEncode(data.toJson())));
+      await ZulipBinding.instance.imageDiskCache.put(
+        store.accountId, serverEmojiDataUrl, bytes);
+    } catch (_) {
+      // Ignore disk cache errors.
+    }
+  }
+
   /// Fetch emoji data from the server, and update the store with the result.
   ///
   /// This functions a lot like [registerQueue] and the surrounding logic
@@ -2794,6 +2827,7 @@ class UpdateMachine {
   /// so it's fine that we go without it for a while.
   Future<void> fetchEmojiData(Uri serverEmojiDataUrl) async {
     if (!debugEnableFetchEmojiData) return;
+    unawaited(_tryLoadCachedEmojiData(serverEmojiDataUrl));
     BackoffMachine? backoffMachine;
     ServerEmojiData data;
     while (true) {
@@ -2816,7 +2850,9 @@ class UpdateMachine {
       }
     }
 
+    _haveFetchedEmojiData = true;
     store.setServerEmojiData(data);
+    unawaited(_tryStoreCachedEmojiData(serverEmojiDataUrl, data));
   }
 
   Completer<void>? _debugLoopSignal;

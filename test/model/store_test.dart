@@ -841,6 +841,7 @@ void main() {
     late FakeApiConnection connection;
 
     void prepareStore() {
+      addTearDown(testBinding.reset);
       updateMachine = eg.updateMachine();
       store = updateMachine.store;
       connection = store.connection as FakeApiConnection;
@@ -929,6 +930,34 @@ void main() {
       async.elapse(const Duration(minutes: 5));
       check(complete).isTrue();
       check(connection.takeRequests()).isEmpty();
+    }));
+
+    test('use cached emoji data when offline', () => awaitFakeAsync((async) async {
+      prepareStore();
+
+      connection.prepare(json: ServerEmojiData(codeToNames: data).toJson());
+      await updateMachine.fetchEmojiData(emojiDataUrl);
+      checkLastRequest();
+      check(store.debugServerEmojiData).deepEquals(data);
+      store.dispose();
+
+      // Simulate restart while offline; cached data loads immediately from disk.
+      final offlineUm = eg.updateMachine();
+      final offlineStore = offlineUm.store;
+      final offlineConn = offlineStore.connection as FakeApiConnection;
+      check(offlineStore.debugServerEmojiData).isNull();
+
+      offlineConn.prepare(httpException: const SocketException('offline'));
+      final future = offlineUm.fetchEmojiData(emojiDataUrl);
+      async.flushMicrotasks();
+      check(offlineStore.debugServerEmojiData).deepEquals(data);
+
+      // Fresh network response updates the cached map once back online.
+      final updatedData = {'1f680': ['rocket']};
+      offlineConn.prepare(json: ServerEmojiData(codeToNames: updatedData).toJson());
+      await future;
+      check(offlineStore.debugServerEmojiData).deepEquals(updatedData);
+      offlineStore.dispose();
     }));
   });
 
