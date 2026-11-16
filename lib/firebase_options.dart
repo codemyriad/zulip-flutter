@@ -13,19 +13,17 @@ import 'package:firebase_core/firebase_core.dart';
 /// For details, see:
 ///   https://developers.google.com/android/guides/google-services-plugin#processing_the_json_file
 const kFirebaseOptionsAndroid = FirebaseOptions(
-  // This `appId` and `messagingSenderId` are the same as in zulip-mobile;
-  // see zulip-mobile:android/app/src/main/res/values/firebase.xml .
-  appId: '1:${_ZulipFirebaseOptions.projectNumber}:android:6ae61ae43a7c3410',
+  appId: '1:${_ZulipFirebaseOptions.projectNumber}:android:6311caf81ef205da77cd88',
   messagingSenderId: _ZulipFirebaseOptions.projectNumber,
   projectId: _ZulipFirebaseOptions.projectId,
-  apiKey: _ZulipFirebaseOptions.firebaseApiKey,
+  apiKey: _ZulipFirebaseOptions.androidApiKey,
 );
 
 /// Configuration used for finding the notification token on iOS.
 ///
 /// On iOS, we don't use Firebase to actually deliver notifications;
-/// rather the Zulip notification bouncer service communicates with
-/// the Apple Push Notification service (APNs) directly.
+/// rather the server communicates with the Apple Push Notification service
+/// (APNs) directly.
 ///
 /// But we do use the Firebase library as a convenient binding to the
 /// platform API for the setup steps of requesting the user's permission
@@ -36,31 +34,23 @@ const kFirebaseOptionsAndroid = FirebaseOptions(
 ///
 /// TODO: Cut out Firebase for APNs and use a thinner platform-API binding.
 const kFirebaseOptionsIos = FirebaseOptions(
-  appId: '1:${_ZulipFirebaseOptions.projectNumber}:ios:9cad34899ca57ba6',
+  appId: '1:${_ZulipFirebaseOptions.projectNumber}:ios:3bf169acddd993f677cd88',
   messagingSenderId: _ZulipFirebaseOptions.projectNumber,
   projectId: _ZulipFirebaseOptions.projectId,
-  apiKey: _ZulipFirebaseOptions.firebaseApiKey,
+  apiKey: _ZulipFirebaseOptions.iosApiKey,
 );
 
 abstract class _ZulipFirebaseOptions {
-  static const projectNumber = '835904834568';
+  static const projectNumber = '872478906649';
 
   // Despite its value, this name applies across Android and iOS.
-  static const projectId = 'zulip-android';
+  static const projectId = 'codemyriad-chat';
 
   // Despite the name, this Google Cloud "API key" is a very different kind
   // of thing from a Zulip "API key".  In particular, it's designed to be
   // included in published builds of client applications, and therefore
   // fundamentally public.  See docs:
   //   https://cloud.google.com/docs/authentication/api-keys
-  //
-  // This key was created fresh for this use in zulip-flutter.
-  // It's easy to create additional keys associated with the same `appId`
-  // and other details above, and to enable or disable individual keys.
-  // See the Google Cloud console:
-  //   https://console.cloud.google.com/apis/credentials
-  //
-  // TODO: Perhaps use a different key in published builds; still fundamentally
-  //   public, but would avoid accidental reuse in dev or modified builds.
-  static const firebaseApiKey = 'AIzaSyC6kw5sqCYjxQl2Lbd_8MDmc1lu2EG0pY4';
+  static const androidApiKey = 'AIzaSyDriYiWg8MJpgmDLo2vPAgZTkBSDeTgBhA';
+  static const iosApiKey = 'AIzaSyD-sVKnzWWjShM2qh9Kk59TR_RhygPvVtk';
 }
