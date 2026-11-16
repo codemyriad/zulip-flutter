@@ -59,10 +59,18 @@ class ConnectivityMonitor with ChangeNotifier {
   ///
   /// Starts true before the first platform connectivity reading arrives,
   /// so transient initial loads don't look offline prematurely; transitions
-  /// cleanly to false as soon as a reading containing [ConnectivityResult.none]
-  /// is observed.
+  /// cleanly to false when a reading is empty, contains
+  /// [ConnectivityResult.none], or only has [ConnectivityResult.vpn] with no
+  /// underlying network transport.
   bool get hasConnectivity =>
-    _lastResults == null || !_lastResults!.contains(ConnectivityResult.none);
+    _lastResults == null || _resultsHaveConnectivity(_lastResults!);
+
+  static bool _resultsHaveConnectivity(Set<ConnectivityResult> results) {
+    if (results.isEmpty || results.contains(ConnectivityResult.none)) {
+      return false;
+    }
+    return results.any((r) => r != ConnectivityResult.vpn);
+  }
 
   /// The number of connectivity updates recorded so far,
   /// the first of them being a baseline rather than a change.
@@ -127,7 +135,7 @@ class ConnectivityMonitor with ChangeNotifier {
       notifyListeners();
     }
     if (previous == null) return; // Just a baseline, not a change.
-    if (resultSet.contains(ConnectivityResult.none)) {
+    if (!_resultsHaveConnectivity(resultSet)) {
       // With no connectivity, a retry cannot succeed.  Signal nothing,
       // and act when connectivity comes back.
       return;
@@ -147,7 +155,7 @@ class ConnectivityMonitor with ChangeNotifier {
       _cooldownTimer = null;
       if (!_retrySignalDeferred) return;
       _retrySignalDeferred = false;
-      if (_lastResults!.contains(ConnectivityResult.none)) return;
+      if (!_resultsHaveConnectivity(_lastResults!)) return;
       _emitRetrySignal();
     });
     _retrySignalsController.add(null);

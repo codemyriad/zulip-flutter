@@ -61,6 +61,30 @@ void main() {
       check(signalCount).equals(1);
     }));
 
+    test('vpn-only or empty connectivity counts as offline', () => awaitFakeAsync((async) async {
+      prepare(async, connectivity: [.wifi, .vpn]);
+      check(monitor.hasConnectivity).isTrue();
+
+      // Dropping to VPN-only (e.g. Tailscale active in airplane mode) has no
+      // underlying transport: hasConnectivity becomes false and no retry signal fires.
+      testBinding.notifyConnectivityChanged([.vpn]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(signalCount).equals(0);
+
+      // Empty result list also counts as offline.
+      testBinding.notifyConnectivityChanged([]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(signalCount).equals(0);
+
+      // Restoring an underlying transport brings hasConnectivity back and signals.
+      testBinding.notifyConnectivityChanged([.wifi, .vpn]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isTrue();
+      check(signalCount).equals(1);
+    }));
+
     test('pace signals: signal a change during cooldown at cooldown end', () => awaitFakeAsync((async) async {
       prepare(async);
 
