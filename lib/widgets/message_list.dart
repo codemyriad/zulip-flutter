@@ -2560,6 +2560,7 @@ class OutboxMessageWithPossibleSender extends StatelessWidget {
       case OutboxMessageState.hidden:
         throw StateError('Hidden OutboxMessage messages should not appear in message lists');
       case OutboxMessageState.waiting:
+      case OutboxMessageState.sent:
         break;
       case OutboxMessageState.failed:
       case OutboxMessageState.waitPeriodExpired:
@@ -2613,6 +2614,9 @@ class _OutboxMessageStatusRow extends StatelessWidget {
             minHeight: 2,
             color: designVariables.foreground.withFadedAlpha(0.5),
             backgroundColor: designVariables.foreground.withFadedAlpha(0.2)));
+
+      case OutboxMessageState.sent:
+        return const SizedBox.shrink();
 
       case OutboxMessageState.failed:
       case OutboxMessageState.waitPeriodExpired:

@@ -491,14 +491,33 @@ class LiveZulipBinding extends ZulipBinding {
   @override
   GlobalStore? getGlobalStoreSync() => _globalStore;
 
+  /// Dispose and clear any cached [GlobalStore] in a background isolate
+  /// after handling a background push message, so subsequent wakes reload
+  /// fresh accounts, credentials, and settings from SQLite.
+  Future<void> closeBackgroundGlobalStore() async {
+    final loading = _globalStoreLoading;
+    if (loading != null) {
+      try {
+        await loading;
+      } catch (_) {}
+    }
+    final store = _globalStore;
+    _globalStore = null;
+    store?.dispose();
+  }
+
   GlobalStore? _globalStore;
   Future<GlobalStore>? _globalStoreLoading;
 
   @override
-  Future<GlobalStore> getGlobalStoreUniquely() {
+  Future<GlobalStore> getGlobalStoreUniquely() async {
     assert(debugRelaxGetGlobalStoreUniquely
         || _debugEnforceGetGlobalStoreUniquely());
-    return getGlobalStore();
+    final store = await getGlobalStore();
+    if (store is LiveGlobalStore) {
+      unawaited(store.sweepStartupOrphans());
+    }
+    return store;
   }
 
   bool _debugEnforceGetGlobalStoreUniquely() {

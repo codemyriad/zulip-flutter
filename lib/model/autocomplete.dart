@@ -5,8 +5,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:unorm_dart/unorm_dart.dart' as unorm;
 
+import '../api/exception.dart';
 import '../api/model/events.dart';
 import '../api/model/model.dart';
+import '../api/route/channels.dart';
 import '../generated/l10n/zulip_localizations.dart';
 import '../widgets/compose_box.dart';
 import 'algorithms.dart';
@@ -1258,9 +1260,16 @@ class TopicAutocompleteView extends AutocompleteView<TopicAutocompleteQuery, Top
   /// are fetched it restarts search to refresh UI showing the newly
   /// fetched topics.
   Future<void> _fetch() async {
-    // TODO: handle fetch failure
-    final result = await store.topics.getChannelTopics(channelId);
-    if (_disposed) return;
+    List<GetChannelTopicsEntry>? result;
+    try {
+      result = await store.topics.getChannelTopics(channelId);
+    } catch (e) {
+      if (_disposed || store.disposed) return;
+      if (!isRetryableRequestError(e)) rethrow;
+      if (!store.coverageEnabled) return;
+      result = await store.loadSavedTopics(channelId);
+    }
+    if (_disposed || store.disposed || result == null) return;
     _topics = result.map((e) => e.name);
     return _startSearch();
   }
