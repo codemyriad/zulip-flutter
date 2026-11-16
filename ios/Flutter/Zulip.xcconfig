@@ -4,8 +4,8 @@
 // This should match the value in ios/Podfile.
 IPHONEOS_DEPLOYMENT_TARGET=15.0
 
-DEVELOPMENT_TEAM=66KHCWMEYB
+DEVELOPMENT_TEAM=4LS8W738Y3
 
 // This should match the `iosAppGroupIdentifier` variable in
 // lib/model/store.dart.
-ZULIP_APP_GROUP_IDENTIFIER=group.com.zulip.app
+ZULIP_APP_GROUP_IDENTIFIER=group.io.codemyriad.chat

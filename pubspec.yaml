@@ -259,4 +259,4 @@ patrol:
   android:
     package_name: io.codemyriad.chat
   ios:
-    bundle_id: org.zulip.Zulip
+    bundle_id: io.codemyriad.chat
