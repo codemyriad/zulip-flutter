@@ -4,9 +4,11 @@ import '../api/core.dart';
 import '../api/model/initial_snapshot.dart';
 import '../model/binding.dart';
 import '../model/content.dart';
+import 'realm_image_provider.dart';
 import 'store.dart';
 
-/// Like [Image.network], but includes [authHeader] if [src] is on-realm.
+/// Like [Image.network], but includes [authHeader] if [src] is on-realm,
+/// and caches the image on disk for use offline.
 ///
 /// Use this to present image content in the ambient realm: avatars, images in
 /// messages, etc. Must have a [PerAccountStoreWidget] ancestor.
@@ -17,12 +19,16 @@ import 'store.dart';
 ///
 /// If [src] is off-realm (e.g., a Gravatar URL), no auth header will be sent.
 ///
-/// The image will be cached according to the cache behavior of [Image.network],
-/// which may mean the cache is shared between realms.
+/// The image is cached in memory, keyed by account,
+/// and on disk according to [ImageDiskCachePolicy.forUrl]
+/// with [contentImmutable] and [versionTracksContent];
+/// see [RealmImageProvider].
 class RealmContentNetworkImage extends StatelessWidget {
   const RealmContentNetworkImage(
     this.src, {
     super.key,
+    this.contentImmutable = false,
+    this.versionTracksContent = false,
     this.scale = 1.0,
     this.frameBuilder,
     this.loadingBuilder,
@@ -49,6 +55,24 @@ class RealmContentNetworkImage extends StatelessWidget {
 
   final Uri src;
 
+  /// Whether the server changes [src] whenever the image changes,
+  /// so that the image at [src] never changes, even if [src] is off-realm.
+  ///
+  /// Pass true for an avatar the server stores,
+  /// so that it's shown from the disk cache without a request
+  /// even when the server keeps it in S3-style storage.
+  /// See [ImageDiskCachePolicy.forUrl].
+  final bool contentImmutable;
+
+  /// Whether the server bumps the `version` query parameter in [src], if any,
+  /// whenever the image changes, even if [src] is off-realm.
+  ///
+  /// Pass true for the realm icon, which the server may keep
+  /// in S3-style storage, or an avatar URL other than Gravatar's.
+  /// Never pass true for a Gravatar URL.
+  /// See [ImageDiskCachePolicy.forUrl].
+  final bool versionTracksContent;
+
   final double scale;
   final ImageFrameBuilder? frameBuilder;
   final ImageLoadingBuilder? loadingBuilder;
@@ -74,12 +98,18 @@ class RealmContentNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final account = PerAccountStoreWidget.of(context).account;
-
-    return Image.network(
-      src.toString(),
-
+    final store = PerAccountStoreWidget.of(context);
+    final provider = RealmImageProvider.forAccount(
+      src,
+      account: store.account,
+      contentImmutable: contentImmutable,
+      versionTracksContent: versionTracksContent,
       scale: scale,
+    );
+
+    return Image(
+      image: ResizeImage.resizeIfNeeded(cacheWidth, cacheHeight, provider),
+
       frameBuilder: frameBuilder,
       loadingBuilder: loadingBuilder,
       errorBuilder: errorBuilder,
@@ -98,15 +128,6 @@ class RealmContentNetworkImage extends StatelessWidget {
       gaplessPlayback: gaplessPlayback,
       filterQuality: filterQuality,
       isAntiAlias: isAntiAlias,
-      headers: {
-        // Only send the auth header to the server `auth` belongs to.
-        if (src.origin == account.realmUrl.origin) ...authHeader(
-          email: account.email, apiKey: account.apiKey,
-        ),
-        ...userAgentHeader(),
-      },
-      cacheWidth: cacheWidth,
-      cacheHeight: cacheHeight,
     );
   }
 }

@@ -5,10 +5,10 @@ import 'package:flutter/scheduler.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mime/mime.dart';
 
-import '../api/core.dart';
 import '../generated/l10n/zulip_localizations.dart';
 import '../host/android_intents.dart';
 import '../log.dart';
+import '../model/avatar_url.dart';
 import '../model/binding.dart';
 import '../model/narrow.dart';
 import '../model/store.dart';
@@ -21,6 +21,7 @@ import 'icons.dart';
 import 'image.dart';
 import 'message_list.dart';
 import 'page.dart';
+import 'realm_image_provider.dart';
 import 'recent_dm_conversations.dart';
 import 'store.dart';
 import 'subscription_list.dart';
@@ -248,6 +249,7 @@ class ShareSheet extends StatelessWidget {
                 borderRadius: 4,
                 child: RealmContentNetworkImage(
                   store.resolvedRealmIcon,
+                  versionTracksContent: store.realmIconVersionTracksContent,
                   filterQuality: FilterQuality.medium,
                   fit: BoxFit.cover)))),
           Expanded(child: TabBar(
@@ -388,9 +390,12 @@ class _ChooseAccountForShareModalState extends State<ChooseAccountForShareModal>
             borderRadius: 4,
             child: resolvedRealmIconUrl == null
               ? const SizedBox.shrink()
-              : Image.network(
-                  resolvedRealmIconUrl.toString(),
-                  headers: userAgentHeader(),
+              : Image(
+                  image: RealmImageProvider.forAccount(
+                    resolvedRealmIconUrl,
+                    account: account,
+                    versionTracksContent:
+                      !GravatarUrl.isGravatarUrl(resolvedRealmIconUrl)),
                   filterQuality: FilterQuality.medium,
                   fit: BoxFit.cover)),
           title: Text(account.realmName ?? account.realmUrl.toString()),
