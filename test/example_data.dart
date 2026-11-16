@@ -470,6 +470,45 @@ PushKey pushKey({
   );
 }
 
+/// A [ServerSnapshot], stored by the app version of the default [packageInfo].
+///
+/// For its data, see [serverSnapshotData].
+ServerSnapshot serverSnapshot({
+  required Account account,
+  String? realmUrl,
+  int? userId,
+  String? queueId,
+  int? lastEventId,
+  String? appVersion,
+  int? timestamp,
+  bool? eventLogTruncated,
+}) {
+  return ServerSnapshot(
+    accountId: account.id,
+    realmUrl: realmUrl ?? account.realmUrl.toString(),
+    userId: userId ?? account.userId,
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
+    appVersion: appVersion ?? '1.0.0+1',
+    timestamp: timestamp ?? 1771389742,
+    eventLogTruncated: eventLogTruncated ?? false,
+  );
+}
+
+const _defaultServerSnapshotQueueId = '1:2345';
+const _defaultServerSnapshotLastEventId = -1;
+
+/// Data for a [ServerSnapshot]: an [initialSnapshot], as UTF-8 JSON,
+/// with the given [queueId] and [lastEventId].
+///
+/// The defaults match those of [serverSnapshot].
+Uint8List serverSnapshotData({String? queueId, int? lastEventId}) {
+  return utf8.encode(jsonEncode(initialSnapshot(
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
+  ).toJson()));
+}
+
 int _nextSavedSnippetId() => _lastSavedSnippetId++;
 int _lastSavedSnippetId = 1;
 
