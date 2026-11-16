@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
+import 'dart:ui' show IsolateNameServer;
 
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
@@ -6,12 +9,15 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
 import '../api/core.dart';
+import '../api/model/model.dart' show TopicName;
 import '../api/notifications.dart';
 import '../api/route/notifications.dart';
 import '../firebase_options.dart';
 import '../log.dart';
 import '../model/binding.dart';
+import '../model/narrow.dart';
 import '../model/push_key.dart';
+import '../model/settings.dart';
 import '../model/store.dart';
 import 'android_display.dart';
 import 'open.dart';
@@ -23,15 +29,48 @@ class NotificationService {
 
   NotificationService._();
 
+  static const _kPrefetchPortName = 'zulip_notification_prefetch_main_v1';
+  static const _prefetchAckTimeout = Duration(milliseconds: 2500);
+  static const _prefetchTimeout = Duration(seconds: 8);
+
+  static bool _isMainIsolate = false;
+  static ReceivePort? _mainPrefetchPort;
+
   /// Reset the state of the [NotificationService], for testing.
   ///
   /// TODO refactor this better, perhaps unify with ZulipBinding
   @visibleForTesting
   static void debugReset() {
+    unregisterMainIsolatePrefetchPort();
+    _isMainIsolate = false;
     instance.token.dispose();
     _instance = null;
     assert(debugBackgroundIsolateIsLive = true);
     NotificationOpenService.debugReset();
+  }
+
+  /// Register a [ReceivePort] in [IsolateNameServer] so a background FCM
+  /// isolate can delegate notification message prefetching to this live main
+  /// isolate's [GlobalStore] / [PerAccountStore].
+  @visibleForTesting
+  static void registerMainIsolatePrefetchPort() {
+    unregisterMainIsolatePrefetchPort();
+    final port = ReceivePort();
+    _mainPrefetchPort = port;
+    IsolateNameServer.removePortNameMapping(_kPrefetchPortName);
+    IsolateNameServer.registerPortWithName(port.sendPort, _kPrefetchPortName);
+    port.listen(_handleMainIsolatePrefetchMessage);
+  }
+
+  /// Close and unregister the [IsolateNameServer] prefetch port, if any.
+  @visibleForTesting
+  static void unregisterMainIsolatePrefetchPort() {
+    final port = _mainPrefetchPort;
+    _mainPrefetchPort = null;
+    if (port != null) {
+      IsolateNameServer.removePortNameMapping(_kPrefetchPortName);
+      port.close();
+    }
   }
 
   /// Whether a background isolate should initialize [LiveZulipBinding].
@@ -64,10 +103,14 @@ class NotificationService {
   }
 
   Future<void> start() async {
+    _isMainIsolate = true;
     NotificationOpenService.instance.start();
 
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
+        if (ZulipBinding.instance is LiveZulipBinding) {
+          registerMainIsolatePrefetchPort();
+        }
         await ZulipBinding.instance.firebaseInitializeApp(
           options: kFirebaseOptionsAndroid);
 
@@ -176,7 +219,7 @@ class NotificationService {
 
   static void _onForegroundMessage(FirebaseRemoteMessage message) {
     assert(debugLog("notif message: ${message.data}"));
-    _onRemoteMessage(message);
+    unawaited(_onRemoteMessage(message));
   }
 
   // This pragma `vm:entry-point` is needed in release mode, when this method
@@ -192,7 +235,13 @@ class NotificationService {
     _initBackgroundIsolate();
 
     assert(debugLog("notif message in background: ${message.data}"));
-    _onRemoteMessage(message);
+    try {
+      await _onRemoteMessage(message);
+    } finally {
+      if (ZulipBinding.instance case final LiveZulipBinding liveBinding) {
+        await liveBinding.closeBackgroundGlobalStore();
+      }
+    }
   }
 
   static void _initBackgroundIsolate() {
@@ -214,7 +263,7 @@ class NotificationService {
     AndroidNotificationDisplayManager.init(); // TODO call this just once per isolate
   }
 
-  static void _onRemoteMessage(FirebaseRemoteMessage message) async {
+  static Future<void> _onRemoteMessage(FirebaseRemoteMessage message) async {
     assert(defaultTargetPlatform == TargetPlatform.android);
     final origData = message.data;
 
@@ -231,7 +280,7 @@ class NotificationService {
     if (result == null) return;
 
     final (data, account) = result;
-    AndroidNotificationDisplayManager.onNotifPayload(data, account);
+    await _handleNotifPayload(data, account);
   }
 
   static Future<void> _onPlaintextRemoteMessage(Map<String, dynamic> rawData) async {
@@ -269,7 +318,181 @@ class NotificationService {
       return;
     }
 
-    AndroidNotificationDisplayManager.onNotifPayload(data, account);
+    await _handleNotifPayload(data, account);
+  }
+
+  static Future<void> _handleNotifPayload(
+    NotifPayloadWithIdentity data,
+    Account account,
+  ) async {
+    final displayFuture = AndroidNotificationDisplayManager.onNotifPayload(data, account);
+    if (data is NotifPayloadNewMessage) {
+      final prefetchFuture = _prefetchMessagesForNotification(data, account);
+      await Future.wait([displayFuture, prefetchFuture]);
+    } else {
+      await displayFuture;
+    }
+  }
+
+  static SendableNarrow _narrowFromNotifPayload(NotifPayloadNewMessage data) {
+    return switch (data.recipient) {
+      NotifPayloadChannelRecipient(:var channelId, :var topic) =>
+        TopicNarrow(channelId, topic),
+      NotifPayloadDmRecipient(:var allRecipientIds) =>
+        DmNarrow(allRecipientIds: allRecipientIds, selfUserId: data.userId),
+    };
+  }
+
+  static Future<void> _prefetchMessagesForNotification(
+    NotifPayloadNewMessage data,
+    Account account,
+  ) async {
+    try {
+      final globalStore = await ZulipBinding.instance.getGlobalStore();
+      if (!globalStore.settings.getBool(BoolGlobalSetting.messageDatabase)) {
+        return;
+      }
+      if (!_isMainIsolate) {
+        final mainPort = IsolateNameServer.lookupPortByName(_kPrefetchPortName);
+        if (mainPort != null) {
+          // A live main isolate has registered its port; delegate exclusively
+          // to it rather than risking cross-isolate writes underneath its
+          // in-memory store.
+          await forwardPrefetchToPort(mainPort, data, account);
+          return;
+        }
+      }
+      final currentAccount = globalStore.getAccount(account.id);
+      if (currentAccount == null) return;
+
+      final abortCompleter = Completer<void>();
+      var timedOut = false;
+      var handedOffToMain = false;
+      bool canProceedInBackground() {
+        if (timedOut) return false;
+        if (_isMainIsolate) return true;
+        if (IsolateNameServer.lookupPortByName(_kPrefetchPortName) != null) {
+          handedOffToMain = true;
+          return false;
+        }
+        return true;
+      }
+
+      await globalStore.prefetchNotificationMessages(
+        currentAccount,
+        narrow: _narrowFromNotifPayload(data),
+        messageId: data.messageId,
+        abortTrigger: abortCompleter.future,
+        externalCanProceedUnloaded: canProceedInBackground,
+      ).timeout(_prefetchTimeout, onTimeout: () {
+        timedOut = true;
+        if (!abortCompleter.isCompleted) {
+          abortCompleter.complete();
+        }
+      });
+
+      if (handedOffToMain && !timedOut) {
+        final mainPort = IsolateNameServer.lookupPortByName(_kPrefetchPortName);
+        if (mainPort != null) {
+          await forwardPrefetchToPort(mainPort, data, account);
+        }
+      }
+    } catch (e, st) {
+      assert(debugLog('Notification message prefetch failed: $e\n$st'));
+    }
+  }
+
+  /// Forward a notification prefetch request to [mainPort] using a two-phase
+  /// `'ack'` + `'done'` reply protocol.
+  ///
+  /// Returns `true` once [mainPort] acknowledges ownership (`'ack'`), even if
+  /// waiting for `'done'` subsequently times out, so the caller never starts a
+  /// duplicate background prefetch concurrently with the main isolate.
+  @visibleForTesting
+  static Future<bool> forwardPrefetchToPort(
+    SendPort mainPort,
+    NotifPayloadNewMessage data,
+    Account account, {
+    Duration ackTimeout = _prefetchAckTimeout,
+    Duration doneTimeout = _prefetchTimeout,
+  }) async {
+    final replyPort = ReceivePort();
+    final iterator = StreamIterator<Object?>(replyPort);
+    var acknowledged = false;
+    try {
+      final Map<String, Object?> payload = switch (data.recipient) {
+        NotifPayloadChannelRecipient(:final channelId, :final topic) => {
+          'accountId': account.id,
+          'channelId': channelId,
+          'topic': topic.apiName,
+          'allRecipientIds': null,
+          'selfUserId': data.userId,
+          'messageId': data.messageId,
+          'replyPort': replyPort.sendPort,
+        },
+        NotifPayloadDmRecipient(:final allRecipientIds) => {
+          'accountId': account.id,
+          'channelId': null,
+          'topic': null,
+          'allRecipientIds': List<int>.of(allRecipientIds),
+          'selfUserId': data.userId,
+          'messageId': data.messageId,
+          'replyPort': replyPort.sendPort,
+        },
+      };
+      mainPort.send(payload);
+      final gotAck = await iterator.moveNext()
+        .timeout(ackTimeout, onTimeout: () => false);
+      if (!gotAck || iterator.current != 'ack') {
+        return false;
+      }
+      acknowledged = true;
+      await iterator.moveNext()
+        .timeout(doneTimeout, onTimeout: () => false);
+      return true;
+    } catch (_) {
+      return acknowledged;
+    } finally {
+      unawaited(iterator.cancel());
+      replyPort.close();
+    }
+  }
+
+  static Future<void> _handleMainIsolatePrefetchMessage(Object? rawMessage) async {
+    if (rawMessage is! Map<String, Object?>) return;
+    final replyPort = rawMessage['replyPort'];
+    if (replyPort is! SendPort) return;
+    replyPort.send('ack');
+    final abortCompleter = Completer<void>();
+    try {
+      final accountId = rawMessage['accountId'] as int;
+      final channelId = rawMessage['channelId'] as int?;
+      final topic = rawMessage['topic'] as String?;
+      final allRecipientIds = (rawMessage['allRecipientIds'] as List<Object?>?)?.cast<int>();
+      final selfUserId = rawMessage['selfUserId'] as int;
+      final messageId = rawMessage['messageId'] as int;
+      final SendableNarrow narrow = channelId != null
+        ? TopicNarrow(channelId, TopicName(topic!))
+        : DmNarrow(allRecipientIds: allRecipientIds!, selfUserId: selfUserId);
+      final globalStore = await ZulipBinding.instance.getGlobalStore();
+      final account = globalStore.getAccount(accountId);
+      if (account != null) {
+        await globalStore.prefetchNotificationMessages(
+          account,
+          narrow: narrow,
+          messageId: messageId,
+          abortTrigger: abortCompleter.future,
+        ).timeout(_prefetchTimeout, onTimeout: () {
+          if (!abortCompleter.isCompleted) {
+            abortCompleter.complete();
+          }
+        });
+      }
+    } catch (e, st) {
+      assert(debugLog('Main-isolate notification prefetch failed: $e\n$st'));
+    } finally {
+      replyPort.send('done');
+    }
   }
 
   /// Decrypt an E2EE notification content.
