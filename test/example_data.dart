@@ -1406,6 +1406,7 @@ const _userSettings = userSettings;
 InitialSnapshot initialSnapshot({
   String? queueId,
   int? lastEventId,
+  int? maxMessageId = -1,
   int? zulipFeatureLevel,
   String? zulipVersion,
   String? zulipMergeBase,
@@ -1440,6 +1441,7 @@ InitialSnapshot initialSnapshot({
   RealmWildcardMentionPolicy? realmWildcardMentionPolicy,
   RealmTopicsPolicy? realmTopicsPolicy,
   bool? realmMandatoryTopics,
+  int? realmMessageRetentionDays = -1,
   String? realmName,
   int? realmWaitingPeriodThreshold,
   int? realmMessageContentDeleteLimitSeconds,
@@ -1470,6 +1472,7 @@ InitialSnapshot initialSnapshot({
   return InitialSnapshot(
     queueId: queueId ?? '1:2345',
     lastEventId: lastEventId ?? -1,
+    maxMessageId: maxMessageId,
     zulipFeatureLevel: zulipFeatureLevel ?? recentZulipFeatureLevel,
     zulipVersion: zulipVersion ?? recentZulipVersion,
     zulipMergeBase: zulipMergeBase ?? recentZulipVersion,
@@ -1509,6 +1512,7 @@ InitialSnapshot initialSnapshot({
     // no default; allow `null` to simulate servers without this
     realmTopicsPolicy: realmTopicsPolicy,
     realmMandatoryTopics: realmMandatoryTopics ?? true,
+    realmMessageRetentionDays: realmMessageRetentionDays,
     realmName: realmName ?? 'Example Zulip organization',
     realmWaitingPeriodThreshold: realmWaitingPeriodThreshold ?? 0,
     realmMessageContentDeleteLimitSeconds: realmMessageContentDeleteLimitSeconds,

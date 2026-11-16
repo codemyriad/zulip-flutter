@@ -63,6 +63,7 @@ mixin RealmStore on PerAccountStoreBase, UserGroupStore {
   bool get realmEnableReadReceipts;
   RealmTopicsPolicy? get realmTopicsPolicy; // TODO(server-11)
   bool? get realmMandatoryTopics; // TODO(server-11) Remove deprecated setting.
+  int? get realmMessageRetentionDays;
   int get maxFileUploadSizeMib;
   int? get realmMessageContentDeleteLimitSeconds;
   Duration? get realmMessageContentEditLimit =>
@@ -215,6 +216,8 @@ mixin ProxyRealmStore on RealmStore {
   @override
   bool? get realmMandatoryTopics => realmStore.realmMandatoryTopics;
   @override
+  int? get realmMessageRetentionDays => realmStore.realmMessageRetentionDays;
+  @override
   int get maxFileUploadSizeMib => realmStore.maxFileUploadSizeMib;
   @override
   int? get realmMessageContentDeleteLimitSeconds => realmStore.realmMessageContentDeleteLimitSeconds;
@@ -287,6 +290,7 @@ class RealmStoreImpl extends HasUserGroupStore with RealmStore {
     realmCanDeleteOwnMessageGroup = initialSnapshot.realmCanDeleteOwnMessageGroup,
     realmTopicsPolicy = initialSnapshot.realmTopicsPolicy,
     realmMandatoryTopics = initialSnapshot.realmMandatoryTopics,
+    realmMessageRetentionDays = initialSnapshot.realmMessageRetentionDays,
     maxFileUploadSizeMib = initialSnapshot.maxFileUploadSizeMib,
     realmMessageContentDeleteLimitSeconds = initialSnapshot.realmMessageContentDeleteLimitSeconds,
     realmMessageContentEditLimitSeconds = initialSnapshot.realmMessageContentEditLimitSeconds,
@@ -457,6 +461,8 @@ class RealmStoreImpl extends HasUserGroupStore with RealmStore {
   final RealmTopicsPolicy? realmTopicsPolicy;
   @override
   final bool? realmMandatoryTopics;
+  @override
+  final int? realmMessageRetentionDays;
   @override
   final int maxFileUploadSizeMib;
   @override

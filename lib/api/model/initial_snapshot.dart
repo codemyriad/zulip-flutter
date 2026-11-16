@@ -16,6 +16,7 @@ class InitialSnapshot {
 
   final String? queueId;
   final int lastEventId;
+  final int? maxMessageId;
   final int zulipFeatureLevel;
   final String zulipVersion;
   final String zulipMergeBase;
@@ -102,6 +103,8 @@ class InitialSnapshot {
 
   final bool? realmMandatoryTopics; // TODO(server-11) Remove deprecated setting.
 
+  final int? realmMessageRetentionDays;
+
   final String realmName;
 
   /// The number of days until a user's account is treated as a full member.
@@ -174,6 +177,7 @@ class InitialSnapshot {
   InitialSnapshot({
     required this.queueId,
     required this.lastEventId,
+    required this.maxMessageId,
     required this.zulipFeatureLevel,
     required this.zulipVersion,
     required this.zulipMergeBase,
@@ -208,6 +212,7 @@ class InitialSnapshot {
     required this.realmWildcardMentionPolicy,
     required this.realmTopicsPolicy,
     required this.realmMandatoryTopics,
+    required this.realmMessageRetentionDays,
     required this.realmName,
     required this.realmWaitingPeriodThreshold,
     required this.realmMessageContentDeleteLimitSeconds,

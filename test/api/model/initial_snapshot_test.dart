@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:checks/checks.dart';
 import 'package:test/scaffolding.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
@@ -71,5 +73,40 @@ void main() {
       final settings = UserSettings.fromJson(json);
       check(settings.emojiset).equals(Emojiset.unknown);
     }
+  });
+
+  test('InitialSnapshot.maxMessageId', () {
+    final baseJson =
+        jsonDecode(jsonEncode(eg.initialSnapshot())) as Map<String, dynamic>;
+
+    final withId = InitialSnapshot.fromJson({...baseJson, 'max_message_id': 42});
+    check(withId.maxMessageId).equals(42);
+
+    final withNegOne = InitialSnapshot.fromJson({...baseJson, 'max_message_id': -1});
+    check(withNegOne.maxMessageId).equals(-1);
+
+    final absent = InitialSnapshot.fromJson(Map.of(baseJson)..remove('max_message_id'));
+    check(absent.maxMessageId).isNull();
+  });
+
+  test('InitialSnapshot.realmMessageRetentionDays', () {
+    final baseJson =
+        jsonDecode(jsonEncode(eg.initialSnapshot())) as Map<String, dynamic>;
+
+    final finite = InitialSnapshot.fromJson({
+      ...baseJson,
+      'realm_message_retention_days': 30,
+    });
+    check(finite.realmMessageRetentionDays).equals(30);
+
+    final unlimited = InitialSnapshot.fromJson({
+      ...baseJson,
+      'realm_message_retention_days': -1,
+    });
+    check(unlimited.realmMessageRetentionDays).equals(-1);
+
+    final absent = InitialSnapshot.fromJson(
+      Map.of(baseJson)..remove('realm_message_retention_days'));
+    check(absent.realmMessageRetentionDays).isNull();
   });
 }
