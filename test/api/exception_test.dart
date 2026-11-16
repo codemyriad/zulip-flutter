@@ -25,4 +25,16 @@ void main() {
   });
 
   // NetworkException.toString: see "API network errors" test in core_test.dart
+
+  test('isRetryableRequestError on MalformedServerResponseException', () {
+    check(isRetryableRequestError(MalformedServerResponseException(
+      routeName: 'aRoute', httpStatus: 200, data: null,
+    ))).isTrue();
+    check(isRetryableRequestError(MalformedServerResponseException(
+      routeName: 'aRoute', httpStatus: 200, data: {'result': 'success'},
+    ))).isFalse();
+    check(isRetryableRequestError(MalformedServerResponseException(
+      routeName: 'aRoute', httpStatus: 400, data: {'unexpected': 1},
+    ))).isFalse();
+  });
 }
