@@ -27,6 +27,14 @@ void main() {
       await db.close();
     });
 
+    test('setupDatabaseConnection sets busy_timeout', () async {
+      final db = AppDatabase(NativeDatabase.memory(
+        setup: setupDatabaseConnection));
+      addTearDown(db.close);
+      final result = await db.customSelect('PRAGMA busy_timeout').getSingle();
+      check(result.data).deepEquals({'timeout': 3000});
+    });
+
     test('initialize GlobalSettings with defaults', () async {
       check(await db.getGlobalSettings()).themeSetting.isNull();
     });
