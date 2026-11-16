@@ -37,6 +37,8 @@ class GetMessageResult {
 }
 
 /// https://zulip.com/api/get-messages
+///
+/// For [abortTrigger], see [ApiConnection.get].
 Future<GetMessagesResult> getMessages(ApiConnection connection, {
   required ApiNarrow narrow,
   required Anchor anchor,
@@ -47,6 +49,7 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
   bool? applyMarkdown,
   required bool allowEmptyTopicName,
   // bool? useFirstUnreadAnchor // omitted because deprecated
+  Future<void>? abortTrigger,
 }) {
   assert(allowEmptyTopicName, '`allowEmptyTopicName` should only be true');
   return connection.get('getMessages', GetMessagesResult.fromJson, 'messages', {
@@ -58,7 +61,7 @@ Future<GetMessagesResult> getMessages(ApiConnection connection, {
     'client_gravatar': ?clientGravatar,
     'apply_markdown': ?applyMarkdown,
     'allow_empty_topic_name': allowEmptyTopicName,
-  });
+  }, abortTrigger: abortTrigger);
 }
 
 /// An anchor value for [getMessages].
@@ -101,6 +104,13 @@ class GetMessagesResult {
   @JsonKey(fromJson: _messagesFromJson)
   final List<Message> messages;
 
+  /// The JSON of each of [messages], as received from the server,
+  /// if this result came from [GetMessagesResult.fromJson]; else null.
+  ///
+  /// Unlike the result of [Message.toJson], this is exactly what the server sent.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  final List<Map<String, dynamic>>? rawMessages;
+
   GetMessagesResult({
     required this.anchor,
     required this.foundNewest,
@@ -108,6 +118,16 @@ class GetMessagesResult {
     required this.foundAnchor,
     required this.historyLimited,
     required this.messages,
+  }) : rawMessages = null;
+
+  GetMessagesResult._({
+    required this.anchor,
+    required this.foundNewest,
+    required this.foundOldest,
+    required this.foundAnchor,
+    required this.historyLimited,
+    required this.messages,
+    required this.rawMessages,
   });
 
   static List<Message> _messagesFromJson(Object json) {
@@ -116,8 +136,22 @@ class GetMessagesResult {
       .toList();
   }
 
-  factory GetMessagesResult.fromJson(Map<String, dynamic> json) =>
-      _$GetMessagesResultFromJson(json);
+  factory GetMessagesResult.fromJson(Map<String, dynamic> json) {
+    final result = _$GetMessagesResultFromJson(json);
+    final rawList = json['messages'] as List<dynamic>;
+    return GetMessagesResult._(
+      anchor: result.anchor,
+      foundNewest: result.foundNewest,
+      foundOldest: result.foundOldest,
+      foundAnchor: result.foundAnchor,
+      historyLimited: result.historyLimited,
+      messages: result.messages,
+      rawMessages: [
+        for (final entry in rawList)
+          entry as Map<String, dynamic>,
+      ],
+    );
+  }
 
   Map<String, dynamic> toJson() => _$GetMessagesResultToJson(this);
 }

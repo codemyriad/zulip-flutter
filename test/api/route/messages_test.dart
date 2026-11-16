@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
+import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/narrow.dart';
 
 import '../../example_data.dart' as eg;
+import '../../fake_async.dart';
 import '../../stdlib_checks.dart';
+import '../exception_checks.dart';
 import '../fake_api.dart';
 import 'route_checks.dart';
 
@@ -235,6 +239,24 @@ void main() {
           });
       });
     });
+
+    test('abortTrigger', () => awaitFakeAsync((async) async {
+      await FakeApiConnection.with_((connection) async {
+        connection.prepare(json: fakeResult.toJson(),
+          delay: const Duration(seconds: 10));
+        final abortTrigger = Completer<void>();
+        final future = getMessages(connection,
+          narrow: const CombinedFeedNarrow().apiEncode(),
+          anchor: AnchorCode.newest, numBefore: 10, numAfter: 20,
+          allowEmptyTopicName: true,
+          abortTrigger: abortTrigger.future);
+        async.elapse(const Duration(seconds: 1));
+        abortTrigger.complete();
+        await check(future).throws<NetworkException>((it) => it
+          .cause.isA<http.RequestAbortedException>());
+        check(async.elapsed).equals(const Duration(seconds: 1));
+      });
+    }));
   });
 
   group('sendMessage', () {
@@ -727,5 +749,20 @@ void main() {
         ..method.equals('GET')
         ..url.path.equals('/api/v1/messages/123321/read_receipts');
     });
+  });
+
+  test('GetMessagesResult.fromJson preserves rawMessages', () {
+    final rawMessage = eg.streamMessage(id: 42).toJson();
+    rawMessage['unknown_server_field'] = 'keep-me';
+    final result = GetMessagesResult.fromJson({
+      'anchor': 42,
+      'found_newest': true,
+      'found_oldest': true,
+      'found_anchor': true,
+      'history_limited': false,
+      'messages': [rawMessage],
+    });
+    check(result.messages).length.equals(1);
+    check(result.rawMessages).isNotNull().single['unknown_server_field'].equals('keep-me');
   });
 }
