@@ -9,6 +9,7 @@ import '../api/model/events.dart';
 import '../api/model/model.dart';
 import '../api/route/account.dart';
 import '../api/route/notifications.dart';
+import '../codemyriad.dart';
 import '../log.dart';
 import '../notifications/receive.dart';
 import 'binding.dart';
@@ -79,7 +80,7 @@ class PushDeviceManager extends PerAccountStoreBase {
   /// This is an entry in [devices].
   ClientDevice? get thisDevice => _devices[account.deviceId];
 
-  bool get _e2eeAvailable => zulipFeatureLevel >= 468; // TODO(server-12)
+  bool get _e2eeAvailable => !useDirectPushNotifications && zulipFeatureLevel >= 468; // TODO(server-12)
 
   void handleDeviceEvent(DeviceEvent event) {
     switch (event) {
@@ -143,7 +144,7 @@ class PushDeviceManager extends PerAccountStoreBase {
     }
 
     if (account.deviceId == null
-        && zulipFeatureLevel >= 468) { // TODO(server-12)
+        && _e2eeAvailable) { // TODO(server-12)
       // We haven't yet managed registerClientDevice for this account. Do it now.
       // (We'll need this logic here for as long as clients may be upgrading
       // from either old clients, or old servers, that lack this feature.

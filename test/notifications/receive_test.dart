@@ -14,6 +14,7 @@ import 'package:zulip/api/backoff.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/notifications.dart';
+import 'package:zulip/codemyriad.dart';
 import 'package:zulip/model/message.dart';
 import 'package:zulip/model/message_coverage.dart';
 import 'package:zulip/model/message_list.dart';
@@ -656,5 +657,58 @@ void main() {
       );
       check(ackHandled).isTrue();
     });
+
+    test('direct push displays and prefetches plaintext FCM payload at FL 468+', () =>
+      runWithAvatarHttp(() => awaitFakeAsync(initialTime: baseTime, (async) async {
+        setupNotifTestEnvironment();
+        debugDirectPushNotificationsEnabled = true;
+        final channel = eg.stream(streamId: 10, name: 'general');
+        final modernAccount = eg.selfAccount.copyWith(zulipFeatureLevel: 501);
+        final globalStore = await createConfiguredStore(
+          account: modernAccount,
+          messageDatabase: true,
+        );
+        testBinding.customGlobalStore = globalStore;
+        globalStore.prepareRegisterQueueResponse = (conn) => conn.prepare(
+          json: _snapshotToJson(eg.initialSnapshot(
+            zulipFeatureLevel: 501,
+            queueId: 'q1',
+            lastEventId: 1,
+            maxMessageId: 100,
+            streams: [channel],
+            subscriptions: [eg.subscription(channel)],
+          )),
+        );
+        final store = await globalStore.perAccount(modernAccount.id);
+        final connection = store.connection as FakeApiConnection;
+        async.elapse(Duration.zero);
+        connection.takeRequests();
+
+        await NotificationService.instance.start();
+        final notifiedMsg = eg.streamMessage(
+          id: 105,
+          stream: channel,
+          topic: 'deploy',
+          content: '<p>Direct push</p>',
+        );
+        connection.prepare(
+          json: eg.newestGetMessagesResult(
+            foundOldest: true,
+            messages: [notifiedMsg],
+          ).toJson()..['anchor'] = 105,
+        );
+
+        final directFcm = await _encodeFcmForStore(
+          globalStore,
+          legacyMessageFcmMessage(notifiedMsg, account: modernAccount),
+        );
+        testBinding.firebaseMessaging.onMessage.add(directFcm);
+        async.elapse(Duration.zero);
+        await globalStore.backend.messageDbWriterForAccount(modernAccount.id).drainForTesting();
+        async.flushMicrotasks();
+
+        check(testBinding.androidNotificationHost.takeNotifyCalls()).isNotEmpty();
+        check(store.messages.keys).contains(105);
+      })));
   });
 }

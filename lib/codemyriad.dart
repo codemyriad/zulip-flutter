@@ -31,3 +31,26 @@ Uri? get fixedRealmUrl {
 /// Outside of debug mode, this has no effect.
 @visibleForTesting
 bool debugFixedRealmUrlEnabled = true;
+
+/// Whether push notifications are sent directly from the Zulip server to
+/// APNs and FCM rather than through Zulip's push notification bouncer.
+///
+/// When true, the client registers tokens directly via `/users/me/apns_device_token`
+/// and `/users/me/android_gcm_reg_id` and accepts direct FCM payloads even on
+/// servers at feature level 468+.
+bool get useDirectPushNotifications {
+  bool enabled = true;
+  assert(() {
+    enabled = debugDirectPushNotificationsEnabled;
+    return true;
+  }());
+  return enabled;
+}
+
+/// In debug mode, controls whether [useDirectPushNotifications] is active.
+///
+/// The test binding sets this to false so existing bouncer/E2EE push tests run
+/// unchanged; tests of direct push set it to true.
+/// Outside of debug mode, this has no effect.
+@visibleForTesting
+bool debugDirectPushNotificationsEnabled = true;

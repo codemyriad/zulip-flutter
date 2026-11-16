@@ -10,6 +10,7 @@ import 'package:test/scaffolding.dart';
 import 'package:zulip/api/core.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/account.dart';
+import 'package:zulip/codemyriad.dart';
 import 'package:zulip/model/push_device.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/notifications/receive.dart';
@@ -506,6 +507,26 @@ void main() {
         await Future<void>.delayed(Duration(seconds: 1));
         await future;
         checkLastRequestFcm(token: '012abc');
+      }));
+
+      testAndroidIos('direct push registers via direct endpoint even at FL 468+', () => awaitFakeAsync((async) async {
+        testBinding.firebaseMessagingInitialToken = '012abc';
+        testBinding.packageInfoResult = eg.packageInfo(packageName: 'io.codemyriad.chat');
+        await NotificationService.instance.start();
+
+        await prepareStore(zulipFeatureLevel: 501);
+        debugDirectPushNotificationsEnabled = true;
+        await store.updateAccount(AccountsCompanion(deviceId: drift.Value(null)));
+        connection.prepare(json: {});
+        await model.debugUnpauseRegisterToken();
+
+        check(store.account.deviceId).isNull();
+        check(store.account).possibleLegacyPushToken.isTrue();
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          checkLastRequestFcm(token: '012abc');
+        } else {
+          checkLastRequestApns(token: '012abc', appid: 'io.codemyriad.chat');
+        }
       }));
     });
   });

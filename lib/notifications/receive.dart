@@ -12,6 +12,7 @@ import '../api/core.dart';
 import '../api/model/model.dart' show TopicName;
 import '../api/notifications.dart';
 import '../api/route/notifications.dart';
+import '../codemyriad.dart';
 import '../firebase_options.dart';
 import '../log.dart';
 import '../model/binding.dart';
@@ -303,7 +304,7 @@ class NotificationService {
     }
 
     assert(defaultTargetPlatform == TargetPlatform.android);
-    if (account.zulipFeatureLevel >= 468) {
+    if (!useDirectPushNotifications && account.zulipFeatureLevel >= 468) {
       // The server is new enough for E2EE notifications, but this is a legacy
       // plaintext notification.  It's normal to potentially get these when
       // either client or server is first upgraded to add E2EE support, because

@@ -102,6 +102,7 @@ class TestZulipBinding extends ZulipBinding {
   /// unless they set [debugFixedRealmUrlEnabled].
   void _resetFixedRealmUrl() {
     debugFixedRealmUrlEnabled = false;
+    debugDirectPushNotificationsEnabled = false;
   }
 
   /// The current global store offered to a [GlobalStoreWidget].
