@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
@@ -15,6 +16,7 @@ import '../api/exception.dart';
 import '../api/model/events.dart';
 import '../api/model/initial_snapshot.dart';
 import '../api/model/model.dart';
+import '../api/route/channels.dart';
 import '../api/route/events.dart';
 import '../api/backoff.dart';
 import '../api/route/realm.dart';
@@ -28,7 +30,14 @@ import 'connectivity.dart';
 import 'database.dart';
 import 'emoji.dart';
 import 'localizations.dart';
+import 'message_coverage.dart';
+import 'message_database.dart';
+import 'message_db_writer.dart';
+import 'race_buffer.dart';
+import '../api/route/messages.dart';
 import 'message.dart';
+import 'message_list.dart';
+import 'narrow.dart';
 import 'presence.dart';
 import 'push_device.dart';
 import 'push_key.dart';
@@ -39,6 +48,7 @@ import 'server_support.dart';
 import 'channel.dart';
 import 'saved_snippet.dart';
 import 'settings.dart';
+import 'stored_message_codec.dart';
 import 'topics.dart';
 import 'typing_status.dart';
 import 'unreads.dart';
@@ -87,6 +97,81 @@ abstract class GlobalStoreBackend {
   ///
   /// This should only be called from [GlobalPushKeyStore].
   Future<void> doRemovePushKey(int pushKeyId);
+
+  /// Store a fresh initial snapshot as the account's [ServerSnapshot],
+  /// with [data], replacing any previous server data for the account.
+  ///
+  /// Returns false, storing nothing, if the account doesn't exist.
+  ///
+  /// See [AppDatabase.storeServerSnapshot].
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  });
+
+  /// Record a batch of events received on the account's stored event queue.
+  ///
+  /// Returns false, storing nothing, if the account has no [ServerSnapshot]
+  /// with the given [queueId].
+  ///
+  /// See [AppDatabase.appendServerEvents].
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  });
+
+  /// Record that events received on the account's stored event queue
+  /// are being left out of the stored event log,
+  /// deleting the stored events.
+  ///
+  /// Returns false, storing nothing, if the account has no [ServerSnapshot]
+  /// with the given [queueId].
+  ///
+  /// See [AppDatabase.truncateServerEventLog].
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  });
+
+  /// Get the metadata of the account's stored server data,
+  /// without reading the data itself,
+  /// or null if there is none.
+  ///
+  /// See [MessageDatabase.loadServerSnapshotInfo].
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId);
+
+  /// Get the account's stored server data, or null if there is none.
+  ///
+  /// See [MessageDatabase.loadServerData].
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  });
+
+  /// Delete the account's stored server data, if any.
+  ///
+  /// See [MessageDatabase.clearServerData].
+  Future<void> doClearServerData(int accountId);
+
+  /// Delete all cached message data across all accounts, leaving server
+  /// snapshots intact.
+  Future<void> doWipeAllMessageCache();
+
+  /// The per-account serialized writer for [MessageDatabase].
+  MessageDbWriter messageDbWriterForAccount(int accountId);
+
+  /// Commit server event-log changes (`truncate` or `append`) inside an
+  /// already-open [MessageDatabase] write transaction.
+  ///
+  /// Returns false if no matching [ServerSnapshot] exists for [queueId] on
+  /// [accountId].
+  Future<bool> commitServerEventsInMessageDbTxn(
+    MessageDatabase db,
+    int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+    required bool truncate,
+  });
 }
 
 /// Store for all the user's data.
@@ -119,11 +204,42 @@ abstract class GlobalStore extends ChangeNotifier {
     required Iterable<Account> accounts,
     required Iterable<PushKey> pushKeys,
   })
-    : settings = GlobalSettingsStore(backend: backend,
+    : _backend = backend,
+      settings = GlobalSettingsStore(backend: backend,
         data: globalSettings, boolData: boolGlobalSettings, intData: intGlobalSettings),
       pushKeys = GlobalPushKeyStore(backend: backend,
         data: pushKeys),
-      _accounts = Map.fromEntries(accounts.map((a) => MapEntry(a.id, a)));
+      _accounts = Map.fromEntries(accounts.map((a) => MapEntry(a.id, a))) {
+    _lastMessageDatabaseEnabled = settings.getBool(BoolGlobalSetting.messageDatabase);
+    settings.addListener(_handleSettingsChanged);
+  }
+
+  final GlobalStoreBackend _backend;
+
+  late bool _lastMessageDatabaseEnabled;
+
+  void _handleSettingsChanged() {
+    if (_disposed) return;
+    final enabled = settings.getBool(BoolGlobalSetting.messageDatabase);
+    if (enabled == _lastMessageDatabaseEnabled) return;
+    _lastMessageDatabaseEnabled = enabled;
+    if (!enabled) {
+      for (final store in _perAccountStores.values) {
+        store._messages.disableMessageDatabase();
+      }
+      unawaited(_backend.doWipeAllMessageCache().catchError((_) {}));
+    } else {
+      for (final store in _perAccountStores.values) {
+        if (store.disposed) continue;
+        final um = store.updateMachine;
+        if (um != null) {
+          unawaited(store.initMessageDbFromRegister(lastEventId: um.lastEventId));
+        } else {
+          store.debugSetCoverageEnabled(true);
+        }
+      }
+    }
+  }
 
   /// The store for the user's account-independent settings.
   ///
@@ -144,8 +260,12 @@ abstract class GlobalStore extends ChangeNotifier {
     _connectivityMonitor ??= ConnectivityMonitor();
   ConnectivityMonitor? _connectivityMonitor;
 
+  bool _disposed = false;
+
   @override
   void dispose() {
+    _disposed = true;
+    settings.removeListener(_handleSettingsChanged);
     _connectivityMonitor?.dispose();
     super.dispose();
   }
@@ -183,6 +303,134 @@ abstract class GlobalStore extends ChangeNotifier {
   /// by the asynchronous [perAccount].
   PerAccountStore? perAccountSync(int accountId) => _perAccountStores[accountId];
 
+  final Map<(int, String), Future<void>> _inFlightUnloadedNotifPrefetches = {};
+  final Map<(int, String), int> _pendingUnloadedNotifPrefetchMaxId = {};
+
+  /// Prefetch messages around [messageId] in [narrow] for [account] when a
+  /// notification arrives, so the conversation is available offline.
+  ///
+  /// Does nothing unless [BoolGlobalSetting.messageDatabase] is enabled.
+  /// Routes through the loaded [PerAccountStore] when one is in memory (or
+  /// currently loading), and otherwise writes directly to [MessageDatabase].
+  /// Never throws.
+  Future<void> prefetchNotificationMessages(
+    Account account, {
+    required SendableNarrow narrow,
+    required int messageId,
+    Future<void>? abortTrigger,
+    bool Function()? externalCanProceedUnloaded,
+  }) async {
+    if (_disposed || !settings.getBool(BoolGlobalSetting.messageDatabase)) return;
+    if (getAccount(account.id) == null) return;
+
+    if (perAccountSync(account.id) case final loadedStore?) {
+      await loadedStore.prefetchNotificationMessages(
+        narrow: narrow,
+        messageId: messageId,
+        abortTrigger: abortTrigger,
+      );
+      return;
+    }
+    if (_perAccountStoresLoading.containsKey(account.id)) {
+      try {
+        final loadedStore = await perAccount(account.id);
+        await loadedStore.prefetchNotificationMessages(
+          narrow: narrow,
+          messageId: messageId,
+          abortTrigger: abortTrigger,
+        );
+      } catch (e) {
+        assert(debugLog('Notification prefetch while loading store failed: $e'));
+      }
+      return;
+    }
+
+    final key = coverageKey(narrow);
+    if (key == null) return;
+    final coalesceKey = (account.id, key);
+    final existingInFlight = _inFlightUnloadedNotifPrefetches[coalesceKey];
+    if (existingInFlight != null) {
+      final prevPending = _pendingUnloadedNotifPrefetchMaxId[coalesceKey];
+      if (prevPending == null || messageId > prevPending) {
+        _pendingUnloadedNotifPrefetchMaxId[coalesceKey] = messageId;
+      }
+      await existingInFlight;
+      return;
+    }
+
+    final completer = Completer<void>();
+    _inFlightUnloadedNotifPrefetches[coalesceKey] = completer.future;
+    try {
+      var targetId = messageId;
+      while (!_disposed
+          && settings.getBool(BoolGlobalSetting.messageDatabase)
+          && getAccount(account.id) != null) {
+        if (perAccountSync(account.id) case final loadedStore?) {
+          await loadedStore.prefetchNotificationMessages(
+            narrow: narrow,
+            messageId: targetId,
+            abortTrigger: abortTrigger,
+          );
+          final nextId = _pendingUnloadedNotifPrefetchMaxId.remove(coalesceKey);
+          if (nextId == null) break;
+          targetId = nextId;
+          continue;
+        }
+        if (_perAccountStoresLoading.containsKey(account.id)) {
+          try {
+            final loadedStore = await perAccount(account.id);
+            await loadedStore.prefetchNotificationMessages(
+              narrow: narrow,
+              messageId: targetId,
+              abortTrigger: abortTrigger,
+            );
+          } catch (_) {}
+          final nextId = _pendingUnloadedNotifPrefetchMaxId.remove(coalesceKey);
+          if (nextId == null) break;
+          targetId = nextId;
+          continue;
+        }
+
+        if (externalCanProceedUnloaded != null && !externalCanProceedUnloaded()) {
+          break;
+        }
+
+        final currentAccount = getAccount(account.id)!;
+        final handledUnloaded = await prefetchUnloadedNotificationMessages(
+          account: currentAccount,
+          writer: _backend.messageDbWriterForAccount(account.id),
+          openConnection: () => apiConnectionFromAccount(currentAccount),
+          canProceedUnloaded: () => !_disposed
+            && settings.getBool(BoolGlobalSetting.messageDatabase)
+            && getAccount(account.id) != null
+            && perAccountSync(account.id) == null
+            && !_perAccountStoresLoading.containsKey(account.id)
+            && (externalCanProceedUnloaded == null || externalCanProceedUnloaded()),
+          narrow: narrow,
+          targetMessageId: targetId,
+          abortTrigger: abortTrigger,
+        );
+        if (!handledUnloaded) {
+          if (externalCanProceedUnloaded != null && !externalCanProceedUnloaded()) {
+            break;
+          }
+          // A PerAccountStore started loading concurrently in this isolate;
+          // loop around to delegate targetId to it instead.
+          continue;
+        }
+        final nextId = _pendingUnloadedNotifPrefetchMaxId.remove(coalesceKey);
+        if (nextId == null) break;
+        targetId = nextId;
+      }
+    } catch (e) {
+      assert(debugLog('Unloaded notification prefetch failed: $e'));
+    } finally {
+      _pendingUnloadedNotifPrefetchMaxId.remove(coalesceKey);
+      unawaited(_inFlightUnloadedNotifPrefetches.remove(coalesceKey));
+      completer.complete();
+    }
+  }
+
   /// The store's per-account data for the given account.
   ///
   /// If the data for this account is not already loaded, this will ensure a
@@ -214,7 +462,7 @@ abstract class GlobalStore extends ChangeNotifier {
     }
 
     // It's up to us.  Start loading.
-    future = loadPerAccount(accountId);
+    future = loadPerAccount(accountId, allowPersisted: true);
     _perAccountStoresLoading[accountId] = future;
     try {
       store = await future;
@@ -229,15 +477,23 @@ abstract class GlobalStore extends ChangeNotifier {
     assert(_accounts.containsKey(accountId));
     assert(_perAccountStores.containsKey(accountId));
     assert(!_perAccountStoresLoading.containsKey(accountId));
-    final store = await loadPerAccount(accountId);
+    final store = await loadPerAccount(accountId, allowPersisted: false);
     _setPerAccount(accountId, store);
   }
 
   void _setPerAccount(int accountId, PerAccountStore store) {
     final oldStore = _perAccountStores[accountId];
+    oldStore?._messages.handOffOutboxMessagesTo(store._messages);
+    final pendingMarkRead = oldStore?._messages.takePendingMarkReadIds() ?? const [];
+    final stillUnread = pendingMarkRead
+      .where((id) => store.unreads.isUnread(id) ?? true)
+      .toList();
     _perAccountStores[accountId] = store;
     notifyListeners();
     oldStore?.dispose();
+    if (stillUnread.isNotEmpty) {
+      store._messages.enqueueCarriedOverMarkReadIds(stillUnread);
+    }
   }
 
   /// Load per-account data for the given account, unconditionally.
@@ -247,14 +503,22 @@ abstract class GlobalStore extends ChangeNotifier {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
+  /// If [allowPersisted] is true, the data may come from server data
+  /// stored on the device by an earlier load, if usable;
+  /// see [UpdateMachine.load].
+  /// When reloading, this is false,
+  /// because the stored data is then no newer than the existing store's.
+  ///
   /// This method should be called only by the implementation of [perAccount].
   /// Other callers interested in per-account data should use [perAccount]
   /// and/or [perAccountSync].
-  Future<PerAccountStore> loadPerAccount(int accountId) async {
+  Future<PerAccountStore> loadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     assert(_accounts.containsKey(accountId));
     final PerAccountStore store;
     try {
-      store = await doLoadPerAccount(accountId);
+      store = await doLoadPerAccount(accountId, allowPersisted: allowPersisted);
     } on AccountNotFoundException {
       rethrow;
     } catch (e) {
@@ -301,8 +565,12 @@ abstract class GlobalStore extends ChangeNotifier {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
+  /// For [allowPersisted], see [loadPerAccount].
+  ///
   /// This method should be called only by [loadPerAccount].
-  Future<PerAccountStore> doLoadPerAccount(int accountId);
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  });
 
   //|//////////////////////////////////////////////////////////////
   // The accounts.  TODO(store) move this to its own substore; cf GlobalSettingsStore
@@ -558,6 +826,9 @@ abstract class PerAccountStoreBase {
 
   GlobalStore get _globalStore => core._globalStore;
 
+  /// The app-wide [GlobalStore.connectivityMonitor].
+  ConnectivityMonitor get connectivityMonitor => _globalStore.connectivityMonitor;
+
   ApiConnection get connection => core.connection;
 
   String get queueId => core.queueId;
@@ -656,19 +927,29 @@ class PerAccountStore extends PerAccountStoreBase with
   ///
   /// If [startPushDevices] is false, the caller is responsible for
   /// calling [PushDeviceManager.start] on [pushDevices] when appropriate.
+  ///
+  /// Pass [persisted] true when the snapshot was stored on the device
+  /// by an earlier run of the app, rather than freshly received
+  /// (see [UpdateMachine.load]).
+  /// Then the account's realm name and icon may be newer than the snapshot's,
+  /// and the event queue may have been used by that earlier run.
+  /// Also, a malformed snapshot isn't reported to the user,
+  /// because the caller can fall back to fetching a fresh one.
   factory PerAccountStore.fromInitialSnapshot({
     required GlobalStore globalStore,
     required int accountId,
     ApiConnection? connection,
     required InitialSnapshot initialSnapshot,
     bool startPushDevices = true,
+    bool persisted = false,
   }) {
     final account = globalStore.getAccount(accountId)!;
     assert(account.zulipVersion == initialSnapshot.zulipVersion
       && account.zulipMergeBase == initialSnapshot.zulipMergeBase
       && account.zulipFeatureLevel == initialSnapshot.zulipFeatureLevel);
-    assert(account.realmName == initialSnapshot.realmName
-      && account.realmIcon == initialSnapshot.realmIconUrl);
+    assert(persisted
+      || (account.realmName == initialSnapshot.realmName
+          && account.realmIcon == initialSnapshot.realmIconUrl));
 
     connection ??= globalStore.apiConnectionFromAccount(account);
     assert(connection.zulipFeatureLevel == account.zulipFeatureLevel);
@@ -691,14 +972,16 @@ class PerAccountStore extends PerAccountStoreBase with
     final userMap = UserStoreImpl.userMapFromInitialSnapshot(initialSnapshot);
     final selfUser = userMap[core.selfUserId];
     if (selfUser == null) {
-      final zulipLocalizations = GlobalLocalizations.zulipLocalizations;
-      reportErrorToUserModally(
-        zulipLocalizations.errorCouldNotConnectTitle,
-        message: zulipLocalizations.errorMalformedResponseWithCause(200,
-          // skip-i18n: This would be an unlikely bug (in the server?).  We're
-          //   showing the user these details at all only because it would be a
-          //   very nasty bug (so, important to resolve ASAP) if it ever did happen.
-          'self-user missing from user list'));
+      if (!persisted) {
+        final zulipLocalizations = GlobalLocalizations.zulipLocalizations;
+        reportErrorToUserModally(
+          zulipLocalizations.errorCouldNotConnectTitle,
+          message: zulipLocalizations.errorMalformedResponseWithCause(200,
+            // skip-i18n: This would be an unlikely bug (in the server?).  We're
+            //   showing the user these details at all only because it would be a
+            //   very nasty bug (so, important to resolve ASAP) if it ever did happen.
+            'self-user missing from user list'));
+      }
       throw Exception("bad initial snapshot: self-user missing from user list");
     }
 
@@ -730,12 +1013,26 @@ class PerAccountStore extends PerAccountStoreBase with
       channels: channels,
       topics: Topics(core: core),
       messages: MessageStoreImpl(channels: channels,
-        initialStarredMessages: initialSnapshot.starredMessages),
+        initialStarredMessages: initialSnapshot.starredMessages,
+        // On an event queue used by an earlier run of the app,
+        // local message IDs counting up from 1 might collide with ones
+        // that run used for messages whose events we have yet to receive.
+        // That run's IDs were less than the time it started, in milliseconds,
+        // unless it sent messages faster than one per millisecond.
+        firstLocalMessageId: persisted
+          ? ZulipBinding.instance.utcNow().millisecondsSinceEpoch : 1,
+        initialMaxMessageId: initialSnapshot.maxMessageId,
+        coverageEnabled: !persisted
+          && globalStore.settings.getBool(BoolGlobalSetting.messageDatabase)),
       unreads: Unreads(core: core, channelStore: channels,
         initial: initialSnapshot.unreadMsgs),
       recentDmConversationsView: RecentDmConversationsView(core: core,
         initial: initialSnapshot.recentPrivateConversations),
       recentSenders: RecentSenders(),
+      listedDmNarrows: {
+        for (final conv in initialSnapshot.recentPrivateConversations)
+          DmNarrow.withUsers(conv.userIds, selfUserId: core.selfUserId),
+      },
     );
   }
 
@@ -757,6 +1054,7 @@ class PerAccountStore extends PerAccountStoreBase with
     required this.unreads,
     required this.recentDmConversationsView,
     required this.recentSenders,
+    required this._listedDmNarrows,
   });
 
   //|//////////////////////////////////////////////////////////////
@@ -779,8 +1077,30 @@ class PerAccountStore extends PerAccountStoreBase with
   set isRecoveringEventStream(bool value) {
     if (_isRecoveringEventStream == value) return;
     _isRecoveringEventStream = value;
+    _messages.setIsRecoveringEventStream(value);
+    if (!value) {
+      _isEventStreamFailing = false;
+      // The network is probably working again;
+      // let message lists and topic lists retry their failed fetches now.
+      _messages.handleEventStreamRecovered();
+      topics.handleEventStreamRecovered();
+    }
     notifyListeners();
   }
+
+  /// Whether recovering the event stream has failed at least once,
+  /// so retries are backing off or failing rather than on a first reload.
+  bool get isEventStreamFailing => _isEventStreamFailing;
+  bool _isEventStreamFailing = false;
+
+  void _setEventStreamFailing(bool value) {
+    if (_isEventStreamFailing == value) return;
+    _isEventStreamFailing = value;
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  set isEventStreamFailing(bool value) => _setEventStreamFailing(value);
 
   //|//////////////////////////////
   // Data attached to the realm or the server.
@@ -845,27 +1165,230 @@ class PerAccountStore extends PerAccountStoreBase with
   //|//////////////////////////////
   // Messages, and summaries of messages.
 
+  /// Whether this store's event queue has been confirmed live
+  /// (built from a fresh `/register`, or a resumed queue after its first poll).
+  bool get confirmed => _messages.confirmed;
+
+  bool isLocationReliable(int messageId) => _messages.isLocationReliable(messageId);
+
+  @visibleForTesting
+  void debugSetConfirmed(bool value) => _messages.setConfirmed(value);
+
+  void _setConfirmed(bool value) => _messages.setConfirmed(value);
+
+  @visibleForTesting
+  RaceBuffer get debugRaceBuffer => _messages.debugRaceBuffer;
+
+  @visibleForTesting
+  Set<int> get debugMaybeStaleMessages => _messages.debugMaybeStaleMessages;
+
+  @visibleForTesting
+  Set<int> get debugLocationUnknown => _messages.debugLocationUnknown;
+
+  bool isLocationUnknown(int messageId) => _messages.isLocationUnknown(messageId);
+
+  @visibleForTesting
+  MessageCoverage get debugCoverage => _messages.debugCoverage;
+  bool get debugCoverageEnabled => _messages.coverageEnabled;
+  bool get coverageEnabled => _messages.coverageEnabled;
+
+  bool get dbActive => _messages.dbActive;
+
+  Future<List<GetChannelTopicsEntry>?> loadSavedTopics(int channelId) =>
+    _messages.loadSavedTopics(channelId, unreads: unreads);
+
+  Future<SavedMessageSearchResult?> searchSavedMessages({
+    required String query,
+    int? beforeMessageId,
+    required int limit,
+  }) => _messages.searchSavedMessages(
+    query: query,
+    beforeMessageId: beforeMessageId,
+    limit: limit,
+    isUnreadFromStore: unreads.isUnread,
+  );
+
+  @visibleForTesting
+  int? get debugCoverageThroughEventId => _messages.coverageThroughEventId;
+
+  Future<void> initMessageDbFromRegister({
+    required int lastEventId,
+  }) async {
+    final account = _globalStore.getAccount(accountId);
+    if (account == null) return;
+    final listedDmLatestIds = <String, int>{
+      for (final narrow in _listedDmNarrows)
+        StoredMessageCodec.dmKeyFromRecipientIds(narrow.allRecipientIds):
+          ?recentDmConversationsView.map[narrow],
+    };
+    await _messages.initMessageDbFromRegister(
+      writer: _globalStore._backend.messageDbWriterForAccount(accountId),
+      accountId: accountId,
+      realmUrl: account.realmUrl,
+      userId: selfUserId,
+      queueId: queueId,
+      lastEventId: lastEventId,
+      listedDmLatestIds: listedDmLatestIds,
+    );
+  }
+
+  Future<void> initMessageDbFromPersisted({
+    required int ackEventId,
+    bool eventLogSkipped = false,
+  }) async {
+    final account = _globalStore.getAccount(accountId);
+    if (account == null) return;
+    await _messages.initMessageDbFromPersisted(
+      writer: _globalStore._backend.messageDbWriterForAccount(accountId),
+      accountId: accountId,
+      realmUrl: account.realmUrl,
+      userId: selfUserId,
+      queueId: queueId,
+      ackEventId: ackEventId,
+      eventLogSkipped: eventLogSkipped,
+    );
+  }
+
+  @visibleForTesting
+  void debugSetCoverageEnabled(bool value) => _messages.debugSetCoverageEnabled(value);
+
+  FetchTicket openFetchTicket({int? channelId}) =>
+    _messages.openFetchTicket(channelId: channelId);
+
+  void closeFetchTicket(FetchTicket ticket) => _messages.closeFetchTicket(ticket);
+
+  ({int? dmLatestKnownId, int? firstUnreadId}) _localWindowHints(Narrow narrow, Anchor anchor) {
+    final dmLatestKnownId =
+      narrow is DmNarrow && _listedDmNarrows.contains(narrow)
+        ? recentDmConversationsView.map[narrow]
+        : null;
+    int? firstUnreadId;
+    if (anchor == AnchorCode.firstUnread && !unreads.oldUnreadsMissing) {
+      firstUnreadId = switch (narrow) {
+        TopicNarrow(:final channelId, :final topic) =>
+          unreads.streams[channelId]?[topic]?.firstOrNull,
+        ChannelNarrow(:final channelId) => () {
+          int? minId;
+          final byTopic = unreads.streams[channelId];
+          if (byTopic != null) {
+            for (final entry in byTopic.entries) {
+              if (!isTopicVisibleInChannel(channelId, entry.key)) continue;
+              final id = entry.value.firstOrNull;
+              if (id != null && (minId == null || id < minId)) minId = id;
+            }
+          }
+          return minId;
+        }(),
+        DmNarrow() => unreads.dms[narrow]?.firstOrNull,
+        _ => null,
+      };
+    }
+    return (dmLatestKnownId: dmLatestKnownId, firstUnreadId: firstUnreadId);
+  }
+
+  LocalWindow? localWindow(
+    Narrow narrow,
+    Anchor anchor,
+    int before,
+    int after, {
+    required bool afterFailure,
+  }) {
+    final hints = _localWindowHints(narrow, anchor);
+    return _messages.localWindow(
+      narrow,
+      anchor,
+      before,
+      after,
+      afterFailure: afterFailure,
+      firstUnreadId: hints.firstUnreadId,
+      oldUnreadsMissing: unreads.oldUnreadsMissing,
+      dmLatestKnownId: hints.dmLatestKnownId,
+    );
+  }
+
+  bool hasLiveLocalPaginationCoverage(
+    Narrow narrow, {
+    required int anchorId,
+    required bool older,
+  }) {
+    final hints = _localWindowHints(narrow, AnchorCode.newest);
+    return _messages.hasLiveLocalPaginationCoverage(
+      narrow,
+      anchorId: anchorId,
+      older: older,
+      dmLatestKnownId: hints.dmLatestKnownId,
+    );
+  }
+
+  Future<LocalWindow?> localWindowAsync(
+    Narrow narrow,
+    Anchor anchor,
+    int before,
+    int after, {
+    required bool afterFailure,
+  }) {
+    final hints = _localWindowHints(narrow, anchor);
+    return _messages.localWindowAsync(
+      narrow,
+      anchor,
+      before,
+      after,
+      afterFailure: afterFailure,
+      firstUnreadId: hints.firstUnreadId,
+      oldUnreadsMissing: unreads.oldUnreadsMissing,
+      isUnreadFromStore: unreads.isUnread,
+      dmLatestKnownId: hints.dmLatestKnownId,
+    );
+  }
+
   /// Reconcile a batch of just-fetched messages with the store,
   /// mutating the list.
   ///
   /// This is called after a [getMessages] request to report the result
   /// to the store.
   ///
-  /// The list's length will not change, but some entries may be replaced
-  /// by a different [Message] object with the same [Message.id],
-  /// and the store will also be updated.
-  /// When this method returns, all [Message] objects in the list
-  /// will be present in the map `this.messages`.
+  /// The list entries may be replaced by a different [Message] object
+  /// with the same [Message.id], or omitted if deleted or purged since
+  /// [ticket] was opened, and the store will also be updated.
   ///
   /// The list entries may be mutated to remove
   /// [Message.matchContent] and [Message.matchTopic]
   /// (since these are appropriate for search views but not the central store).
   /// The values of those fields should therefore be captured,
   /// as needed for search, before this is called.
-  void reconcileMessages(List<Message> messages) {
-    _messages.reconcileMessages(messages);
+  void reconcileMessages(
+    List<Message> messages, {
+    FetchTicket? ticket,
+    FetchCoverageRequest? coverageRequest,
+    MessageListView? requester,
+    List<Map<String, dynamic>>? rawMessages,
+  }) {
+    _messages.reconcileMessages(
+      messages,
+      ticket: ticket,
+      coverageRequest: coverageRequest,
+      requester: requester,
+      rawMessages: rawMessages,
+    );
     // TODO(#649) notify [unreads] of the just-fetched messages
     // TODO(#650) notify [recentDmConversationsView] of the just-fetched messages
+  }
+
+  /// Prefetch messages around [messageId] in [narrow] so the notified
+  /// conversation is available offline. Never throws.
+  Future<void> prefetchNotificationMessages({
+    required SendableNarrow narrow,
+    required int messageId,
+    Future<void>? abortTrigger,
+  }) async {
+    if (_disposed) return;
+    final fetched = await _messages.prefetchNotificationMessages(
+      narrow: narrow,
+      messageId: messageId,
+      abortTrigger: abortTrigger,
+    );
+    if (_disposed || fetched.isEmpty) return;
+    recentSenders.handleMessages(fetched); // TODO(#824)
   }
 
   @protected
@@ -876,6 +1399,8 @@ class PerAccountStore extends PerAccountStoreBase with
   final Unreads unreads;
 
   final RecentDmConversationsView recentDmConversationsView;
+
+  final Set<DmNarrow> _listedDmNarrows;
 
   final RecentSenders recentSenders;
 
@@ -896,11 +1421,20 @@ class PerAccountStore extends PerAccountStoreBase with
     autocompleteViewManager.reassemble();
   }
 
+  /// Whether [dispose] has been called.
+  ///
+  /// A store gets disposed when it's replaced by a new one for the same account
+  /// (for example on reloading the account's data from the server),
+  /// or when the account is logged out.
+  /// Code that awaits something and then uses the store,
+  /// such as a retry loop, can check this to stop instead.
+  bool get disposed => _disposed;
   bool _disposed = false;
 
   @override
   void dispose() {
     assert(!_disposed);
+    final sendsSettled = _messages.inFlightSendsSettled;
     recentDmConversationsView.dispose();
     unreads.dispose();
     _messages.dispose();
@@ -909,29 +1443,147 @@ class PerAccountStore extends PerAccountStoreBase with
     typingNotifier.dispose();
     pushDevices.dispose();
     updateMachine?.dispose();
-    connection.close();
+    if (sendsSettled == null) {
+      connection.close();
+    } else {
+      // Let in-flight sends finish so a replaced store doesn't abort
+      // an outgoing message HTTP request mid-flight.
+      unawaited(sendsSettled
+          .timeout(const Duration(seconds: 10), onTimeout: () {})
+          .whenComplete(connection.close));
+    }
     _disposed = true;
     super.dispose();
   }
 
-  Future<void> handleEvent(Event event) async {
+  /// Whether the events being handled are stored ones, being replayed
+  /// to rebuild this store from stored server data.
+  ///
+  /// There may be thousands of those, so [handleEvent] skips its debug logging.
+  bool _replayingEvents = false;
+  void _setReplayingEvents(bool value) {
+    _replayingEvents = value;
+    _messages.setReplayingEvents(value);
+  }
+
+  Future<void> handleEvent(Event event) {
+    return handleEventBatch([event], lastEventId: null);
+  }
+
+  /// Apply a batch of events from the event queue (or a single event from
+  /// [handleEvent]), optionally recording [lastEventId] and [rawEvents].
+  Future<void> handleEventBatch(
+    List<Event> events, {
+    required int? lastEventId,
+    List<Map<String, Object?>>? rawEvents,
+    bool skipTypingEvents = false,
+  }) {
+    return _handleEventBatch(
+      events,
+      lastEventId: lastEventId,
+      rawEvents: rawEvents,
+      skipTypingEvents: skipTypingEvents,
+    );
+  }
+
+  Future<void> _handleEventBatch(
+    List<Event> events, {
+    required int? lastEventId,
+    List<Map<String, Object?>>? rawEvents,
+    bool skipTypingEvents = false,
+    Future<bool> Function(MessageDatabase db)? commitEventLogInTxn,
+    void Function(EventLogCommitOutcome eventLogOutcome)? onEventLogCommitResult,
+  }) async {
+    assert(!_disposed);
+    final moveMessageIds = <int>[
+      if (!_replayingEvents && _messages.dbActive)
+        for (final event in events)
+          if (event is UpdateMessageEvent && event.moveData != null)
+            ...event.messageIds,
+    ];
+    final beginFuture = _messages.beginEventBatch(
+      lastEventId: lastEventId,
+      moveMessageIds: moveMessageIds,
+    );
+    if (beginFuture != null) {
+      await beginFuture;
+      if (_disposed) {
+        _messages.abortEventBatch();
+        return;
+      }
+    }
+    for (var i = 0; i < events.length; i++) {
+      final event = events[i];
+      if (skipTypingEvents && event is TypingEvent) {
+        // This may be from long ago, while the app wasn't running;
+        // showing it as current would be misleading.
+        continue;
+      }
+      Map<String, Object?>? rawMessageMap;
+      List<String>? rawFlags;
+      if (event is MessageEvent) {
+        final rawEvent = (rawEvents != null && i < rawEvents.length)
+          ? rawEvents[i]
+          : null;
+        final rawMsg = rawEvent?['message'];
+        if (rawMsg is Map) {
+          rawMessageMap = rawMsg.cast<String, Object?>();
+        }
+        final rawFlagList = rawEvent?['flags'];
+        if (rawFlagList is List) {
+          rawFlags = [for (final f in rawFlagList) f.toString()];
+        }
+      }
+      _messages.beginBatchEvent(
+        eventId: event.id,
+        fromQueuePoll: lastEventId != null,
+      );
+      try {
+        await _dispatchEvent(
+          event,
+          rawMessageMap: rawMessageMap,
+          rawFlags: rawFlags,
+        );
+        if (_disposed) {
+          _messages.abortEventBatch();
+          return;
+        }
+      } catch (e, stackTrace) {
+        _messages.abortEventBatch();
+        if (_disposed) return;
+        Error.throwWithStackTrace(
+          _EventHandlingException(cause: e, event: event), stackTrace);
+      }
+    }
+    final finishFuture = _messages.finishEventBatch(commitEventLogInTxn: commitEventLogInTxn);
+    if (finishFuture != null) {
+      final outcome = await finishFuture;
+      onEventLogCommitResult?.call(outcome.eventLogOutcome);
+    }
+  }
+
+  Future<void> _dispatchEvent(
+    Event event, {
+    Map<String, Object?>? rawMessageMap,
+    List<String>? rawFlags,
+  }) async {
     assert(!_disposed);
 
     switch (event) {
       case HeartbeatEvent():
-        assert(debugLog("server event: heartbeat"));
+        assert(_replayingEvents || debugLog("server event: heartbeat"));
 
       case RealmEmojiEvent():
-        assert(debugLog("server event: realm_emoji/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: realm_emoji/${event.op}"));
         _emoji.handleRealmEmojiEvent(event);
         notifyListeners();
 
       case AlertWordsEvent():
-        assert(debugLog("server event: alert_words"));
+        assert(_replayingEvents || debugLog("server event: alert_words"));
         // We don't yet store this data, so there's nothing to update.
 
       case UserSettingsUpdateEvent():
-        assert(debugLog("server event: user_settings/update ${event.property?.name ?? '[unrecognized]'}"));
+        assert(_replayingEvents || debugLog("server event: user_settings/update ${event.property?.name ?? '[unrecognized]'}"));
         if (event.property == null) {
           // unrecognized setting; do nothing
           return;
@@ -953,64 +1605,74 @@ class PerAccountStore extends PerAccountStoreBase with
         notifyListeners();
 
       case DeviceEvent():
-        assert(debugLog("server event: device"));
+        assert(_replayingEvents || debugLog("server event: device"));
         pushDevices.handleDeviceEvent(event);
         notifyListeners();
 
       case CustomProfileFieldsEvent():
-        assert(debugLog("server event: custom_profile_fields"));
+        assert(_replayingEvents || debugLog("server event: custom_profile_fields"));
         _realm.handleCustomProfileFieldsEvent(event);
         notifyListeners();
 
       case UserGroupEvent():
-        assert(debugLog("server event: user_group/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: user_group/${event.op}"));
         _groups.handleUserGroupEvent(event);
         if (event is UserGroupRemoveEvent) {
           autocompleteViewManager.handleUserGroupRemoveEvent(event);
         } else if (event is UserGroupUpdateEvent) {
           autocompleteViewManager.handleUserGroupUpdateEvent(event);
         }
+        _messages.handleChannelAccessMaybeChanged(null);
         notifyListeners();
 
       case RealmUserAddEvent():
-        assert(debugLog("server event: realm_user/add"));
+        assert(_replayingEvents || debugLog("server event: realm_user/add"));
         _users.handleRealmUserEvent(event);
         notifyListeners();
 
       case RealmUserRemoveEvent():
-        assert(debugLog("server event: realm_user/remove"));
+        assert(_replayingEvents || debugLog("server event: realm_user/remove"));
         _users.handleRealmUserEvent(event);
         autocompleteViewManager.handleRealmUserRemoveEvent(event);
         notifyListeners();
 
       case RealmUserUpdateEvent():
-        assert(debugLog("server event: realm_user/update"));
+        assert(_replayingEvents || debugLog("server event: realm_user/update"));
         _groups.handleRealmUserUpdateEvent(event);
         _realm.handleRealmUserUpdateEvent(event);
         _users.handleRealmUserEvent(event);
         autocompleteViewManager.handleRealmUserUpdateEvent(event);
+        if (event.userId == selfUserId) {
+          _messages.handleChannelAccessMaybeChanged(null);
+        }
         notifyListeners();
 
       case SavedSnippetsEvent():
-        assert(debugLog('server event: saved_snippets/${event.op}'));
+        assert(_replayingEvents || debugLog('server event: saved_snippets/${event.op}'));
         _savedSnippets.handleSavedSnippetsEvent(event);
         notifyListeners();
 
       case ChannelEvent():
-        assert(debugLog("server event: stream/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: stream/${event.op}"));
         if (event is ChannelDeleteEvent) {
           _messages.handleChannelDeleteEvent(event);
         }
         _channels.handleChannelEvent(event);
-        if (event is ChannelDeleteEvent) {
+        if (event is ChannelCreateEvent) {
+          _messages.handleChannelCreateEvent(event);
+        } else if (event is ChannelDeleteEvent) {
           autocompleteViewManager.handleChannelDeleteEvent(event);
         } else if (event is ChannelUpdateEvent) {
+          _messages.handleChannelAccessMaybeChanged([event.streamId]);
+          if (event.property == ChannelPropertyName.messageRetentionDays) {
+            _messages.handleChannelRetentionChanged(event.streamId);
+          }
           autocompleteViewManager.handleChannelUpdateEvent(event);
         }
         notifyListeners();
 
       case SubscriptionEvent():
-        assert(debugLog("server event: subscription/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: subscription/${event.op}"));
         if (event is SubscriptionRemoveEvent) {
           _messages.handleSubscriptionRemoveEvent(event);
         }
@@ -1019,32 +1681,41 @@ class PerAccountStore extends PerAccountStoreBase with
         }
         // Update _channels last, so other handlers can compare to the old value.
         _channels.handleSubscriptionEvent(event);
+        // After _channels, so message lists see the new subscriptions.
+        _messages.handleSubscriptionEvent(event);
+        if (event is SubscriptionRemoveEvent) {
+          _messages.handleChannelAccessMaybeChanged(event.channelIds);
+        }
         notifyListeners();
 
       case ChannelFolderEvent():
-        assert(debugLog("server event: channel_folder/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: channel_folder/${event.op}"));
         _channels.handleChannelFolderEvent(event);
         break;
 
       case UserStatusEvent():
-        assert(debugLog("server event: user_status"));
+        assert(_replayingEvents || debugLog("server event: user_status"));
         _users.handleUserStatusEvent(event);
         notifyListeners();
 
       case UserTopicEvent():
-        assert(debugLog("server event: user_topic"));
+        assert(_replayingEvents || debugLog("server event: user_topic"));
         _messages.handleUserTopicEvent(event);
         // Update _channels last, so other handlers can compare to the old value.
         _channels.handleUserTopicEvent(event);
         notifyListeners();
 
       case MessageEvent():
-        assert(debugLog("server event: message ${jsonEncode(event.message.toJson())}"));
+        assert(_replayingEvents || debugLog("server event: message ${jsonEncode(event.message.toJson())}"));
         // Assert against malformed events that might be created in test code.
         assert(event.message.matchContent == null);
         assert(event.message.matchTopic == null);
 
-        _messages.handleMessageEvent(event);
+        _messages.handleMessageEvent(
+          event,
+          rawMessageMap: rawMessageMap,
+          rawFlags: rawFlags,
+        );
         unreads.handleMessageEvent(event);
         recentDmConversationsView.handleMessageEvent(event);
         recentSenders.handleMessage(event.message); // TODO(#824)
@@ -1053,13 +1724,13 @@ class PerAccountStore extends PerAccountStoreBase with
         // it probably belongs in [reconcileMessages] too.
 
       case UpdateMessageEvent():
-        assert(debugLog("server event: update_message ${event.messageId}"));
+        assert(_replayingEvents || debugLog("server event: update_message ${event.messageId}"));
         _messages.handleUpdateMessageEvent(event);
         unreads.handleUpdateMessageEvent(event);
         topics.handleUpdateMessageEvent(event);
 
       case DeleteMessageEvent():
-        assert(debugLog("server event: delete_message ${event.messageIds}"));
+        assert(_replayingEvents || debugLog("server event: delete_message ${event.messageIds}"));
         bool shouldNotify = false;
         // This should be called before [_messages.handleDeleteMessageEvent(event)],
         // as we need to know about each message for [event.messageIds],
@@ -1071,38 +1742,38 @@ class PerAccountStore extends PerAccountStoreBase with
         if (shouldNotify) notifyListeners();
 
       case UpdateMessageFlagsEvent():
-        assert(debugLog("server event: update_message_flags/${event.op} ${event.flag.toJson()}"));
+        assert(_replayingEvents || debugLog("server event: update_message_flags/${event.op} ${event.flag.toJson()}"));
         bool shouldNotify = false;
         shouldNotify |= _messages.handleUpdateMessageFlagsEvent(event);
         unreads.handleUpdateMessageFlagsEvent(event);
         if (shouldNotify) notifyListeners();
 
       case SubmessageEvent():
-        assert(debugLog("server event: submessage ${event.content}"));
+        assert(_replayingEvents || debugLog("server event: submessage ${event.content}"));
         _messages.handleSubmessageEvent(event);
 
       case TypingEvent():
-        assert(debugLog("server event: typing/${event.op} ${event.messageType}"));
+        assert(_replayingEvents || debugLog("server event: typing/${event.op} ${event.messageType}"));
         typingStatus.handleTypingEvent(event);
 
       case PresenceEvent():
-        assert(debugLog("server event: presence ${event.userId}"));
+        assert(_replayingEvents || debugLog("server event: presence ${event.userId}"));
         // TODO(#1618) handle
         break;
 
       case ReactionEvent():
-        assert(debugLog("server event: reaction/${event.op}"));
+        assert(_replayingEvents || debugLog("server event: reaction/${event.op}"));
         _messages.handleReactionEvent(event);
 
       case MutedUsersEvent():
-        assert(debugLog("server event: muted_users"));
+        assert(_replayingEvents || debugLog("server event: muted_users"));
         _messages.handleMutedUsersEvent(event);
         // Update _users last, so other handlers can compare to the old value.
         _users.handleMutedUsersEvent(event);
         notifyListeners();
 
       case UnexpectedEvent():
-        assert(debugLog("server event: ${jsonEncode(event.toJson())}")); // TODO log better
+        assert(_replayingEvents || debugLog("server event: ${jsonEncode(event.toJson())}")); // TODO log better
     }
   }
 
@@ -1116,9 +1787,70 @@ class PerAccountStore extends PerAccountStoreBase with
 /// The underlying data store is an [AppDatabase] corresponding to a
 /// SQLite database file in the app's persistent storage on the device.
 class LiveGlobalStoreBackend implements GlobalStoreBackend {
-  LiveGlobalStoreBackend._({required this._db});
+  LiveGlobalStoreBackend._({
+    required this._db,
+    Future<MessageDatabase> Function()? openMessageDb,
+  }) : _openMessageDb = openMessageDb ?? _defaultOpenMessageDb;
+
+  @visibleForTesting
+  factory LiveGlobalStoreBackend.forTesting({
+    required AppDatabase db,
+    required Future<MessageDatabase> Function() openMessageDb,
+  }) => LiveGlobalStoreBackend._(db: db, openMessageDb: openMessageDb);
 
   final AppDatabase _db;
+  final Future<MessageDatabase> Function() _openMessageDb;
+
+  MessageDatabase? _messageDb;
+  Future<MessageDatabase>? _openingMessageDb;
+  bool _closed = false;
+  final Map<int, MessageDbWriter> _messageDbWriters = {};
+
+  @override
+  MessageDbWriter messageDbWriterForAccount(int accountId) {
+    return _messageDbWriters[accountId] ??= MessageDbWriter(
+      accountId: accountId,
+      openDb: _getMessageDb,
+    );
+  }
+
+  static Future<MessageDatabase> _defaultOpenMessageDb() async {
+    final file = await messageDatabaseFile();
+    final db = MessageDatabase.openFile(file);
+    try {
+      await db.customSelect('SELECT 1').get();
+    } catch (_) {
+      await db.close().catchError((_) {});
+      rethrow;
+    }
+    unawaited(LiveGlobalStore._maybeDisableOsBackup(file)); // TODO(log) on error
+    return db;
+  }
+
+  Future<MessageDatabase> _getMessageDb() async {
+    if (_messageDb case final db?) return db;
+    final pending = _openingMessageDb ??= _openMessageDb().then((db) {
+      if (_closed) {
+        unawaited(db.close().catchError((_) {}));
+        throw StateError('LiveGlobalStoreBackend is closed');
+      }
+      _messageDb = db;
+      return db;
+    }, onError: (Object error, StackTrace stackTrace) {
+      _openingMessageDb = null;
+      throw error;
+    });
+    return pending;
+  }
+
+  Future<void> _closeMessageDb() async {
+    _closed = true;
+    final db = _messageDb;
+    _messageDb = null;
+    if (db != null) {
+      await db.close().catchError((_) {});
+    }
+  }
 
   @override
   Future<void> doUpdateGlobalSettings(GlobalSettingsCompanion data) async {
@@ -1173,6 +1905,93 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
     ).go();
     assert(rowsAffected == 1);
   }
+
+  @override
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  }) async {
+    final msgDb = await _getMessageDb();
+    final accountRow = await (_db.selectOnly(_db.accounts)
+      ..addColumns([_db.accounts.id])
+      ..where(_db.accounts.id.equals(snapshot.accountId))
+    ).getSingleOrNull();
+    if (accountRow == null) return false;
+    return msgDb.storeServerSnapshot(snapshot, data: data);
+  }
+
+  @override
+  Future<bool> commitServerEventsInMessageDbTxn(
+    MessageDatabase db,
+    int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+    required bool truncate,
+  }) {
+    if (truncate) {
+      return db.truncateServerEventLogInTxn(
+        accountId,
+        queueId: queueId,
+        lastEventId: lastEventId,
+      );
+    }
+    return db.appendServerEventsInTxn(
+      accountId,
+      queueId: queueId,
+      lastEventId: lastEventId,
+      data: data,
+    );
+  }
+
+  @override
+  Future<void> doWipeAllMessageCache() async {
+    final dbFile = await messageDatabaseFile(createDir: false);
+    if (_messageDb == null && !await dbFile.exists()) return;
+    final msgDb = await _getMessageDb();
+    await msgDb.wipeAllMessageCache();
+  }
+
+  @override
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  }) async {
+    final msgDb = await _getMessageDb();
+    return msgDb.appendServerEvents(accountId,
+      queueId: queueId, lastEventId: lastEventId, data: data);
+  }
+
+  @override
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  }) async {
+    final msgDb = await _getMessageDb();
+    return msgDb.truncateServerEventLog(accountId,
+      queueId: queueId, lastEventId: lastEventId);
+  }
+
+  @override
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId) async {
+    final msgDb = await _getMessageDb();
+    return msgDb.loadServerSnapshotInfo(accountId);
+  }
+
+  @override
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  }) async {
+    final msgDb = await _getMessageDb();
+    return msgDb.loadServerData(accountId,
+      includeEventBatches: includeEventBatches);
+  }
+
+  @override
+  Future<void> doClearServerData(int accountId) async {
+    final msgDb = await _getMessageDb();
+    await msgDb.clearServerData(accountId);
+  }
 }
 
 /// A [GlobalStore] that uses a live server and live, persistent local database.
@@ -1184,13 +2003,13 @@ class LiveGlobalStoreBackend implements GlobalStoreBackend {
 /// and will have an associated [UpdateMachine].
 class LiveGlobalStore extends GlobalStore {
   LiveGlobalStore._({
-    required this._backend,
+    required LiveGlobalStoreBackend super.backend,
     required super.globalSettings,
     required super.boolGlobalSettings,
     required super.intGlobalSettings,
     required super.accounts,
     required super.pushKeys,
-  }) : super(backend: _backend);
+  });
 
   @override
   ApiConnection apiConnection({
@@ -1207,13 +2026,14 @@ class LiveGlobalStore extends GlobalStore {
     // Loading this data takes roughly 80-100ms (measured on a Pixel 8).
     // That's only a small increment on the time spent loading server data,
     // so we don't worry about optimizing it further.
-    // In a future where we keep server data locally between runs (#477) --
-    // which will also mean having much more data to load from the database --
-    // we'd invest in this area more.  For example we'd try doing these
+    // The server data we keep locally between runs (#477) is much more data,
+    // so it isn't loaded here; [UpdateMachine.load] reads it for each account
+    // when needed.  If this part gets slow, we could try doing these queries
     // in parallel, or deferring some to be concurrent with loading server data.
     final stopwatch = Stopwatch()..start();
     final file = await _dbFile();
-    final db = AppDatabase(NativeDatabase.createInBackground(file));
+    final db = AppDatabase(NativeDatabase.createInBackground(file,
+      setup: setupDatabaseConnection));
     try {
       final t1 = stopwatch.elapsed;
       final globalSettings = await db.getGlobalSettings();
@@ -1241,7 +2061,7 @@ class LiveGlobalStore extends GlobalStore {
       // the database file has been created on disk.
       unawaited(_maybeDisableOsBackup(file)); // TODO(log) on error
 
-      return LiveGlobalStore._(
+      final store = LiveGlobalStore._(
         backend: LiveGlobalStoreBackend._(db: db),
         globalSettings: globalSettings,
         boolGlobalSettings: boolGlobalSettings,
@@ -1249,6 +2069,7 @@ class LiveGlobalStore extends GlobalStore {
         accounts: accounts,
         pushKeys: pushKeys,
       );
+      return store;
     } catch (_) {
       // A later load may follow, so don't leak this connection and its isolate.
       // Ignore any error from closing, so that the original error propagates.
@@ -1385,17 +2206,18 @@ class LiveGlobalStore extends GlobalStore {
     }
   }
 
-  final LiveGlobalStoreBackend _backend;
-
   // The methods that use this should probably all move to [GlobalStoreBackend]
   // and [LiveGlobalStoreBackend] anyway (see comment on the former);
   // so let the latter be the canonical home of the [AppDatabase].
   // This getter just simplifies the transition.
-  AppDatabase get _db => _backend._db;
+  AppDatabase get _db => (_backend as LiveGlobalStoreBackend)._db;
 
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
-    final updateMachine = await UpdateMachine.load(this, accountId);
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
+    final updateMachine = await UpdateMachine.load(this, accountId,
+      allowPersisted: allowPersisted);
     return updateMachine.store;
   }
 
@@ -1426,6 +2248,47 @@ class LiveGlobalStore extends GlobalStore {
       ..where((a) => a.id.equals(accountId))
     ).go();
     assert(rowsAffected == 1);
+    try {
+      await (_backend as LiveGlobalStoreBackend)
+        .messageDbWriterForAccount(accountId).enqueuePurge();
+    } catch (e) {
+      assert(debugLog('Error purging message DB for account $accountId: $e'));
+    }
+  }
+
+  bool _startupOrphansSwept = false;
+
+  /// Sweep orphaned per-account data at interactive app startup.
+  ///
+  /// Not called from [load] so background isolates (such as FCM push handlers)
+  /// never open [MessageDatabase] when no database file exists yet.
+  Future<void> sweepStartupOrphans() async {
+    if (_startupOrphansSwept) return;
+    _startupOrphansSwept = true;
+    try {
+      final dbFile = await messageDatabaseFile(createDir: false);
+      if (await dbFile.exists()) {
+        await _sweepMessageDbOrphans();
+      }
+    } catch (e) {
+      assert(debugLog('Error checking message DB for orphan sweep: $e'));
+    }
+  }
+
+  Future<void> _sweepMessageDbOrphans() async {
+    try {
+      final msgDb = await (_backend as LiveGlobalStoreBackend)._getMessageDb();
+      await msgDb.sweepOrphanAccounts(accountIds.toSet());
+    } catch (e) {
+      assert(debugLog('Error sweeping message DB orphans: $e'));
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited((_backend as LiveGlobalStoreBackend)._closeMessageDb());
+    unawaited(_db.close().catchError((_) {}));
+    super.dispose();
   }
 
   @override
@@ -1435,9 +2298,11 @@ class LiveGlobalStore extends GlobalStore {
 /// A [PerAccountStore] plus an event-polling loop to stay up to date.
 class UpdateMachine {
   UpdateMachine.fromInitialSnapshot({
-    required this.store,
+    required PerAccountStore store,
     required InitialSnapshot initialSnapshot,
-  }) : lastEventId = initialSnapshot.lastEventId {
+  }) : this._(store: store, lastEventId: initialSnapshot.lastEventId);
+
+  UpdateMachine._({required this.store, required this.lastEventId}) {
     store.updateMachine = this;
   }
 
@@ -1449,8 +2314,25 @@ class UpdateMachine {
   /// Throws [AccountNotFoundException] if after any async gap
   /// the account has been removed.
   ///
-  /// In the future this might load an old snapshot from local storage first.
-  static Future<UpdateMachine> load(GlobalStore globalStore, int accountId) async {
+  /// If [allowPersisted] is true, and the account has usable server data
+  /// stored on the device (see [ServerSnapshot]),
+  /// this instead loads the data from there, and resumes that data's event queue,
+  /// without waiting for the server.
+  /// Then if the event queue turns out to be gone, or the stored data is
+  /// too old or otherwise not worth catching up on through the event queue,
+  /// or the events it catches up on call for a fresh snapshot
+  /// (see [_requiresFreshSnapshot]),
+  /// the store gets replaced through the usual reload path,
+  /// as when an event queue expires.
+  /// Stored data that's unusable is deleted.
+  static Future<UpdateMachine> load(GlobalStore globalStore, int accountId, {
+    required bool allowPersisted,
+  }) async {
+    if (allowPersisted) {
+      final updateMachine = await _loadPersisted(globalStore, accountId);
+      if (updateMachine != null) return updateMachine;
+    }
+
     final connection = globalStore.apiConnectionFromAccount(
       globalStore.getAccount(accountId)!);
 
@@ -1464,10 +2346,15 @@ class UpdateMachine {
     }
 
     final stopwatch = Stopwatch()..start();
+    final rawInitialSnapshot = BytesBuilder();
     InitialSnapshot? initialSnapshot;
     try {
       initialSnapshot = await _registerQueueWithRetry(connection,
-        stopAndThrowIfNoAccount: stopAndThrowIfNoAccount);
+        rawBody: rawInitialSnapshot,
+        stopAndThrowIfNoAccount: stopAndThrowIfNoAccount,
+        onAttemptFailed: () {
+          globalStore.perAccountSync(accountId)?._setEventStreamFailing(true);
+        });
     } on ServerVersionNotAllowedException catch (e) {
       // `!` is OK because _registerQueueWithRetry would have thrown a
       // not-ServerVersionNotAllowedException if no account
@@ -1500,31 +2387,320 @@ class UpdateMachine {
       connection: connection,
       initialSnapshot: initialSnapshot,
     );
+    if (globalStore.settings.getBool(BoolGlobalSetting.messageDatabase)) {
+      await store.initMessageDbFromRegister(
+        lastEventId: initialSnapshot.lastEventId,
+      );
+      if (globalStore.getAccount(accountId) == null) {
+        assert(debugLog('Account logged out during UpdateMachine.load'));
+        store.dispose();
+        throw AccountNotFoundException();
+      }
+    }
     final updateMachine = UpdateMachine.fromInitialSnapshot(
       store: store, initialSnapshot: initialSnapshot);
+    updateMachine._startStoringServerSnapshot(rawInitialSnapshot.takeBytes(),
+      lastEventId: initialSnapshot.lastEventId);
     updateMachine.poll();
     unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
     store.presence.start();
     return updateMachine;
   }
 
+  /// Try loading data for the given account from the server data
+  /// stored on the device, and resuming its event queue.
+  ///
+  /// Returns null if there's no usable stored data;
+  /// unusable stored data is deleted.
+  ///
+  /// Throws [AccountNotFoundException] if after any async gap
+  /// the account has been removed.
+  static Future<UpdateMachine?> _loadPersisted(GlobalStore globalStore, int accountId) async {
+    void throwIfNoAccount() {
+      if (globalStore.getAccount(accountId) == null) {
+        assert(debugLog('Account logged out during UpdateMachine.load'));
+        throw AccountNotFoundException();
+      }
+    }
+
+    final packageInfo = await ZulipBinding.instance.packageInfo;
+    throwIfNoAccount();
+    if (packageInfo == null) return null;
+
+    final backend = globalStore._backend;
+    ApiConnection? connection;
+    PerAccountStore? store;
+    try {
+      final info = await backend.doLoadServerSnapshotInfo(accountId);
+      throwIfNoAccount();
+      if (info == null) return null;
+      final account = globalStore.getAccount(accountId)!;
+      if (info.realmUrl != account.realmUrl.toString()
+          || info.userId != account.userId) {
+        throw _UnusableServerDataException('account identity mismatch');
+      }
+      if (info.appVersion != _appVersion(packageInfo)) {
+        throw _UnusableServerDataException(
+          'stored by app version ${info.appVersion}');
+      }
+
+      // If the event log is big, it'd take a while to read and replay,
+      // so leave it out, and get a fresh snapshot as soon as possible.
+      // Same if it was cut off for being big; see [_appendServerEvents].
+      bool skipEventLog = info.eventLogTruncated
+        || _isEventLogTooBig(info.eventBatchesSize, snapshotSize: info.snapshotSize);
+      // If the data is old, it'd likely take a lot of events to catch up,
+      // or the event queue is gone already; so get a fresh snapshot.
+      final now = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
+      bool replaceImmediately = skipEventLog
+        || now - info.timestamp > _maxStoredSnapshotAge.inSeconds;
+
+      final data = await backend.doLoadServerData(accountId,
+        includeEventBatches: !skipEventLog);
+      throwIfNoAccount();
+      if (data == null) return null;
+
+      final initialSnapshot = InitialSnapshot.fromJson(
+        jsonUtf8Decoder.convert(data.snapshotData) as Map<String, dynamic>);
+      if (initialSnapshot.queueId != data.snapshot.queueId) {
+        throw _UnusableServerDataException('queue ID mismatch');
+      }
+      final zulipVersionData = ZulipVersionData.fromInitialSnapshot(initialSnapshot);
+      if (!zulipVersionData.matchesAccount(globalStore.getAccount(accountId)!)
+          || zulipVersionData.isNotAllowed) {
+        throw _UnusableServerDataException('server version mismatch');
+      }
+
+      if (_isEventLogTooLong(data.snapshot.lastEventId - initialSnapshot.lastEventId)) {
+        skipEventLog = true;
+        replaceImmediately = true;
+      }
+      final eventBatches = <List<Event>>[];
+      if (!skipEventLog) {
+        for (final batch in data.eventBatches) {
+          final rawEvents = (jsonUtf8Decoder.convert(batch.data) as List<dynamic>)
+            .cast<Map<String, dynamic>>();
+          replaceImmediately |= _requiresFreshSnapshot(rawEvents,
+            zulipVersion: initialSnapshot.zulipVersion,
+            zulipFeatureLevel: initialSnapshot.zulipFeatureLevel);
+          eventBatches.add(rawEvents.map(Event.fromJson).toList());
+        }
+      }
+
+      connection = globalStore.apiConnectionFromAccount(
+        globalStore.getAccount(accountId)!);
+      store = PerAccountStore.fromInitialSnapshot(
+        globalStore: globalStore,
+        accountId: accountId,
+        connection: connection,
+        initialSnapshot: initialSnapshot,
+        startPushDevices: false,
+        persisted: true,
+      );
+      store._setConfirmed(false);
+      store._setReplayingEvents(true);
+      for (final batch in eventBatches) {
+        await store.handleEventBatch(batch, lastEventId: null);
+        // Let the UI stay responsive.
+        await Future<void>.delayed(Duration.zero);
+        throwIfNoAccount();
+      }
+      store._setReplayingEvents(false);
+      if (globalStore.settings.getBool(BoolGlobalSetting.messageDatabase)) {
+        await store.initMessageDbFromPersisted(
+          ackEventId: data.snapshot.lastEventId,
+          eventLogSkipped: skipEventLog,
+        );
+        if (globalStore.getAccount(accountId) == null) {
+          assert(debugLog('Account logged out during UpdateMachine.load'));
+          store.dispose();
+          throw AccountNotFoundException();
+        }
+      }
+
+      final updateMachine = UpdateMachine._(store: store,
+        lastEventId: skipEventLog
+          ? initialSnapshot.lastEventId : data.snapshot.lastEventId);
+      updateMachine
+        .._serverSnapshotStored = Future.value(true)
+        .._storedSnapshotLastEventId = initialSnapshot.lastEventId
+        .._storedSnapshotSize = info.snapshotSize
+        .._storedEventBatchesSize = info.eventBatchesSize
+        .._storedEventLogTruncated = info.eventLogTruncated;
+      if (replaceImmediately) {
+        updateMachine._replaceStoreImmediately = true;
+      } else {
+        updateMachine._eventQueueUnconfirmed = true;
+      }
+      // Show that the data may be stale, and make the first poll quick.
+      store.isRecoveringEventStream = true;
+      updateMachine.poll();
+      if (!replaceImmediately) {
+        // (If replacing, the replacement store will do these.)
+        unawaited(updateMachine.fetchEmojiData(initialSnapshot.serverEmojiDataUrl));
+        store.presence.start(pingImmediately: true);
+      }
+      return updateMachine;
+    } catch (e) {
+      if (store != null) {
+        store.dispose();
+      } else {
+        connection?.close();
+      }
+      if (e is AccountNotFoundException) rethrow;
+      assert(debugLog('Discarding stored server data: $e')); // TODO(log)
+      try {
+        await backend.doClearServerData(accountId);
+      } catch (e) {
+        assert(debugLog('Error clearing server data: $e')); // TODO(log)
+      }
+      throwIfNoAccount();
+      return null;
+    }
+  }
+
+  /// Whether any of [rawEvents], received on the event queue
+  /// of a snapshot from a server with [zulipVersion] and [zulipFeatureLevel],
+  /// carries data we only get from a fresh snapshot.
+  ///
+  /// We don't handle these events (see #668),
+  /// but a fresh snapshot will have the updated data they're about.
+  /// So when one turns up in the events received while the app wasn't running,
+  /// a store loaded from stored data should be replaced
+  /// as a cold start would have done before we stored data (#477).
+  static bool _requiresFreshSnapshot(Iterable<Map<String, dynamic>> rawEvents, {
+    required String zulipVersion,
+    required int zulipFeatureLevel,
+  }) {
+    return rawEvents.any((rawEvent) => switch (rawEvent['type']) {
+      'realm' => true,
+      // The server sends this on every restart, which on some servers
+      // (like Zulip Cloud) is often; only a change of version matters.
+      // See: https://zulip.com/api/get-events#restart
+      'restart' =>
+        rawEvent['zulip_version'] != zulipVersion
+          || rawEvent['zulip_feature_level'] != zulipFeatureLevel,
+      _ => false,
+    });
+  }
+
+  /// Whether a stored event log with this many events
+  /// is too long to be worth replaying.
+  ///
+  /// The count is by event ID: the last event ID logged,
+  /// minus the snapshot's own last event ID.
+  ///
+  /// [_appendServerEvents] stops storing the log before it gets this long,
+  /// and [_loadPersisted] skips it if it is.
+  static bool _isEventLogTooLong(int eventCount) {
+    return eventCount > (debugMaxStoredEventCount ?? _maxStoredEventCount);
+  }
+
+  /// Whether a stored event log of this many bytes,
+  /// following a snapshot of [snapshotSize] bytes,
+  /// is too big to be worth replaying.
+  ///
+  /// [_appendServerEvents] stops storing the log before it gets this big,
+  /// and [_loadPersisted] skips it if it is.
+  static bool _isEventLogTooBig(int size, {required int snapshotSize}) {
+    return size > snapshotSize
+      && size > (debugMaxStoredEventBatchesSize ?? _maxStoredEventBatchesSize);
+  }
+
+  /// The limit on the length of the stored event log;
+  /// see [_isEventLogTooLong].
+  static const _maxStoredEventCount = 10000;
+
+  /// In debug mode, overrides the limit on the length of the stored event log;
+  /// see [_isEventLogTooLong].
+  ///
+  /// Outside of debug mode, this is always `null` and the setter has no effect.
+  static int? get debugMaxStoredEventCount {
+    int? result;
+    assert(() {
+      result = _debugMaxStoredEventCount;
+      return true;
+    }());
+    return result;
+  }
+  static int? _debugMaxStoredEventCount;
+  static set debugMaxStoredEventCount(int? value) {
+    assert(() {
+      _debugMaxStoredEventCount = value;
+      return true;
+    }());
+  }
+
+  /// The limit on the size of the stored event log,
+  /// unless the snapshot is bigger; see [_isEventLogTooBig].
+  static const _maxStoredEventBatchesSize = 1 << 20;
+
+  /// In debug mode, overrides the limit on the size of the stored event log;
+  /// see [_isEventLogTooBig].
+  ///
+  /// Outside of debug mode, this is always `null` and the setter has no effect.
+  static int? get debugMaxStoredEventBatchesSize {
+    int? result;
+    assert(() {
+      result = _debugMaxStoredEventBatchesSize;
+      return true;
+    }());
+    return result;
+  }
+  static int? _debugMaxStoredEventBatchesSize;
+  static set debugMaxStoredEventBatchesSize(int? value) {
+    assert(() {
+      _debugMaxStoredEventBatchesSize = value;
+      return true;
+    }());
+  }
+
+  /// If the stored snapshot is older than this,
+  /// [load] replaces the store loaded from it right away.
+  static const _maxStoredSnapshotAge = Duration(hours: 24);
+
   final PerAccountStore store;
   int lastEventId;
 
   bool _disposed = false;
 
+  /// True for a store loaded from stored server data
+  /// (see [_loadPersisted]) that should be replaced with one from
+  /// a fresh snapshot right away, before polling its event queue.
+  bool _replaceStoreImmediately = false;
+
+  /// True for a store loaded from stored server data
+  /// (see [_loadPersisted]), until we've received and handled
+  /// a first batch of events from its event queue.
+  ///
+  /// Until then, we don't know whether the server still has the event queue,
+  /// at the stored [lastEventId], or whether our API key still works;
+  /// so [_handlePollError] treats those failures as expected.
+  ///
+  /// That first batch has the events from while the app wasn't running.
+  /// Its typing events are stale, so [poll] skips them;
+  /// and if it calls for a fresh snapshot (see [_requiresFreshSnapshot]),
+  /// [poll] replaces the store after recording the batch.
+  bool _eventQueueUnconfirmed = false;
+
   /// Make the register-queue request, with retries.
+  ///
+  /// On success, [rawBody] holds the body of the successful response.
   ///
   /// After each async gap, calls [stopAndThrowIfNoAccount].
   static Future<InitialSnapshot> _registerQueueWithRetry(
     ApiConnection connection, {
+    required BytesBuilder rawBody,
     required void Function() stopAndThrowIfNoAccount,
+    void Function()? onAttemptFailed,
   }) async {
     BackoffMachine? backoffMachine;
     while (true) {
       InitialSnapshot? result;
+      rawBody.clear();
       try {
-        result = await registerQueue(connection, idleQueueTimeout: .mobile);
+        result = await registerQueue(connection, idleQueueTimeout: .mobile,
+          rawBody: rawBody);
       } catch (e, stackTrace) {
         stopAndThrowIfNoAccount();
         // TODO(#890): tell user if initial-fetch errors persist, or look non-transient
@@ -1558,6 +2734,7 @@ class UpdateMachine {
             }
         }
         assert(debugLog('Backing off, then will retry…'));
+        onAttemptFailed?.call();
         await (backoffMachine ??= BackoffMachine()).wait();
         stopAndThrowIfNoAccount();
         assert(debugLog('… Backoff wait complete, retrying initial fetch.'));
@@ -1671,6 +2848,14 @@ class UpdateMachine {
     _appLifecycleSubscription = ZulipBinding.instance.appLifecycleStateChanges
       .listen(_handleAppLifecycleStateChange);
     try {
+      if (_replaceStoreImmediately) {
+        // Replacing the store requires it to be installed in the global store,
+        // which [GlobalStore.perAccount] does once [load] returns.
+        await Future<void>.delayed(Duration.zero);
+        if (_disposed) return;
+        throw _ReplaceImmediatelyException();
+      }
+
       while (true) {
         if (_debugLoopSignal != null) {
           await _debugLoopWait();
@@ -1711,18 +2896,95 @@ class UpdateMachine {
         _clearPollErrors();
 
         final events = result.events;
-        for (final event in events) {
-          try {
-            await store.handleEvent(event);
+        Uint8List? eventLogData;
+        var truncateEventLog = false;
+        Future<bool> Function(MessageDatabase db)? commitEventLogInTxn;
+        if (events.isNotEmpty && _serverSnapshotStored != null && store.dbActive) {
+          if (await _serverSnapshotStored!) {
             if (_disposed) return;
-          } catch (e, stackTrace) {
+            final batchLastEventId = events.last.id;
+            if (!_storedEventLogTruncated) {
+              final rawEvents = (result.rawEvents
+                    ?? [for (final e in events) e.toJson()])
+                .where((event) => !_ephemeralEventTypes.contains(event['type']))
+                .toList();
+              if (rawEvents.isNotEmpty) {
+                eventLogData = utf8.encode(jsonEncode(rawEvents));
+              }
+            }
+            truncateEventLog = !_storedEventLogTruncated
+              && (_isEventLogTooLong(batchLastEventId - _storedSnapshotLastEventId)
+                  || _isEventLogTooBig(_storedEventBatchesSize + (eventLogData?.length ?? 0),
+                       snapshotSize: _storedSnapshotSize));
+            commitEventLogInTxn = (MessageDatabase db) {
+              return store._globalStore._backend.commitServerEventsInMessageDbTxn(
+                db,
+                store.accountId,
+                queueId: store.queueId,
+                lastEventId: batchLastEventId,
+                data: eventLogData,
+                truncate: truncateEventLog,
+              );
+            };
+          } else {
             if (_disposed) return;
-            Error.throwWithStackTrace(
-              _EventHandlingException(cause: e, event: event), stackTrace);
+            _serverSnapshotStored = null;
           }
         }
+        var eventLogOutcome = EventLogCommitOutcome.notAttempted;
+        await store._handleEventBatch(
+          events,
+          lastEventId: events.isNotEmpty ? events.last.id : null,
+          rawEvents: result.rawEvents,
+          skipTypingEvents: _eventQueueUnconfirmed,
+          commitEventLogInTxn: commitEventLogInTxn,
+          onEventLogCommitResult: (v) {
+            eventLogOutcome = v;
+          },
+        );
+        if (_disposed) return;
         if (events.isNotEmpty) {
+          switch (eventLogOutcome) {
+            case EventLogCommitOutcome.committed:
+              if (truncateEventLog) {
+                _storedEventLogTruncated = true;
+                _storedEventBatchesSize = 0;
+              } else {
+                _storedEventBatchesSize += eventLogData?.length ?? 0;
+              }
+            case EventLogCommitOutcome.rejected:
+              _serverSnapshotStored = null;
+            case EventLogCommitOutcome.failed:
+              _serverSnapshotStored = null;
+              // The stored data lacks these events, which the server will now forget.
+              try {
+                await store._globalStore._backend.doClearServerData(store.accountId);
+              } catch (e) {
+                assert(debugLog('Error clearing server data: $e')); // TODO(log)
+              }
+              if (_disposed) return;
+            case EventLogCommitOutcome.notAttempted:
+              if (_serverSnapshotStored != null) {
+                await _appendServerEvents(result);
+                if (_disposed) return;
+              }
+          }
           lastEventId = events.last.id;
+        }
+        if (_eventQueueUnconfirmed) {
+          _eventQueueUnconfirmed = false;
+          store._setConfirmed(true);
+          // These are the events from while the app wasn't running.
+          // Check them as [_loadPersisted] checked the stored ones.
+          // (If the app quits before the replacement is done,
+          // the next start finds these events stored, and replaces then.)
+          if (_requiresFreshSnapshot(result.rawEvents ?? const [],
+                zulipVersion: store.zulipVersion,
+                zulipFeatureLevel: store.zulipFeatureLevel)) {
+            throw _ReplaceImmediatelyException();
+          }
+          // Now the store's data about this device is up to date.
+          store.pushDevices.start();
         }
       }
     } catch (e, stackTrace) {
@@ -1730,6 +2992,129 @@ class UpdateMachine {
       await _handlePollError(e, stackTrace);
       assert(_disposed);
       return;
+    }
+  }
+
+  /// Completes with whether the [ServerSnapshot] for this event queue
+  /// was stored, so that the events received on the queue should be too;
+  /// or null if they shouldn't be.
+  ///
+  /// Storing this data is best-effort:
+  /// a failure stops it for this [UpdateMachine],
+  /// but doesn't affect polling.
+  ///
+  /// See [_startStoringServerSnapshot] and [_appendServerEvents].
+  Future<bool>? _serverSnapshotStored;
+
+  static String _appVersion(PackageInfo packageInfo) =>
+    '${packageInfo.version}+${packageInfo.buildNumber}';
+
+  /// The stored snapshot's own last event ID,
+  /// as opposed to [ServerSnapshot.lastEventId],
+  /// for bounding the stored event log; see [_appendServerEvents].
+  int _storedSnapshotLastEventId = 0;
+
+  /// The size of the stored snapshot's data, in bytes;
+  /// see [_appendServerEvents].
+  int _storedSnapshotSize = 0;
+
+  /// The total size of the stored [ServerEventBatch]es' data, in bytes;
+  /// see [_appendServerEvents].
+  int _storedEventBatchesSize = 0;
+
+  /// Whether the stored event log was cut off for getting too big,
+  /// so that events are no longer stored; see [_appendServerEvents].
+  bool _storedEventLogTruncated = false;
+
+  /// Start storing the given `/register` response body
+  /// as the account's [ServerSnapshot].
+  ///
+  /// Nothing is stored if the app version is unknown.
+  void _startStoringServerSnapshot(Uint8List data, {required int lastEventId}) {
+    assert(_serverSnapshotStored == null);
+    _storedSnapshotLastEventId = lastEventId;
+    _storedSnapshotSize = data.length;
+    _storedEventBatchesSize = 0;
+    _storedEventLogTruncated = false;
+    final timestamp = ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000;
+    _serverSnapshotStored = () async {
+      try {
+        final packageInfo = await ZulipBinding.instance.packageInfo;
+        if (packageInfo == null || _disposed || store.disposed) return false;
+        final snapshot = ServerSnapshot(
+          accountId: store.accountId,
+          realmUrl: store.realmUrl.toString(),
+          userId: store.selfUserId,
+          queueId: store.queueId,
+          lastEventId: lastEventId,
+          appVersion: _appVersion(packageInfo),
+          timestamp: timestamp,
+          eventLogTruncated: false);
+        return await store._globalStore._backend.doStoreServerSnapshot(snapshot,
+          data: data);
+      } catch (e) {
+        assert(debugLog('Error storing server snapshot: $e')); // TODO(log)
+        return false;
+      }
+    }();
+  }
+
+  /// Event types not worth storing, because the data they carry
+  /// will be stale anyway by the time stored events are used.
+  static const _ephemeralEventTypes = {'heartbeat', 'typing', 'presence'};
+
+  /// Record the events in [result], received on this event queue,
+  /// following the stored [ServerSnapshot].
+  ///
+  /// If the stored event log would get too long or too big to be worth
+  /// replaying (see [_isEventLogTooLong] and [_isEventLogTooBig]),
+  /// this instead deletes it, and from then on stores just the ack point
+  /// (see [ServerSnapshot.eventLogTruncated]).
+  ///
+  /// This must complete before the next poll request acks these events.
+  /// It doesn't throw.
+  Future<void> _appendServerEvents(GetEventsResult result) async {
+    if (!await _serverSnapshotStored!) {
+      _serverSnapshotStored = null;
+      return;
+    }
+    final backend = store._globalStore._backend;
+    final lastEventId = result.events.last.id;
+    Uint8List? data;
+    if (!_storedEventLogTruncated) {
+      final rawEvents = result.rawEvents!
+        .where((event) => !_ephemeralEventTypes.contains(event['type']))
+        .toList();
+      if (rawEvents.isNotEmpty) data = utf8.encode(jsonEncode(rawEvents));
+    }
+    final truncate = !_storedEventLogTruncated
+      && (_isEventLogTooLong(lastEventId - _storedSnapshotLastEventId)
+          || _isEventLogTooBig(_storedEventBatchesSize + (data?.length ?? 0),
+               snapshotSize: _storedSnapshotSize));
+    try {
+      final bool stored;
+      if (truncate) {
+        stored = await backend.doTruncateServerEventLog(store.accountId,
+          queueId: store.queueId, lastEventId: lastEventId);
+        if (stored) {
+          _storedEventLogTruncated = true;
+          _storedEventBatchesSize = 0;
+        }
+      } else {
+        stored = await backend.doAppendServerEvents(store.accountId,
+          queueId: store.queueId, lastEventId: lastEventId, data: data);
+        if (stored) _storedEventBatchesSize += data?.length ?? 0;
+      }
+      if (!stored) _serverSnapshotStored = null;
+    } catch (e) {
+      assert(debugLog('Error storing server events: $e')); // TODO(log)
+      _serverSnapshotStored = null;
+      // The stored data lacks these events, which the server will now forget.
+      try {
+        await backend.doClearServerData(store.accountId);
+      } catch (e) {
+        assert(debugLog('Error clearing server data: $e')); // TODO(log)
+      }
     }
   }
 
@@ -1949,6 +3334,7 @@ class UpdateMachine {
         Error.throwWithStackTrace(error, stackTrace);
     }
 
+    store._setEventStreamFailing(true);
     assert(debugLog('Transient error polling event queue for $store: $error\n'
         'Backing off, then will retry…'));
     if (shouldReportToUser) {
@@ -1984,6 +3370,32 @@ class UpdateMachine {
         // The old event queue is gone, so we need a new one.  This is normal.
         isUnexpected = false;
 
+      case ZulipApiException(httpStatus: 400, code: 'BAD_REQUEST')
+          when _eventQueueUnconfirmed:
+        assert(debugLog('Stored event queue for $store rejected: $error\n'
+          'Replacing…'));
+        // We resumed the event queue from stored data, and the server
+        // rejected the stored last event ID: it doesn't match what the
+        // server has pruned (it prunes events once acked).
+        // We store events before acking them, so this shouldn't happen;
+        // but if it does, the stored data is out of sync with the queue,
+        // so treat it like a lost event queue.
+        isUnexpected = false;
+
+      case ZulipApiException(httpStatus: 401) when _eventQueueUnconfirmed:
+        assert(debugLog('Auth failure resuming stored event queue for $store: $error\n'
+          'Replacing…'));
+        // E.g., the API key was revoked while the app wasn't running.
+        // Reloading registers a new queue, which fails the same way;
+        // then [GlobalStore.loadPerAccount] tells the user, and logs out.
+        // TODO(#1054) handle auth failure directly, here and elsewhere
+        store._setEventStreamFailing(true);
+        isUnexpected = false;
+
+      case _ReplaceImmediatelyException():
+        assert(debugLog('Replacing $store, loaded from stored data…'));
+        isUnexpected = false;
+
       case _EventHandlingException(:final cause, :final event):
         assert(debugLog('BUG: Error handling an event: $cause\n' // TODO(log)
           '  event: $event\n'
@@ -1999,6 +3411,7 @@ class UpdateMachine {
         // Hopefully (probably?) the bug only affects our implementation of
         // the *change* in state represented by the event, and when we get the
         // new state in a fresh InitialSnapshot we'll handle that just fine.
+        store._setEventStreamFailing(true);
         isUnexpected = true;
 
       default:
@@ -2014,6 +3427,7 @@ class UpdateMachine {
         // separate only so that that other case can print more context.
         // The bug here could be in the server if it's an ApiRequestException,
         // but our remedy is the same either way.
+        store._setEventStreamFailing(true);
         isUnexpected = true;
     }
 
@@ -2076,6 +3490,10 @@ class UpdateMachine {
     assert(!_disposed);
     _appLifecycleSubscription?.cancel();
     _retrySignalSubscription?.cancel();
+    if (_pollAbortTrigger case final trigger?) {
+      _pollAbortTrigger = null;
+      trigger.complete();
+    }
     _disposed = true;
   }
 
@@ -2102,6 +3520,21 @@ class UpdateMachine {
   @override
   String toString() => '${objectRuntimeType(this, 'UpdateMachine')}#${shortHash(this)}';
 }
+
+/// Stored server data can't be used; see [UpdateMachine._loadPersisted].
+class _UnusableServerDataException implements Exception {
+  final String reason;
+
+  _UnusableServerDataException(this.reason);
+
+  @override
+  String toString() => 'Unusable server data: $reason';
+}
+
+/// A store loaded from stored server data should be replaced right away;
+/// see [UpdateMachine._replaceStoreImmediately]
+/// and [UpdateMachine._eventQueueUnconfirmed].
+class _ReplaceImmediatelyException implements Exception {}
 
 class _EventHandlingException implements Exception {
   final Object cause;

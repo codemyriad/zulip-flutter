@@ -32,7 +32,8 @@ void main() {
     Iterable<(User, int)> voterIdxPairs = const [],
   }) async {
     addTearDown(testBinding.reset);
-    await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
+    final stream = eg.stream();
+    await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(streams: [stream]));
     store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
     await store.addUsers(users ?? [eg.selfUser, eg.otherUser]);
     if (mutedUserIds != null) {
@@ -42,6 +43,7 @@ void main() {
 
     message = eg.streamMessage(
       sender: eg.selfUser,
+      stream: stream,
       submessages: [eg.submessage(content: submessageContent)]);
     await store.addMessage(message);
     await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,

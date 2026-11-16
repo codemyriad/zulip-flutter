@@ -17,6 +17,7 @@ import 'package:zulip/host/android_notifications.dart';
 import 'package:zulip/host/ios_notifications.g.dart';
 import 'package:zulip/host/notifications.dart';
 import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/widgets/app.dart';
 
@@ -74,6 +75,7 @@ class TestZulipBinding extends ZulipBinding {
   /// [addTearDown], like `addTearDown(testBinding.reset);`.
   void reset() {
     ZulipApp.debugReset();
+    MessageListView.debugOnLiveRevalidationChanged = null;
     _resetStore();
     _resetCanLaunchUrl();
     _resetLaunchUrl();
@@ -101,9 +103,15 @@ class TestZulipBinding extends ZulipBinding {
   TestGlobalStore get globalStore => _globalStore ??= eg.globalStore();
   TestGlobalStore? _globalStore;
 
+  /// Optional override returned by [getGlobalStore] / [getGlobalStoreSync]
+  /// (for example an [UpdateMachineTestGlobalStore] in notification tests).
+  GlobalStore? customGlobalStore;
+
   bool _debugAlreadyLoadedStore = false;
 
   void _resetStore() {
+    customGlobalStore?.dispose();
+    customGlobalStore = null;
     _globalStore?.dispose();
     _globalStore = null;
     assert(() {
@@ -113,10 +121,10 @@ class TestZulipBinding extends ZulipBinding {
   }
 
   @override
-  Future<GlobalStore> getGlobalStore() => Future.value(globalStore);
+  Future<GlobalStore> getGlobalStore() => Future.value(customGlobalStore ?? globalStore);
 
   @override
-  GlobalStore? getGlobalStoreSync() => globalStore;
+  GlobalStore? getGlobalStoreSync() => customGlobalStore ?? globalStore;
 
   @override
   Future<GlobalStore> getGlobalStoreUniquely() {

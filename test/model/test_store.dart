@@ -1,10 +1,18 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart';
 import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/events.dart';
 import 'package:zulip/api/route/realm.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/database.dart';
+import 'package:zulip/model/message_database.dart';
+import 'package:zulip/model/message_db_writer.dart';
 import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/notifications/receive.dart';
@@ -72,7 +80,22 @@ mixin _ApiConnectionsMixin on GlobalStore {
 ///   https://github.com/simolus3/drift/issues/3761
 final _bogusDb = AppDatabase(LazyDatabase(() => throw 'used bogus DB'));
 
-class _TestGlobalStoreBackend implements GlobalStoreBackend {
+/// A [GlobalStoreBackend] for tests, which keeps data in memory.
+///
+/// Most data isn't kept here at all;
+/// the global store has it, and the methods for it do nothing.
+/// The server data, though, is kept here,
+/// with the same semantics as [LiveGlobalStoreBackend] has,
+/// so that it can be inspected with [serverSnapshotOf]
+/// and [serverEventBatchesOf],
+/// and so that the same backend can be passed to a second [TestGlobalStore]
+/// or [UpdateMachineTestGlobalStore],
+/// simulating a restart of the app.
+///
+/// The global stores using this backend keep it informed
+/// of which accounts exist,
+/// standing in for the foreign-key constraints on the server-data tables.
+class TestGlobalStoreBackend implements GlobalStoreBackend {
   @override
   Future<void> doUpdateGlobalSettings(GlobalSettingsCompanion data) async {
     // Nothing to do.
@@ -103,9 +126,324 @@ class _TestGlobalStoreBackend implements GlobalStoreBackend {
   Future<void> doRemovePushKey(int pushKeyId) async {
     // Nothing to do.
   }
+
+  final Map<int, Account> _accounts = {};
+  final Map<int, ServerSnapshot> _serverSnapshots = {};
+  final Map<int, Uint8List> _serverSnapshotData = {};
+  final Map<int, List<ServerEventBatch>> _serverEventBatches = {};
+  int _nextServerEventBatchId = 1;
+
+  MessageDatabase? _messageDb;
+  final Map<int, MessageDbWriter> _messageDbWriters = {};
+
+  /// The in-memory [MessageDatabase] created for this backend, if opened.
+  @visibleForTesting
+  MessageDatabase? get debugMessageDatabase => _messageDb;
+
+  /// If non-null, each open of [debugMessageDatabase] first waits for this.
+  Future<void>? messageDbOpenGate;
+
+  /// If non-null, each write on [MessageDbWriter] first waits for this.
+  Future<void>? messageDbWriteGate;
+
+  /// If non-null, the next write on [MessageDbWriter] throws this and resets it.
+  Object? nextMessageDbWriteError;
+
+  /// If non-null, the next read on [MessageDbWriter] throws this and resets it.
+  Object? nextMessageDbReadError;
+
+  Future<MessageDatabase> _openMessageDb() async {
+    driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+    if (messageDbOpenGate case final gate?) {
+      await gate;
+    }
+    return _messageDb ??= MessageDatabase(
+      NativeDatabase.memory(setup: configureMessageDbPragmas),
+    );
+  }
+
+  /// Close [debugMessageDatabase], if one was opened.
+  Future<void> closeMessageDb() async {
+    final db = _messageDb;
+    _messageDb = null;
+    if (db != null) {
+      await db.close();
+    }
+  }
+
+  @override
+  MessageDbWriter messageDbWriterForAccount(int accountId) {
+    return _messageDbWriters[accountId] ??= MessageDbWriter(
+      accountId: accountId,
+      openDb: _openMessageDb,
+      debugBeforeWrite: () async {
+        if (messageDbWriteGate case final gate?) {
+          await gate;
+        }
+        if (nextMessageDbWriteError case final error?) {
+          nextMessageDbWriteError = null;
+          throw error;
+        }
+      },
+      debugBeforeRead: () async {
+        if (nextMessageDbReadError case final error?) {
+          nextMessageDbReadError = null;
+          throw error;
+        }
+      },
+    );
+  }
+
+  void _addAccount(Account account) {
+    _accounts[account.id] = account;
+  }
+
+  void _removeAccount(int accountId) {
+    _accounts.remove(accountId);
+    _serverSnapshots.remove(accountId);
+    _serverSnapshotData.remove(accountId);
+    _serverEventBatches.remove(accountId);
+    if (_messageDb != null || _messageDbWriters.containsKey(accountId)) {
+      unawaited(messageDbWriterForAccount(accountId).enqueuePurge());
+    }
+  }
+
+  /// The account's stored [ServerSnapshot], if any.
+  ServerSnapshot? serverSnapshotOf(int accountId) => _serverSnapshots[accountId];
+
+  /// The data of the account's stored [ServerSnapshot], if any.
+  Uint8List? serverSnapshotDataOf(int accountId) => _serverSnapshotData[accountId];
+
+  /// The account's stored [ServerEventBatch]es, in order.
+  List<ServerEventBatch> serverEventBatchesOf(int accountId) =>
+    List.unmodifiable(_serverEventBatches[accountId] ?? const <ServerEventBatch>[]);
+
+  /// Store server data for the account, as if stored by an earlier run of the app.
+  ///
+  /// The snapshot's queue ID is [queueId] if non-null,
+  /// else taken from [snapshotJson], as is its last event ID;
+  /// each batch's last event ID is the ID of its last event.
+  /// The stored [ServerSnapshot.lastEventId] is [lastEventId] if non-null,
+  /// else that of the last batch, if any, else that of the snapshot.
+  ///
+  /// The [appVersion] defaults to that of the default [eg.packageInfo],
+  /// and [timestamp] to the current time.
+  void seedServerData(int accountId, {
+    required Map<String, dynamic> snapshotJson,
+    List<List<Map<String, dynamic>>> eventBatches = const [],
+    String? realmUrl,
+    int? userId,
+    String? queueId,
+    int? lastEventId,
+    String? appVersion,
+    int? timestamp,
+    bool eventLogTruncated = false,
+  }) {
+    queueId ??= snapshotJson['queue_id'] as String;
+    final batches = [
+      for (final events in eventBatches)
+        ServerEventBatch(
+          id: _nextServerEventBatchId++,
+          accountId: accountId,
+          queueId: queueId,
+          lastEventId: events.last['id'] as int,
+          data: utf8.encode(jsonEncode(events))),
+    ];
+    final packageInfo = eg.packageInfo();
+    final account = _accounts[accountId];
+    _serverSnapshots[accountId] = ServerSnapshot(
+      accountId: accountId,
+      realmUrl: realmUrl
+        ?? account?.realmUrl.toString()
+        ?? eg.selfAccount.realmUrl.toString(),
+      userId: userId ?? account?.userId ?? eg.selfUser.userId,
+      queueId: queueId,
+      lastEventId: lastEventId
+        ?? batches.lastOrNull?.lastEventId
+        ?? snapshotJson['last_event_id'] as int,
+      appVersion: appVersion
+        ?? '${packageInfo.version}+${packageInfo.buildNumber}',
+      timestamp: timestamp
+        ?? ZulipBinding.instance.utcNow().millisecondsSinceEpoch ~/ 1000,
+      eventLogTruncated: eventLogTruncated);
+    _serverSnapshotData[accountId] = utf8.encode(jsonEncode(snapshotJson));
+    _serverEventBatches[accountId] = batches;
+  }
+
+  /// If non-null, the next call to [doStoreServerSnapshot] throws this
+  /// and resets it to null.
+  Object? storeServerSnapshotError;
+
+  /// If non-null, the next call to [doAppendServerEvents] throws this
+  /// and resets it to null.
+  Object? appendServerEventsError;
+
+  /// If non-null, each call to [doAppendServerEvents] first waits for this.
+  Future<void>? appendServerEventsGate;
+
+  /// If non-null, the next call to [doLoadServerSnapshotInfo] throws this
+  /// and resets it to null.
+  Object? loadServerSnapshotInfoError;
+
+  /// If non-null, the next call to [doLoadServerData] throws this
+  /// and resets it to null.
+  Object? loadServerDataError;
+
+  /// If non-null, each call to [doLoadServerData] first waits for this.
+  Future<void>? loadServerDataGate;
+
+  /// If non-null, the next call to [doClearServerData] throws this
+  /// and resets it to null.
+  Object? clearServerDataError;
+
+  @override
+  Future<bool> doStoreServerSnapshot(ServerSnapshot snapshot, {
+    required Uint8List data,
+  }) async {
+    if (storeServerSnapshotError case final error?) {
+      storeServerSnapshotError = null;
+      throw error;
+    }
+    if (!_accounts.containsKey(snapshot.accountId)) return false;
+    _serverEventBatches.remove(snapshot.accountId);
+    _serverSnapshots[snapshot.accountId] = snapshot;
+    _serverSnapshotData[snapshot.accountId] = data;
+    return true;
+  }
+
+  @override
+  Future<bool> commitServerEventsInMessageDbTxn(
+    MessageDatabase db,
+    int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+    required bool truncate,
+  }) async {
+    if (truncate) {
+      return doTruncateServerEventLog(
+        accountId,
+        queueId: queueId,
+        lastEventId: lastEventId,
+      );
+    }
+    return doAppendServerEvents(
+      accountId,
+      queueId: queueId,
+      lastEventId: lastEventId,
+      data: data,
+    );
+  }
+
+  @override
+  Future<void> doWipeAllMessageCache() async {
+    await _messageDb?.wipeAllMessageCache();
+  }
+
+  @override
+  Future<bool> doAppendServerEvents(int accountId, {
+    required String queueId,
+    required int lastEventId,
+    required Uint8List? data,
+  }) async {
+    if (appendServerEventsGate case final gate?) {
+      await gate;
+    }
+    if (appendServerEventsError case final error?) {
+      appendServerEventsError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null || snapshot.queueId != queueId) return false;
+    _serverSnapshots[accountId] = snapshot.copyWith(lastEventId: lastEventId);
+    if (data != null) {
+      (_serverEventBatches[accountId] ??= []).add(ServerEventBatch(
+        id: _nextServerEventBatchId++,
+        accountId: accountId,
+        queueId: queueId,
+        lastEventId: lastEventId,
+        data: data));
+    }
+    return true;
+  }
+
+  @override
+  Future<bool> doTruncateServerEventLog(int accountId, {
+    required String queueId,
+    required int lastEventId,
+  }) async {
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null || snapshot.queueId != queueId) return false;
+    _serverSnapshots[accountId] = snapshot.copyWith(
+      lastEventId: lastEventId, eventLogTruncated: true);
+    _serverEventBatches.remove(accountId);
+    return true;
+  }
+
+  Iterable<ServerEventBatch> _serverEventBatchesOnQueue(ServerSnapshot snapshot) {
+    return (_serverEventBatches[snapshot.accountId] ?? [])
+      .where((batch) => batch.queueId == snapshot.queueId);
+  }
+
+  @override
+  Future<ServerSnapshotInfo?> doLoadServerSnapshotInfo(int accountId) async {
+    if (loadServerSnapshotInfoError case final error?) {
+      loadServerSnapshotInfoError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null) return null;
+    return (
+      realmUrl: snapshot.realmUrl,
+      userId: snapshot.userId,
+      queueId: snapshot.queueId,
+      lastEventId: snapshot.lastEventId,
+      appVersion: snapshot.appVersion,
+      timestamp: snapshot.timestamp,
+      eventLogTruncated: snapshot.eventLogTruncated,
+      snapshotSize: _serverSnapshotData[accountId]!.length,
+      eventBatchesSize: _serverEventBatchesOnQueue(snapshot)
+        .fold(0, (sum, batch) => sum + batch.data.length),
+    );
+  }
+
+  @override
+  Future<ServerData?> doLoadServerData(int accountId, {
+    bool includeEventBatches = true,
+  }) async {
+    if (loadServerDataGate case final gate?) {
+      await gate;
+    }
+    if (loadServerDataError case final error?) {
+      loadServerDataError = null;
+      throw error;
+    }
+    final snapshot = _serverSnapshots[accountId];
+    if (snapshot == null) return null;
+    return (
+      snapshot: snapshot,
+      snapshotData: _serverSnapshotData[accountId]!,
+      eventBatches: includeEventBatches
+        ? _serverEventBatchesOnQueue(snapshot).toList()
+        : <ServerEventBatch>[],
+    );
+  }
+
+  @override
+  Future<void> doClearServerData(int accountId) async {
+    if (clearServerDataError case final error?) {
+      clearServerDataError = null;
+      throw error;
+    }
+    _serverSnapshots.remove(accountId);
+    _serverSnapshotData.remove(accountId);
+    _serverEventBatches.remove(accountId);
+  }
 }
 
 mixin _DatabaseMixin on GlobalStore {
+  TestGlobalStoreBackend get backend;
+
   int _nextAccountId = 1;
 
   @override
@@ -125,7 +463,9 @@ mixin _DatabaseMixin on GlobalStore {
       data = data.copyWith(id: Value(_nextAccountId++));
     }
 
-    return await _bogusDb.accounts.mapFromCompanion(data, _bogusDb);
+    final account = await _bogusDb.accounts.mapFromCompanion(data, _bogusDb);
+    backend._addAccount(account);
+    return account;
   }
 
   @override
@@ -145,7 +485,7 @@ mixin _DatabaseMixin on GlobalStore {
   Future<void> doRemoveAccount(int accountId) async {
     (_doRemoveAccountCalls ??= []).add(accountId);
     await Future<void>.delayed(TestGlobalStore.removeAccountDuration);
-    // Nothing else to do.
+    backend._removeAccount(accountId);
   }
 }
 
@@ -168,17 +508,28 @@ mixin _DatabaseMixin on GlobalStore {
 ///     using [UpdateMachine.load] (like [LiveGlobalStore] does).
 class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMixin {
   TestGlobalStore({
+    TestGlobalStoreBackend? backend,
     GlobalSettingsData? globalSettings,
     Map<BoolGlobalSetting, bool>? boolGlobalSettings,
     Map<IntGlobalSetting, int>? intGlobalSettings,
     required super.accounts,
     Iterable<PushKey>? pushKeys,
-  }) : super(backend: _TestGlobalStoreBackend(),
+  }) : backend = backend ??= TestGlobalStoreBackend(),
+       super(backend: backend,
          globalSettings: globalSettings ?? GlobalSettingsData(),
          boolGlobalSettings: boolGlobalSettings ?? {},
          intGlobalSettings: intGlobalSettings ?? {},
          pushKeys: pushKeys ?? [],
-       );
+       ) {
+    accounts.forEach(this.backend._addAccount);
+  }
+
+  /// The backend of this store.
+  ///
+  /// To simulate a restart of the app, pass this as the `backend`
+  /// of a new global store.
+  @override
+  final TestGlobalStoreBackend backend;
 
   final Map<int, InitialSnapshot> _initialSnapshots = {};
 
@@ -236,7 +587,9 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
   Object? loadPerAccountException;
 
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     if (loadPerAccountDuration != null) {
       await Future<void>.delayed(loadPerAccountDuration!);
     }
@@ -255,6 +608,25 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
   }
 }
 
+/// How [UpdateMachineTestGlobalStore] should expect a load
+/// of an account's data to go, other than a reload.
+///
+/// This determines which API responses it prepares;
+/// see [UpdateMachineTestGlobalStore.doLoadPerAccount].
+enum ExpectedLoad {
+  /// A load from the server.
+  network,
+
+  /// A load from server data stored on the device,
+  /// resuming the stored event queue.
+  persisted,
+
+  /// A load from server data stored on the device,
+  /// replacing the store right away (by reloading from the server)
+  /// without polling the stored event queue or making other requests.
+  persistedReplaced,
+}
+
 /// A [GlobalStore] that causes no database queries,
 /// and loads per-account data from API responses prepared by callers.
 ///
@@ -268,22 +640,38 @@ class TestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMi
 /// to avoid being a nuisance and does a boring
 /// [FakeApiConnection.prepare] for the register-token request.
 ///
+/// Server data stored in [backend] (see [TestGlobalStoreBackend.seedServerData])
+/// lets [UpdateMachine.load] load from that data instead.
+/// Callers set [expectedLoad] to say whether it should,
+/// and so which API responses to prepare.
+///
 /// See also:
 ///   * [TestGlobalStore], which prepares per-account data
 ///     without using [UpdateMachine.load].
 class UpdateMachineTestGlobalStore extends GlobalStore with _ApiConnectionsMixin, _DatabaseMixin {
   UpdateMachineTestGlobalStore({
+    TestGlobalStoreBackend? backend,
     GlobalSettingsData? globalSettings,
     Map<BoolGlobalSetting, bool>? boolGlobalSettings,
     Map<IntGlobalSetting, int>? intGlobalSettings,
     required super.accounts,
     Iterable<PushKey>? pushKeys,
-  }) : super(backend: _TestGlobalStoreBackend(),
+  }) : backend = backend ??= TestGlobalStoreBackend(),
+       super(backend: backend,
          globalSettings: globalSettings ?? GlobalSettingsData(),
          boolGlobalSettings: boolGlobalSettings ?? {},
          intGlobalSettings: intGlobalSettings ?? {},
          pushKeys: pushKeys ?? [],
-       );
+       ) {
+    accounts.forEach(this.backend._addAccount);
+  }
+
+  /// The backend of this store.
+  ///
+  /// To simulate a restart of the app, pass this as the `backend`
+  /// of a new global store.
+  @override
+  final TestGlobalStoreBackend backend;
 
   // [doLoadPerAccount] depends on the cache to prepare the API responses.
   // Calling [clearCachedApiConnections] is permitted, though.
@@ -299,25 +687,97 @@ class UpdateMachineTestGlobalStore extends GlobalStore with _ApiConnectionsMixin
     connection.prepare(json: eg.initialSnapshot().toJson());
   }
 
+  /// How the next load (other than a reload) should be expected to go.
+  ExpectedLoad expectedLoad = ExpectedLoad.network;
+
+  /// Prepares the response to the first poll request
+  /// on a resumed event queue, for [ExpectedLoad.persisted].
+  ///
+  /// Defaults to a response with no events.
+  void Function(FakeApiConnection)? prepareResumedPollResponse;
+
+  void _prepareResumedPollSuccess(FakeApiConnection connection) {
+    connection.prepare(json: GetEventsResult(events: [], queueId: null).toJson());
+  }
+
+  void _prepareLoadResponses(FakeApiConnection connection, ExpectedLoad expectedLoad) {
+    switch (expectedLoad) {
+      case ExpectedLoad.network:
+        (prepareRegisterQueueResponse ?? _prepareRegisterQueueSuccess)(connection);
+        connection.prepare(json: GetEventsResult(events: [HeartbeatEvent(id: 2)], queueId: null).toJson());
+      case ExpectedLoad.persisted:
+        (prepareResumedPollResponse ?? _prepareResumedPollSuccess)(connection);
+      case ExpectedLoad.persistedReplaced:
+        // The store makes no requests before it's replaced.
+        return;
+    }
+    connection.prepare(json: ServerEmojiData(codeToNames: {}).toJson());
+    if (NotificationService.instance.token.value != null) {
+      connection.prepare(json: {}); // register-token
+    }
+  }
+
+  /// During a load, prepares API responses
+  /// on any connection newly made by [apiConnection].
+  ///
+  /// Such a connection replaces one that was closed during the load,
+  /// as when [UpdateMachine.load] discards a store it built
+  /// from stored server data and falls back to loading from the server.
+  void Function(FakeApiConnection)? _prepareNewConnection;
+
   @override
-  Future<PerAccountStore> doLoadPerAccount(int accountId) async {
+  FakeApiConnection apiConnection({
+      required Uri realmUrl, required int? zulipFeatureLevel,
+      String? email, String? apiKey}) {
+    final cached = _apiConnections[(realmUrl: realmUrl,
+      zulipFeatureLevel: zulipFeatureLevel, email: email, apiKey: apiKey)];
+    final connection = super.apiConnection(
+      realmUrl: realmUrl, zulipFeatureLevel: zulipFeatureLevel,
+      email: email, apiKey: apiKey);
+    if (!identical(connection, cached)) {
+      _prepareNewConnection?.call(connection);
+    }
+    return connection;
+  }
+
+  /// Load the account's data through [UpdateMachine.load],
+  /// preparing API responses as appropriate for [expectedLoad]
+  /// (or, if not [allowPersisted], for [ExpectedLoad.network]).
+  ///
+  /// The responses are prepared on the connection [UpdateMachine.load]
+  /// will get from [apiConnectionFromAccount], so a test can get it
+  /// in advance to prepare more responses, which will come first.
+  ///
+  /// When not [allowPersisted], as in a reload,
+  /// this first calls [clearCachedApiConnections],
+  /// so that the new store gets a fresh connection
+  /// as it would in the live app.
+  /// (The old store's connection is still open,
+  /// until the old store gets disposed.)
+  @override
+  Future<PerAccountStore> doLoadPerAccount(int accountId, {
+    required bool allowPersisted,
+  }) async {
     final account = getAccount(accountId);
 
     // UpdateMachine.load should pick up the connection
     // with the network-request responses that we've prepared.
     assert(useCachedApiConnections);
 
+    if (!allowPersisted) clearCachedApiConnections();
     final connection = apiConnectionFromAccount(account!) as FakeApiConnection;
-    (prepareRegisterQueueResponse ?? _prepareRegisterQueueSuccess)(connection);
-    connection
-      ..prepare(json: GetEventsResult(events: [HeartbeatEvent(id: 2)], queueId: null).toJson())
-      ..prepare(json: ServerEmojiData(codeToNames: {}).toJson());
-    if (NotificationService.instance.token.value != null) {
-      connection.prepare(json: {}); // register-token
+    _prepareLoadResponses(connection,
+      allowPersisted ? expectedLoad : ExpectedLoad.network);
+    _prepareNewConnection = (connection) =>
+      _prepareLoadResponses(connection, ExpectedLoad.network);
+    try {
+      final updateMachine = await UpdateMachine.load(this, accountId,
+        allowPersisted: allowPersisted);
+      updateMachine.debugPauseLoop();
+      return updateMachine.store;
+    } finally {
+      _prepareNewConnection = null;
     }
-    final updateMachine = await UpdateMachine.load(this, accountId);
-    updateMachine.debugPauseLoop();
-    return updateMachine.store;
   }
 }
 
