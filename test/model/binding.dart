@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart' show PaintingBinding;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:sodium/sodium.dart' as sodium;
@@ -17,6 +18,7 @@ import 'package:zulip/host/android_notifications.dart';
 import 'package:zulip/host/ios_notifications.g.dart';
 import 'package:zulip/host/notifications.dart';
 import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/image_disk_cache.dart';
 import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/widgets/app.dart';
@@ -90,6 +92,7 @@ class TestZulipBinding extends ZulipBinding {
     _resetPickImage();
     _resetPickMultipleMedia();
     _resetWakelock();
+    _resetImageDiskCache();
   }
 
   /// The current global store offered to a [GlobalStoreWidget].
@@ -588,8 +591,82 @@ class TestZulipBinding extends ZulipBinding {
   }
 
   @override
+  FakeImageDiskCache get imageDiskCache => _imageDiskCache;
+  FakeImageDiskCache _imageDiskCache = FakeImageDiskCache();
+
+  int clearMemoryImageCacheCalls = 0;
+
+  @override
+  void clearMemoryImageCache() {
+    clearMemoryImageCacheCalls++;
+    try {
+      PaintingBinding.instance.imageCache.clear();
+    } catch (_) {
+      // Pure model tests may run without PaintingBinding initialized.
+    }
+  }
+
+  void _resetImageDiskCache() {
+    _imageDiskCache = FakeImageDiskCache();
+    clearMemoryImageCacheCalls = 0;
+  }
+
+  @override
   // TODO(#1787) implement androidIntentEvents and write related tests
   Stream<AndroidIntentEvent> get androidIntentEvents => throw UnimplementedError();
+}
+
+/// An in-memory [ImageDiskCache], for [TestZulipBinding.imageDiskCache].
+class FakeImageDiskCache implements ImageDiskCache {
+  FakeImageDiskCache({
+    this.maxEntryBytes = FileImageDiskCache.defaultMaxEntryBytes,
+  });
+
+  final int maxEntryBytes;
+
+  /// The stored entries, by account ID and then URL.
+  final Map<int, Map<Uri, Uint8List>> entries = {};
+
+  /// If non-null, every method throws this, simulating an I/O failure.
+  Object? exception;
+
+  void _maybeThrow() {
+    if (exception case final exception?) throw exception;
+  }
+
+  @override
+  Future<Uint8List?> get(int accountId, Uri url) async {
+    _maybeThrow();
+    return entries[accountId]?[url];
+  }
+
+  @override
+  Future<void> put(int accountId, Uri url, Uint8List bytes) async {
+    _maybeThrow();
+    if (bytes.length > maxEntryBytes) {
+      entries[accountId]?.remove(url);
+      return;
+    }
+    (entries[accountId] ??= {})[url] = bytes;
+  }
+
+  @override
+  Future<void> remove(int accountId, Uri url) async {
+    _maybeThrow();
+    entries[accountId]?.remove(url);
+  }
+
+  @override
+  Future<void> removeAccount(int accountId) async {
+    _maybeThrow();
+    entries.remove(accountId);
+  }
+
+  @override
+  Future<void> retainAccounts(Set<int> accountIds) async {
+    _maybeThrow();
+    entries.removeWhere((accountId, _) => !accountIds.contains(accountId));
+  }
 }
 
 class FakeSodium extends Fake implements sodium.Sodium {
