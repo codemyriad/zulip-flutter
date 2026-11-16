@@ -1014,6 +1014,121 @@ class MessageStoreImpl extends HasChannelStore
       return (messages: <Message>[], hasMoreOlder: false);
     }
 
+    return _querySavedMessages(
+      sqlSpec: parsed.sqlSpec,
+      matches: (m) => parsed.matchesMessage(m, this),
+      beforeMessageId: beforeMessageId,
+      limit: limit,
+      isUnreadFromStore: isUnreadFromStore,
+    );
+  }
+
+  /// Synthesize a recent page of saved messages for a cross-conversation or
+  /// search [narrow] (RAM merged with SQLite), sorted ascending by [Message.id].
+  ///
+  /// Returns `null` if [narrow] is not synthesized from saved messages, offline
+  /// coverage is disabled, this store is disposed, or no local messages exist.
+  Future<SavedMessageSearchResult?> savedMessagesForNarrow(
+    Narrow narrow, {
+    int? beforeMessageId,
+    required int limit,
+    required bool? Function(int messageId)? isUnreadFromStore,
+  }) async {
+    if (_disposed || !coverageEnabled || limit <= 0) return null;
+    if (!dbActive && messages.isEmpty) return null;
+
+    switch (narrow) {
+      case KeywordSearchNarrow(:final keyword):
+        return searchSavedMessages(
+          query: keyword,
+          beforeMessageId: beforeMessageId,
+          limit: limit,
+          isUnreadFromStore: isUnreadFromStore,
+        );
+
+      case CombinedFeedNarrow():
+        return _querySavedMessages(
+          sqlSpec: const StoredMessageSearchSpec(),
+          matches: (m) => switch (m) {
+            StreamMessage() => () {
+              final channel = streams[m.streamId];
+              return channel != null
+                && selfHasContentAccess(channel)
+                && isTopicVisible(m.streamId, m.topic);
+            }(),
+            DmMessage() => !shouldMuteDmConversation(
+              DmNarrow.ofMessage(m, selfUserId: selfUserId),
+            ),
+          },
+          beforeMessageId: beforeMessageId,
+          limit: limit,
+          isUnreadFromStore: isUnreadFromStore,
+        );
+
+      case MentionsNarrow():
+        return _querySavedMessages(
+          sqlSpec: const StoredMessageSearchSpec(
+            anyFlagsMask: StoredMessageFlags.mentioned
+              | StoredMessageFlags.streamWildcardMentioned
+              | StoredMessageFlags.topicWildcardMentioned,
+          ),
+          matches: (m) {
+            if (!m.flags.any((f) => f.isMentionFlag)) return false;
+            return switch (m) {
+              StreamMessage() => () {
+                final channel = streams[m.streamId];
+                return channel != null && selfHasContentAccess(channel);
+              }(),
+              DmMessage() => !shouldMuteDmConversation(
+                DmNarrow.ofMessage(m, selfUserId: selfUserId),
+              ),
+            };
+          },
+          beforeMessageId: beforeMessageId,
+          limit: limit,
+          isUnreadFromStore: isUnreadFromStore,
+        );
+
+      case StarredMessagesNarrow():
+        if (!isStarredMessagesAtCap && starredMessages.isEmpty) {
+          return (messages: <Message>[], hasMoreOlder: false);
+        }
+        return _querySavedMessages(
+          sqlSpec: StoredMessageSearchSpec(
+            allowedMessageIds: !isStarredMessagesAtCap
+              ? Set<int>.of(starredMessages)
+              : null,
+            requiredFlagsMask: isStarredMessagesAtCap
+              ? StoredMessageFlags.starred
+              : 0,
+          ),
+          matches: (m) {
+            if (!m.flags.contains(MessageFlag.starred)) return false;
+            return switch (m) {
+              StreamMessage() => () {
+                final channel = streams[m.streamId];
+                return channel != null && selfHasContentAccess(channel);
+              }(),
+              DmMessage() => true,
+            };
+          },
+          beforeMessageId: beforeMessageId,
+          limit: limit,
+          isUnreadFromStore: isUnreadFromStore,
+        );
+
+      case ChannelNarrow() || TopicNarrow() || DmNarrow():
+        return null;
+    }
+  }
+
+  Future<SavedMessageSearchResult?> _querySavedMessages({
+    required StoredMessageSearchSpec sqlSpec,
+    required bool Function(Message) matches,
+    int? beforeMessageId,
+    required int limit,
+    required bool? Function(int messageId)? isUnreadFromStore,
+  }) async {
     final dbMatchedById = <int, Message>{};
     if (dbActive && _dbWriter != null && !_dbWriter!.isPoisoned && _dbAccountId != null) {
       final writer = _dbWriter!;
@@ -1028,7 +1143,7 @@ class MessageStoreImpl extends HasChannelStore
         while (dbMatchedById.length < limit + 1) {
           final batch = await writer.runRead((db) => db.searchStoredMessages(
             accountId,
-            spec: parsed.sqlSpec,
+            spec: sqlSpec,
             beforeMessageId: cursorBeforeId,
             limit: batchSize,
           ));
@@ -1056,7 +1171,7 @@ class MessageStoreImpl extends HasChannelStore
               requireNarrowMatch: null,
               additionalFilter: (m) =>
                 (beforeMessageId == null || m.id < beforeMessageId)
-                && parsed.matchesMessage(m, this),
+                && matches(m),
             );
             if (loaded != null) {
               dbMatchedById[loaded.id] = loaded;
@@ -1079,7 +1194,7 @@ class MessageStoreImpl extends HasChannelStore
       if (beforeMessageId != null && current.id >= beforeMessageId) continue;
       if (_locationUnknown.contains(current.id)) continue;
       if (current.id < _coverage.evictedBelow) continue;
-      if (parsed.matchesMessage(current, this)) {
+      if (matches(current)) {
         combinedById[current.id] = current;
       }
     }
@@ -1087,7 +1202,7 @@ class MessageStoreImpl extends HasChannelStore
       if (beforeMessageId != null && m.id >= beforeMessageId) continue;
       if (_locationUnknown.contains(m.id)) continue;
       if (m.id < _coverage.evictedBelow) continue;
-      if (parsed.matchesMessage(m, this)) {
+      if (matches(m)) {
         combinedById[m.id] = m;
       }
     }

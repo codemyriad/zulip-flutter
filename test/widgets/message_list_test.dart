@@ -3590,4 +3590,54 @@ void main() {
       await tester.pumpAndSettle();
     });
   });
+
+  group('CombinedFeedNarrow offline saved messages', () {
+    testWidgets('shows cached channel and DM messages with offline banner before any CombinedFeedNarrow fetch', (tester) async {
+      TypingNotifier.debugEnable = false;
+      addTearDown(TypingNotifier.debugReset);
+      BackoffMachine.debugDuration = const Duration(seconds: 5);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      addTearDown(testBinding.reset);
+      testBinding.connectivityResult = const [ConnectivityResult.none];
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      final otherUser = eg.user(userId: 50, fullName: 'Alice');
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [stream],
+        subscriptions: [eg.subscription(stream)],
+        realmUsers: [eg.selfUser, otherUser],
+      ));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      store.debugSetCoverageEnabled(true);
+
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(
+        id: 10, stream: stream, topic: 'Coffee', sender: otherUser,
+        content: '<p>cached stream msg</p>')));
+      await store.handleEvent(eg.messageEvent(eg.dmMessage(
+        id: 11, from: otherUser, to: [eg.selfUser],
+        content: '<p>cached dm msg</p>')));
+
+      connection.prepare(httpException: const SocketException('offline'));
+
+      await tester.pumpWidget(TestZulipApp(
+        accountId: eg.selfAccount.id,
+        child: const MessageListPage(initNarrow: CombinedFeedNarrow()),
+      ));
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      await tester.pump();
+
+      check(find.byType(InitialLoadingIndicator)).findsNothing();
+      check(find.text('cached stream msg')).findsOne();
+      check(find.text('cached dm msg')).findsOne();
+      check(find.textContaining('Offline. Showing messages saved on this device')).findsOne();
+
+      // Drain backoff cleanly before unmount.
+      connection.prepare(json: eg.newestGetMessagesResult(
+        foundOldest: true, messages: []).toJson());
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  });
 }

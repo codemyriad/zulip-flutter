@@ -1221,6 +1221,17 @@ class PerAccountStore extends PerAccountStoreBase with
     isUnreadFromStore: unreads.isUnread,
   );
 
+  Future<SavedMessageSearchResult?> savedMessagesForNarrow(
+    Narrow narrow, {
+    int? beforeMessageId,
+    required int limit,
+  }) => _messages.savedMessagesForNarrow(
+    narrow,
+    beforeMessageId: beforeMessageId,
+    limit: limit,
+    isUnreadFromStore: unreads.isUnread,
+  );
+
   @visibleForTesting
   int? get debugCoverageThroughEventId => _messages.coverageThroughEventId;
 

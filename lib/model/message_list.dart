@@ -245,10 +245,10 @@ mixin _MessageSequence {
   RevalidationState get revalidation => _revalidation;
   RevalidationState _revalidation = RevalidationState.none;
 
-  /// Whether the view is showing local saved-message search results for a
-  /// [KeywordSearchNarrow] while the server search has not yet completed.
-  bool get showingSavedSearchResults => _showingSavedSearchResults;
-  bool _showingSavedSearchResults = false;
+  /// Whether the view is showing synthesized saved messages while the server
+  /// fetch has not yet completed.
+  bool get showingSavedMessages => _showingSavedMessages;
+  bool _showingSavedMessages = false;
 
   bool _hasUnsupersededStalePiece = false;
   int? _stalePieceOldestVerifiedAt;
@@ -277,7 +277,10 @@ mixin _MessageSequence {
     store.coverageEnabled
     && !_haveOldest
     && (_olderPaginationFailing
-        || (_revalidation == RevalidationState.failing && _exhaustedLocalOlder));
+        || ((_revalidation == RevalidationState.failing
+                || (_revalidation != RevalidationState.none
+                    && !store.connectivityMonitor.hasConnectivity))
+            && _exhaustedLocalOlder));
 
   /// Whether the bottom edge should show the anchor-fallback offline note.
   bool get showAnchorFallbackOfflineNotice =>
@@ -293,7 +296,10 @@ mixin _MessageSequence {
     && !_haveNewest
     && !_anchorFallback
     && (_newerPaginationFailing
-        || (_revalidation == RevalidationState.failing && _exhaustedLocalNewer));
+        || ((_revalidation == RevalidationState.failing
+                || (_revalidation != RevalidationState.none
+                    && !store.connectivityMonitor.hasConnectivity))
+            && _exhaustedLocalNewer));
 
   bool _localWindowWasLive = false;
   bool _haveNewestInvalidated = false;
@@ -346,6 +352,7 @@ mixin _MessageSequence {
   /// Timer for showing a [CoverageStatus.stale] local window if the initial
   /// network fetch takes longer than 500 ms.
   Timer? _fetchInitialStaleTimer;
+  VoidCallback? _fetchInitialRunLocalNow;
 
   /// Stop the retry loop of [MessageListView.fetchInitial], if running,
   /// from waiting further on its request or backoff.
@@ -362,6 +369,7 @@ mixin _MessageSequence {
     _cancelStaleBannerTimer();
     _fetchInitialStaleTimer?.cancel();
     _fetchInitialStaleTimer = null;
+    _fetchInitialRunLocalNow = null;
     final abort = _fetchInitialAbort;
     _fetchInitialAbort = null;
     abort?.complete();
@@ -646,7 +654,7 @@ mixin _MessageSequence {
     _status = FetchingStatus.unstarted;
     _fetchInitialFailing = false;
     _revalidation = RevalidationState.none;
-    _showingSavedSearchResults = false;
+    _showingSavedMessages = false;
     _hasUnsupersededStalePiece = false;
     _stalePieceOldestVerifiedAt = null;
     _anchorFallback = false;
@@ -920,15 +928,33 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     store.registerMessageList(this);
     _retrySignalSubscription = store.connectivityMonitor.retrySignals
       .listen(_handleConnectivityRetrySignal);
+    store.connectivityMonitor.addListener(_handleConnectivityChanged);
   }
 
   StreamSubscription<void>? _retrySignalSubscription;
+
+  void _handleConnectivityChanged() {
+    if (_disposed) return;
+    if (!store.connectivityMonitor.hasConnectivity) {
+      final runNow = _fetchInitialRunLocalNow;
+      if (runNow != null) {
+        runNow();
+        return;
+      }
+    }
+    if (_revalidation != RevalidationState.none
+        && ((!_haveOldest && _exhaustedLocalOlder && !_olderPaginationFailing)
+            || (!_haveNewest && !_anchorFallback && _exhaustedLocalNewer && !_newerPaginationFailing))) {
+      notifyListeners();
+    }
+  }
 
   @override
   void dispose() {
     assert(!_disposed);
     store.unregisterMessageList(this);
     _retrySignalSubscription?.cancel();
+    store.connectivityMonitor.removeListener(_handleConnectivityChanged);
     // Fetches in progress check this when they resume, so that they
     // don't act on, or notify listeners of, this disposed object.
     _disposed = true;
@@ -961,17 +987,22 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
+  /// Whether the view is showing local saved-message search results for a
+  /// [KeywordSearchNarrow] while the server search has not yet completed.
+  bool get showingSavedSearchResults =>
+    _showingSavedMessages && narrow is KeywordSearchNarrow;
+
   /// Whether the view should show the "Updating…" banner for possibly stale
   /// content whose revalidation has been in flight for at least 3 seconds.
   bool get showStaleRevalidatingBanner =>
-    !_showingSavedSearchResults
+    !showingSavedSearchResults
     && _revalidation == RevalidationState.inFlight
     && _revalidatingBannerVisible
     && contentState != ContentState.current;
 
   /// Whether the view should show the offline banner for possibly stale content.
   bool get showStaleOfflineBanner =>
-    !_showingSavedSearchResults
+    !showingSavedSearchResults
     && (_revalidation == RevalidationState.failing
         || _olderPaginationFailing
         || _newerPaginationFailing)
@@ -1256,42 +1287,47 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     bool initialLocalSuperseded = false;
     Timer? staleTimer;
     if (!skipInitialLocal) {
-      if (narrow is KeywordSearchNarrow && store.coverageEnabled) {
-        void runSavedSearch() {
-          final searchQuery = (narrow as KeywordSearchNarrow).keyword;
-          unawaited(store.searchSavedMessages(
-            query: searchQuery,
+      if (_usesSavedMessagesFallback(narrow) && store.coverageEnabled) {
+        void runSavedMessages() {
+          unawaited(store.savedMessagesForNarrow(
+            narrow,
             limit: kMessageListFetchBatchSize,
-          ).then((savedSearch) {
+          ).then((savedMessages) {
             if (networkDone || initialLocalSuperseded || isStale()
                 || _status != FetchingStatus.fetchInitial
                 || _revalidation != RevalidationState.none) {
               return;
             }
-            if (savedSearch == null) return;
+            if (savedMessages == null) return;
             initialLocalSuperseded = true;
-            _showSavedSearchResults(
-              savedSearch,
+            _showSavedMessages(
+              savedMessages,
               revalidation: RevalidationState.inFlight,
             );
           }).catchError((_) {}));
         }
         if (!store.connectivityMonitor.hasConnectivity) {
-          runSavedSearch();
+          runSavedMessages();
         } else {
+          void triggerSavedMessages() {
+            staleTimer?.cancel();
+            if (identical(_fetchInitialStaleTimer, staleTimer)) {
+              _fetchInitialStaleTimer = null;
+            }
+            if (identical(_fetchInitialRunLocalNow, triggerSavedMessages)) {
+              _fetchInitialRunLocalNow = null;
+            }
+            if (networkDone || initialLocalSuperseded || isStale()
+                || _status != FetchingStatus.fetchInitial
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            runSavedMessages();
+          }
+          _fetchInitialRunLocalNow = triggerSavedMessages;
           staleTimer = _fetchInitialStaleTimer = Timer(
             const Duration(milliseconds: 500),
-            () {
-              if (identical(_fetchInitialStaleTimer, staleTimer)) {
-                _fetchInitialStaleTimer = null;
-              }
-              if (networkDone || initialLocalSuperseded || isStale()
-                  || _status != FetchingStatus.fetchInitial
-                  || _revalidation != RevalidationState.none) {
-                return;
-              }
-              runSavedSearch();
-            },
+            triggerSavedMessages,
           );
         }
       } else if (store.dbActive) {
@@ -1313,16 +1349,20 @@ class MessageListView with ChangeNotifier, _MessageSequence {
             return;
           }
           final remaining = const Duration(milliseconds: 500) - localStopwatch.elapsed;
-          if (remaining <= Duration.zero) {
+          if (remaining <= Duration.zero || !store.connectivityMonitor.hasConnectivity) {
             _showLocalWindow(
               local,
               usedFallback: usedFallback,
               revalidation: RevalidationState.inFlight,
             );
           } else {
-            staleTimer = _fetchInitialStaleTimer = Timer(remaining, () {
+            void triggerDbStaleLocal() {
+              staleTimer?.cancel();
               if (identical(_fetchInitialStaleTimer, staleTimer)) {
                 _fetchInitialStaleTimer = null;
+              }
+              if (identical(_fetchInitialRunLocalNow, triggerDbStaleLocal)) {
+                _fetchInitialRunLocalNow = null;
               }
               if (networkDone || initialLocalSuperseded || isStale()
                   || _status != FetchingStatus.fetchInitial
@@ -1334,35 +1374,44 @@ class MessageListView with ChangeNotifier, _MessageSequence {
                 usedFallback: usedFallback,
                 revalidation: RevalidationState.inFlight,
               );
-            });
+            }
+            _fetchInitialRunLocalNow = triggerDbStaleLocal;
+            staleTimer = _fetchInitialStaleTimer = Timer(remaining, triggerDbStaleLocal);
           }
         }).catchError((_) {}));
       } else {
         final initialLocal = _findLocalWindow(afterFailure: false);
         if (initialLocal != null) {
           final (local, usedFallback) = initialLocal;
-          if (local.chain.status != CoverageStatus.stale) {
+          if (local.chain.status != CoverageStatus.stale
+              || !store.connectivityMonitor.hasConnectivity) {
             _showLocalWindow(
               local,
               usedFallback: usedFallback,
               revalidation: RevalidationState.inFlight,
             );
           } else {
+            void triggerMemStaleLocal() {
+              staleTimer?.cancel();
+              if (identical(_fetchInitialStaleTimer, staleTimer)) {
+                _fetchInitialStaleTimer = null;
+              }
+              if (identical(_fetchInitialRunLocalNow, triggerMemStaleLocal)) {
+                _fetchInitialRunLocalNow = null;
+              }
+              if (isStale() || _revalidation != RevalidationState.none) return;
+              final delayedLocal = _findLocalWindow(afterFailure: false);
+              if (delayedLocal == null) return;
+              _showLocalWindow(
+                delayedLocal.$1,
+                usedFallback: delayedLocal.$2,
+                revalidation: RevalidationState.inFlight,
+              );
+            }
+            _fetchInitialRunLocalNow = triggerMemStaleLocal;
             staleTimer = _fetchInitialStaleTimer = Timer(
               const Duration(milliseconds: 500),
-              () {
-                if (identical(_fetchInitialStaleTimer, staleTimer)) {
-                  _fetchInitialStaleTimer = null;
-                }
-                if (isStale() || _revalidation != RevalidationState.none) return;
-                final delayedLocal = _findLocalWindow(afterFailure: false);
-                if (delayedLocal == null) return;
-                _showLocalWindow(
-                  delayedLocal.$1,
-                  usedFallback: delayedLocal.$2,
-                  revalidation: RevalidationState.inFlight,
-                );
-              },
+              triggerMemStaleLocal,
             );
           }
         }
@@ -1415,16 +1464,17 @@ class MessageListView with ChangeNotifier, _MessageSequence {
               if (identical(_fetchInitialStaleTimer, staleTimer)) {
                 _fetchInitialStaleTimer = null;
               }
+              _fetchInitialRunLocalNow = null;
               initialLocalSuperseded = true;
-              if (narrow is KeywordSearchNarrow && store.coverageEnabled) {
-                final savedSearch = await store.searchSavedMessages(
-                  query: (narrow as KeywordSearchNarrow).keyword,
+              if (_usesSavedMessagesFallback(narrow) && store.coverageEnabled) {
+                final savedMessages = await store.savedMessagesForNarrow(
+                  narrow,
                   limit: kMessageListFetchBatchSize,
                 );
                 if (isStale()) return;
-                if (savedSearch != null) {
-                  _showSavedSearchResults(
-                    savedSearch,
+                if (savedMessages != null) {
+                  _showSavedMessages(
+                    savedMessages,
                     revalidation: RevalidationState.failing,
                   );
                 } else if (!fetchInitialFailing) {
@@ -1478,6 +1528,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       if (identical(_fetchInitialStaleTimer, staleTimer)) {
         _fetchInitialStaleTimer = null;
       }
+      _fetchInitialRunLocalNow = null;
 
       final narrowBefore = narrow;
       _adjustNarrowForTopicPermalink(result.messages.firstOrNull);
@@ -1506,6 +1557,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       if (identical(_fetchInitialStaleTimer, staleTimer)) {
         _fetchInitialStaleTimer = null;
       }
+      _fetchInitialRunLocalNow = null;
       if (ticket != null) {
         store.closeFetchTicket(ticket);
       }
@@ -1532,9 +1584,9 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
     } else {
       final wasAnchorFallback = _anchorFallback;
-      final wasShowingSavedSearch = _showingSavedSearchResults;
+      final wasShowingSavedMessages = _showingSavedMessages;
       _revalidation = RevalidationState.none;
-      _showingSavedSearchResults = false;
+      _showingSavedMessages = false;
       _anchorFallback = false;
       _exhaustedLocalOlder = false;
       _exhaustedLocalNewer = false;
@@ -1543,7 +1595,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       _hasUnsupersededStalePiece = false;
       _stalePieceOldestVerifiedAt = null;
       _syncStaleBannerTimer();
-      if (redirected || wasAnchorFallback || wasShowingSavedSearch) {
+      if (redirected || wasAnchorFallback || wasShowingSavedMessages) {
         _clearContents();
         _populateFromResult(
           messages: result.messages,
@@ -1625,16 +1677,24 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
   }
 
-  void _showSavedSearchResults(
+  static bool _usesSavedMessagesFallback(Narrow narrow) => switch (narrow) {
+    CombinedFeedNarrow()
+    || MentionsNarrow()
+    || StarredMessagesNarrow()
+    || KeywordSearchNarrow() => true,
+    ChannelNarrow() || TopicNarrow() || DmNarrow() => false,
+  };
+
+  void _showSavedMessages(
     SavedMessageSearchResult saved, {
     required RevalidationState revalidation,
   }) {
-    _showingSavedSearchResults = true;
+    _showingSavedMessages = true;
     _anchorFallback = false;
     _localWindowWasLive = false;
-    _hasUnsupersededStalePiece = false;
+    _hasUnsupersededStalePiece = narrow is! KeywordSearchNarrow;
     _stalePieceOldestVerifiedAt = null;
-    _exhaustedLocalOlder = false;
+    _exhaustedLocalOlder = !saved.hasMoreOlder;
     _exhaustedLocalNewer = false;
     _olderPaginationFailing = false;
     _newerPaginationFailing = false;
@@ -1962,8 +2022,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       _localOlderBusy = true;
       final bool didLoad;
       try {
-        if (_showingSavedSearchResults && narrow is KeywordSearchNarrow) {
-          didLoad = await _fetchOlderSavedSearchAsync();
+        if (_showingSavedMessages && _usesSavedMessagesFallback(narrow)) {
+          didLoad = await _fetchOlderSavedMessagesAsync();
         } else if (store.dbActive) {
           didLoad = await _fetchOlderLocallyAsync();
         } else {
@@ -1973,7 +2033,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         _localOlderBusy = false;
       }
       if (!_disposed && !didLoad && !_haveOldest
-          && _revalidation == RevalidationState.failing
+          && (_revalidation == RevalidationState.failing
+              || !store.connectivityMonitor.hasConnectivity)
           && !_exhaustedLocalOlder) {
         _exhaustedLocalOlder = true;
         notifyListeners();
@@ -2108,7 +2169,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         _localNewerBusy = false;
       }
       if (!_disposed && !didLoad && !_haveNewest && !_anchorFallback
-          && _revalidation == RevalidationState.failing
+          && (_revalidation == RevalidationState.failing
+              || !store.connectivityMonitor.hasConnectivity)
           && !_exhaustedLocalNewer) {
         _exhaustedLocalNewer = true;
         notifyListeners();
@@ -2369,20 +2431,20 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     return true;
   }
 
-  Future<bool> _fetchOlderSavedSearchAsync() async {
+  Future<bool> _fetchOlderSavedMessagesAsync() async {
     final currentNarrow = narrow;
-    if (currentNarrow is! KeywordSearchNarrow) return false;
+    if (!_usesSavedMessagesFallback(currentNarrow)) return false;
     final anchorId = oldestFetchedMessageId;
     if (anchorId == null) return false;
     final generation = this.generation;
-    final older = await store.searchSavedMessages(
-      query: currentNarrow.keyword,
+    final older = await store.savedMessagesForNarrow(
+      currentNarrow,
       beforeMessageId: anchorId,
       limit: kMessageListFetchBatchSize,
     );
     if (_disposed || store.disposed || this.generation != generation
         || _revalidation == RevalidationState.none
-        || !_showingSavedSearchResults
+        || !_showingSavedMessages
         || older == null) {
       return false;
     }
