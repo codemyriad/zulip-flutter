@@ -177,6 +177,10 @@ enum BoolGlobalSetting {
   /// errors are encountered.
   forceRenderKatex(GlobalSettingType.experimentalFeatureFlag, false),
 
+  /// An experimental flag to enable the local message database and
+  /// offline message coverage.
+  messageDatabase(GlobalSettingType.experimentalFeatureFlag, false),
+
   // Former settings which might exist in the database,
   // whose names should therefore not be reused:
   //   openFirstUnread            // v0.0.30
