@@ -653,11 +653,15 @@ class PerAccountStore extends PerAccountStoreBase with
   /// to `globalStore.apiConnectionFromAccount(account)`.
   /// When present, it should be a connection that came from that method call,
   /// but it may have already been used for other requests.
+  ///
+  /// If [startPushDevices] is false, the caller is responsible for
+  /// calling [PushDeviceManager.start] on [pushDevices] when appropriate.
   factory PerAccountStore.fromInitialSnapshot({
     required GlobalStore globalStore,
     required int accountId,
     ApiConnection? connection,
     required InitialSnapshot initialSnapshot,
+    bool startPushDevices = true,
   }) {
     final account = globalStore.getAccount(accountId)!;
     assert(account.zulipVersion == initialSnapshot.zulipVersion
@@ -714,7 +718,8 @@ class PerAccountStore extends PerAccountStoreBase with
         allRealmEmoji: initialSnapshot.realmEmoji),
       userSettings: initialSnapshot.userSettings,
       pushDevices: PushDeviceManager(core: core,
-        devices: initialSnapshot.devices ?? {}),
+        devices: initialSnapshot.devices ?? {},
+        start: startPushDevices),
       savedSnippets: SavedSnippetStoreImpl(core: core,
         savedSnippets: initialSnapshot.savedSnippets ?? []),
       typingNotifier: TypingNotifier(realm: realm),

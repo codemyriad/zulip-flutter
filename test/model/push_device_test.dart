@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
@@ -28,27 +29,81 @@ void main() {
   late PushDeviceManager model;
   late FakeApiConnection connection;
 
+  /// Set up [store] and [model].
+  ///
+  /// If [startPushDevices] is false, the store is not managed by
+  /// the global store, so the test may dispose [model] directly.
   Future<void> prepareStore({
     int? zulipFeatureLevel,
     List<PushKey>? pushKeys,
     ClientDevice? device,
+    bool startPushDevices = true,
   }) async {
     addTearDown(testBinding.reset);
     addTearDown(NotificationService.debugReset);
     PushDeviceManager.debugAutoPause = true;
     addTearDown(() => PushDeviceManager.debugAutoPause = false);
-    await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+    final initialSnapshot = eg.initialSnapshot(
       zulipFeatureLevel: zulipFeatureLevel,
       devices: {eg.selfAccount.deviceId!: ?device},
-    ));
+    );
+    await testBinding.globalStore.add(eg.selfAccount, initialSnapshot);
     for (final pushKey in pushKeys ?? <PushKey>[]) {
       await testBinding.globalStore.pushKeys.perAccount(eg.selfAccount.id)
         .insertPushKey(pushKey.toCompanion(false));
     }
-    store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+    store = startPushDevices
+      ? await testBinding.globalStore.perAccount(eg.selfAccount.id)
+      : eg.store(globalStore: testBinding.globalStore, account: eg.selfAccount,
+          initialSnapshot: initialSnapshot, startPushDevices: false);
     model = store.pushDevices;
     connection = store.connection as FakeApiConnection;
   }
+
+  group('start', () {
+    test('no rotate or register until started', () => awaitFakeAsync((async) async {
+      await prepareStore(startPushDevices: false);
+      await store.updateAccount(AccountsCompanion(deviceId: drift.Value(null)));
+      async.flushMicrotasks();
+      check(store.pushKeys.latestPushKey).isNull();
+      check(connection.takeRequests()).isEmpty();
+
+      model.start();
+      connection.prepare(json: RegisterClientDeviceResult(deviceId: 123).toJson());
+      await model.debugUnpauseRegisterToken();
+      check(store.pushKeys.latestPushKey).isNotNull();
+      check(store.account.deviceId).equals(123);
+    }));
+  });
+
+  group('dispose', () {
+    test('no register when disposed during key rotation', () => awaitFakeAsync((async) async {
+      await prepareStore(startPushDevices: false);
+      PushDeviceManager.debugAutoPause = false;
+      await store.updateAccount(AccountsCompanion(deviceId: drift.Value(null)));
+
+      model.start();
+      model.dispose();
+      connection.prepare(json: RegisterClientDeviceResult(deviceId: 123).toJson());
+      async.elapse(Duration.zero);
+      check(connection.takeRequests()).isEmpty();
+      check(store.account.deviceId).isNull();
+    }));
+
+    test('no register when disposed while paused', () => awaitFakeAsync((async) async {
+      await prepareStore(startPushDevices: false);
+      await store.updateAccount(AccountsCompanion(deviceId: drift.Value(null)));
+
+      model.start();
+      async.flushMicrotasks();
+      model.dispose();
+      connection.prepare(json: RegisterClientDeviceResult(deviceId: 123).toJson());
+      unawaited(model.debugUnpauseRegisterToken());
+      async.elapse(Duration.zero);
+      check(connection.takeRequests()).isEmpty();
+      check(store.account.deviceId).isNull();
+    }));
+  });
 
   group('register device', () {
     test('registers', () => awaitFakeAsync((async) async {
@@ -190,6 +245,27 @@ void main() {
         // (A key is generated when the store is created.)
         final key = store.pushKeys.latestPushKey!;
         await checkRegister(async, key: key, token: someToken);
+      }));
+
+      test('no register token when disposed while storing device ID', () => awaitFakeAsync((async) async {
+        await prepareToken(someToken);
+        await prepareStore(startPushDevices: false);
+        await store.updateAccount(AccountsCompanion(deviceId: drift.Value(null)));
+
+        void disposeOnDeviceId() {
+          if (store.account.deviceId == null) return;
+          testBinding.globalStore.removeListener(disposeOnDeviceId);
+          model.dispose();
+        }
+        testBinding.globalStore.addListener(disposeOnDeviceId);
+
+        model.start();
+        connection.prepare(json: RegisterClientDeviceResult(deviceId: 123).toJson());
+        unawaited(model.debugUnpauseRegisterToken());
+        async.elapse(Duration.zero);
+        check(store.account.deviceId).equals(123);
+        check(connection.takeRequests()).single.isA<http.Request>()
+          .url.path.equals('/api/v1/register_client_device');
       }));
 
       test('do nothing when all set', () => awaitFakeAsync((async) async {
