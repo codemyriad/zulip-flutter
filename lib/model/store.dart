@@ -2898,7 +2898,12 @@ class UpdateMachine {
             dontBlock: store.isRecoveringEventStream ? true : null,
             // If the request outlives this, assume the connection is dead
             // even if it still looks open; give up on it and retry.  See #514.
-            timeout: store.eventQueueLongpollTimeout,
+            // When recovering (`dontBlock: true`), the server responds promptly,
+            // so use a shorter timeout to detect dead networks quickly.
+            timeout: store.isRecoveringEventStream
+                && store.eventQueueLongpollTimeout > const Duration(seconds: 10)
+              ? const Duration(seconds: 10)
+              : store.eventQueueLongpollTimeout,
             // On a network-connectivity change, we abort the request;
             // see [_handleConnectivityRetrySignal].  (#2415)
             abortTrigger: abortTrigger.future);

@@ -1204,6 +1204,26 @@ void main() {
         prepareStuckPollResponse);
     });
 
+    test('uses shorter 10s timeout when recovering event stream', () => awaitFakeAsync((async) async {
+      await preparePoll(lastEventId: 1, eventQueueLongpollTimeoutSeconds: 85);
+      store.isRecoveringEventStream = true;
+      check(store.isEventStreamFailing).isFalse();
+
+      prepareStuckPollResponse();
+      updateMachine.debugAdvanceLoop();
+      async.elapse(const Duration(seconds: 9));
+      check(store.isEventStreamFailing).isFalse();
+
+      async.elapse(const Duration(seconds: 1));
+      check(store.isEventStreamFailing).isTrue();
+
+      prepareHeartbeat(2);
+      updateMachine.debugAdvanceLoop();
+      async.flushTimers();
+      check(store.isRecoveringEventStream).isFalse();
+      check(store.isEventStreamFailing).isFalse();
+    }));
+
     test('retries on NetworkException with NetworkExceptionKind.other', () {
       checkRetry(prepareNetworkExceptionOther);
     });
