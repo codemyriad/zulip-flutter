@@ -22,6 +22,7 @@ import 'package:zulip/log.dart';
 import 'package:zulip/model/localizations.dart';
 import 'package:zulip/model/message.dart';
 import 'package:zulip/model/narrow.dart';
+import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/model/typing_status.dart';
 import 'package:zulip/widgets/app.dart';
@@ -315,6 +316,17 @@ void main() {
     });
 
     testWidgets('DmNarrow, empty fetch', (tester) async {
+      final user = eg.user();
+      await prepareComposeBox(tester,
+        selfUser: eg.selfUser,
+        otherUsers: [user],
+        narrow: DmNarrow.withUser(user.userId, selfUserId: eg.selfUser.userId),
+        messages: []);
+      check(controller).isNotNull().contentFocusNode.hasFocus.isTrue();
+    });
+
+    testWidgets('DmNarrow, empty fetch with coverage enabled', (tester) async {
+      await testBinding.globalStore.settings.setBool(BoolGlobalSetting.messageDatabase, true);
       final user = eg.user();
       await prepareComposeBox(tester,
         selfUser: eg.selfUser,

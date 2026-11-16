@@ -10,6 +10,7 @@ import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:material_ui/material_ui.dart';
+import 'package:zulip/api/backoff.dart';
 import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
@@ -19,10 +20,13 @@ import 'package:zulip/api/route/channels.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/basic.dart';
 import 'package:zulip/model/actions.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/localizations.dart';
 import 'package:zulip/model/message.dart';
+import 'package:zulip/model/message_coverage.dart';
 import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/narrow.dart';
+import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/model/typing_status.dart';
 import 'package:zulip/widgets/app_bar.dart';
@@ -835,6 +839,292 @@ void main() {
     });
   });
 
+  group('while fetchInitial retries', () {
+    // Tests of the model side are in test/model/message_list_test.dart.
+
+    final channel = eg.stream(streamId: eg.defaultStreamMessageStreamId);
+
+    final findCantConnect = find.text('Can’t connect. Retrying…');
+
+    /// Open a message list whose initial fetch fails, and will be retried
+    /// after a backoff of 10 seconds;
+    /// see [prepareFreshFetch] and [retryFetch].
+    Future<void> setupRetrying(WidgetTester tester, {
+      Narrow narrow = const CombinedFeedNarrow(),
+    }) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      await store.addUsers([eg.selfUser, eg.otherUser]);
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: narrow)));
+      await tester.pump(); // global store, per-account store
+      await tester.pump(Duration.zero); // fetch fails
+      check(connection.takeRequests()).single;
+    }
+
+    void prepareFreshFetch(List<Message> messages) {
+      connection.prepare(json: eg.newestGetMessagesResult(
+        foundOldest: true, messages: messages).toJson());
+    }
+
+    Future<void> retryFetch(WidgetTester tester) async {
+      await tester.pump(BackoffMachine.debugDuration);
+    }
+
+    testWidgets('no overflow when there is little room', (tester) async {
+      // Landscape on a small phone, with the keyboard open.
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(640, 360);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 150);
+      addTearDown(tester.view.reset);
+      await setupRetrying(tester,
+        narrow: eg.topicNarrow(channel.streamId, 'topic'));
+      check(findCantConnect).findsOne();
+    });
+
+    testWidgets('"can\'t connect" without spinner once failed, until fetch succeeds', (tester) async {
+      await setupRetrying(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await retryFetch(tester);
+      check(connection.takeRequests()).single;
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);
+      await retryFetch(tester);
+      check(connection.takeRequests()).single;
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('"can\'t connect" without spinner once a fetch fails', (tester) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      connection.prepare(httpException: const SocketException('failed'),
+        delay: const Duration(seconds: 1));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: const CombinedFeedNarrow())));
+      await tester.pump(); // global store, per-account store
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsNothing();
+
+      await tester.pump(const Duration(seconds: 1)); // the fetch fails
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>fresh message</p>')]);
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('airplane mode hides spinner while initial fetch is in flight', (tester) async {
+      addTearDown(testBinding.reset);
+      testBinding.connectivityResult = const [ConnectivityResult.none];
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        json: eg.newestGetMessagesResult(foundOldest: true, messages: [
+          eg.streamMessage(stream: channel, content: '<p>fresh message</p>'),
+        ]).toJson(),
+      );
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: const CombinedFeedNarrow())));
+      await tester.pump(); // global store, per-account store
+      // Baseline checkConnectivity() lands on next frame with [none].
+      await tester.pump();
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      // Returning online aborts the pre-connectivity attempt and prompts a retry;
+      // prepare the new attempt's response and verify the spinner shows until it lands.
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        json: eg.newestGetMessagesResult(foundOldest: true, messages: [
+          eg.streamMessage(stream: channel, content: '<p>fresh message</p>'),
+        ]).toJson(),
+      );
+      testBinding.notifyConnectivityChanged([ConnectivityResult.wifi]);
+      await tester.pump(const Duration(milliseconds: 500));
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsNothing();
+
+      await tester.pump(const Duration(milliseconds: 500));
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('fresh message')).findsOne();
+    });
+
+    testWidgets('keyword search: "can\'t connect" until fetch succeeds', (tester) async {
+      await setupRetrying(tester, narrow: KeywordSearchNarrow('hello'));
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsOne();
+
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, content: '<p>hello world</p>')]);
+      await retryFetch(tester);
+      check(findLoadingIndicator).findsNothing();
+      check(findCantConnect).findsNothing();
+      check(find.text('hello world')).findsOne();
+    });
+
+    testWidgets('keyword search: "can\'t connect" cleared on new search', (tester) async {
+      await setupRetrying(tester, narrow: KeywordSearchNarrow('hello'));
+      check(findCantConnect).findsOne();
+
+      connection.prepare(json: eg.newestGetMessagesResult(foundOldest: true,
+        messages: [eg.streamMessage(stream: channel, content: '<p>goodbye world</p>')],
+      ).toJson(), delay: const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), 'goodbye');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+      check(findLoadingIndicator).findsOne();
+      check(findCantConnect).findsNothing();
+
+      await tester.pump(const Duration(seconds: 1));
+      check(findLoadingIndicator).findsNothing();
+      check(find.text('goodbye world')).findsOne();
+    });
+
+    testWidgets('keyword search: shows saved results banner offline when DB active, then replaces on recovery', (tester) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.settings.setBool(BoolGlobalSetting.messageDatabase, true);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      store.debugSetCoverageEnabled(true);
+      await store.initMessageDbFromRegister(lastEventId: 0);
+      addTearDown(() => testBinding.globalStore.backend.closeMessageDb());
+      connection = store.connection as FakeApiConnection;
+      await store.addUsers([eg.selfUser, eg.otherUser]);
+      await store.handleEvent(eg.messageEvent(
+        eg.streamMessage(stream: channel, topic: 'News', content: '<p>local hello match</p>'),
+      ));
+      await testBinding.globalStore.backend
+        .messageDbWriterForAccount(eg.selfAccount.id)
+        .drainForTesting();
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: KeywordSearchNarrow('hello'))));
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      check(findCantConnect).findsNothing();
+      check(find.text('Results from messages saved on this device')).findsOne();
+      check(find.text('local hello match')).findsOne();
+
+      // Recovery replaces saved matches and hides the banner.
+      prepareFreshFetch([
+        eg.streamMessage(stream: channel, topic: 'Live', content: '<p>server hello result</p>'),
+      ]);
+      await retryFetch(tester);
+      await tester.pump();
+      check(find.text('Results from messages saved on this device')).findsNothing();
+      check(find.text('local hello match')).findsNothing();
+      check(find.text('server hello result')).findsOne();
+    });
+
+    testWidgets('keyword search: zero saved matches offline shows saved banner and empty placeholder', (tester) async {
+      addTearDown(testBinding.reset);
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      await testBinding.globalStore.settings.setBool(BoolGlobalSetting.messageDatabase, true);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [channel], subscriptions: [eg.subscription(channel)]));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      store.debugSetCoverageEnabled(true);
+      await store.initMessageDbFromRegister(lastEventId: 0);
+      addTearDown(() => testBinding.globalStore.backend.closeMessageDb());
+      connection = store.connection as FakeApiConnection;
+
+      connection.prepare(httpException: const SocketException('failed'));
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: KeywordSearchNarrow('unmatched'))));
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      check(findCantConnect).findsNothing();
+      check(find.text('Results from messages saved on this device')).findsOne();
+      check(find.text('No search results.')).findsOne();
+
+      prepareFreshFetch([]);
+      await retryFetch(tester);
+      await tester.pump();
+      check(find.text('Results from messages saved on this device')).findsNothing();
+    });
+
+    testWidgets('event queue expired during backoff: old view disposed, no request on old store', (tester) async {
+      // Compare the test 'dispose MessageListView when event queue expired'.
+      final message = eg.streamMessage(stream: channel);
+      await setupRetrying(tester);
+      final oldViewModel = store.debugMessageListViews.single;
+
+      // The [MessageList] rebuilds with the new store in the same frame
+      // the store is replaced in, because the loading indicator keeps
+      // frames coming; so prepare the new store's response right away.
+      FakeApiConnection? newConnection;
+      void prepareNewStore() {
+        final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id);
+        if (newStore == null || newStore == store || newConnection != null) return;
+        newConnection = newStore.connection as FakeApiConnection;
+        newConnection!.prepare(json: eg.newestGetMessagesResult(
+          foundOldest: true, messages: [message]).toJson());
+      }
+      testBinding.globalStore.addListener(prepareNewStore);
+      addTearDown(() => testBinding.globalStore.removeListener(prepareNewStore));
+
+      final updateMachine = store.updateMachine!;
+      updateMachine.debugPauseLoop();
+      updateMachine.poll();
+      updateMachine.debugPrepareLoopError(
+        eg.apiExceptionBadEventQueueId(queueId: store.queueId));
+      updateMachine.debugAdvanceLoop();
+      await tester.pump();
+      await tester.pump(Duration.zero);
+      final newStore = testBinding.globalStore.perAccountSync(eg.selfAccount.id)!;
+      check(newStore).not((it) => it.identicalTo(store));
+      check(connection.isOpen).isFalse();
+      check(store.debugMessageListViews).isEmpty();
+      check(newStore.debugMessageListViews).single
+        ..not((it) => it.equals(oldViewModel))
+        ..has((x) => x.fetched, 'fetched').isTrue();
+      check(newConnection!.takeRequests()).single;
+
+      // The old view never retries,
+      // which would be a request on the old, closed connection.
+      await retryFetch(tester);
+      check(connection.takeRequests()).isEmpty();
+    });
+  });
+
   group('fetch older messages on scroll', () {
     // TODO(#1569): test fetch newer messages on scroll, too;
     //   in particular test it happens even when near top as well as bottom
@@ -1189,6 +1479,120 @@ void main() {
       check(pos).equals(0);
       // … and scrolled far enough to effectively test the max speed.
       check(log.sum).isGreaterThan(2 * maxSpeed);
+    });
+
+    testWidgets('atKnownNewest while revalidating scrolls to end without reset, and renders sent outbox item', (tester) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TypingNotifier.debugEnable = false;
+      addTearDown(TypingNotifier.debugReset);
+      addTearDown(testBinding.reset);
+      final stream = eg.stream(streamId: eg.defaultStreamMessageStreamId);
+      final sub = eg.subscription(stream);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot(
+        streams: [stream],
+        subscriptions: [sub],
+      ));
+      store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      connection = store.connection as FakeApiConnection;
+      await store.addUser(eg.selfUser);
+      store.debugSetCoverageEnabled(true);
+
+      final topic = eg.t('topic');
+      final narrow = TopicNarrow(stream.streamId, topic);
+      final initialMessages = List.generate(30, (i) =>
+        eg.streamMessage(id: i + 1, stream: stream, topic: 'topic', flags: [MessageFlag.read]));
+      final ticket = store.openFetchTicket(channelId: stream.streamId);
+      store.reconcileMessages(
+        List<Message>.from(initialMessages.sublist(0, 29)),
+        ticket: ticket,
+        coverageRequest: FetchCoverageRequest(
+          narrow: narrow,
+          numBefore: 100,
+          numAfter: 100,
+          includeAnchor: true,
+          foundOldest: true,
+          foundNewest: true,
+          historyLimited: false,
+          resolvedAnchor: kNewestMessageId,
+        ),
+      );
+      store.closeFetchTicket(ticket);
+      // Advance eventHighWater to 30 so SubscriptionRemoveEvent closes [0..30].
+      await store.handleEvent(eg.messageEvent(initialMessages.last));
+
+      // Demote coverage to stale while keeping channel subscribed so MessageEvent arrives.
+      await store.handleEvent(SubscriptionRemoveEvent(
+        id: 1, channelIds: [stream.streamId]));
+      await store.handleEvent(SubscriptionAddEvent(
+        id: 2, subscriptions: [sub]));
+
+      connection.prepare(httpException: SocketException('offline'));
+      await tester.pumpWidget(TestZulipApp(
+        accountId: eg.selfAccount.id,
+        child: MessageListPage(initNarrow: narrow),
+      ));
+      await tester.pump(); // global store
+      await tester.pump(); // per-account store
+      await tester.pump(Duration.zero); // HTTP SocketException timer
+      await tester.pump(); // local stale window shown
+
+      final controller = findMessageListScrollController(tester)!;
+      controller.jumpTo(-600);
+      await tester.pump();
+      check(isButtonVisible(tester)).equals(true);
+
+      connection.takeRequests();
+      await tester.tap(find.byType(ScrollToBottomButton));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      check(controller.position).extentAfter.equals(0);
+      check(isButtonVisible(tester)).equals(false);
+      check(connection.takeRequests()).isEmpty();
+
+      // Send a message and deliver its MessageEvent while still at atKnownNewest && !haveNewest.
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        json: SendMessageResult(id: 500).toJson(),
+      );
+      final sendFuture = store.sendMessage(
+        destination: StreamDestination(stream.streamId, topic),
+        content: 'hello sent state');
+      await tester.pump(kLocalEchoDebounceDuration);
+      check(find.descendant(
+        of: find.byType(OutboxMessageWithPossibleSender),
+        matching: find.byType(LinearProgressIndicator),
+      )).findsOne();
+      await tester.pump(const Duration(seconds: 1));
+      await sendFuture;
+
+      // Revalidation Retry waits/fails again cleanly after waking.
+      connection.prepare(httpException: SocketException('still offline'));
+      final localId = store.outboxMessages.keys.single;
+      await store.handleEvent(eg.messageEvent(
+        eg.streamMessage(id: 500, stream: stream, topic: 'topic', flags: [MessageFlag.read]),
+        localMessageId: localId,
+      ));
+      await tester.pump();
+      check(store.outboxMessages).isEmpty();
+      check(find.text('hello sent state')).findsOne();
+      check(find.descendant(
+        of: find.byType(OutboxMessageWithPossibleSender),
+        matching: find.byType(LinearProgressIndicator),
+      )).findsNothing();
+      check(find.textContaining('not sent')).findsNothing();
+
+      // Let revalidation complete before teardown so no timers remain.
+      connection.prepare(json: eg.newestGetMessagesResult(
+        foundOldest: true,
+        messages: [
+          ...initialMessages,
+          eg.streamMessage(id: 500, stream: stream, topic: 'topic', flags: [MessageFlag.read]),
+        ],
+      ).toJson());
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
     });
   });
 
@@ -1807,6 +2211,7 @@ void main() {
       check(find.textContaining('Message to move').evaluate()).length.equals(1);
 
       final newChannel = eg.stream();
+      await store.addStream(newChannel);
       final existingMessage = eg.streamMessage(
         stream: newChannel, topic: 'new topic', content: 'Existing message');
       prepareGetMessageResponse(
@@ -1925,7 +2330,7 @@ void main() {
       testWidgets('show general chat for empty topics without channel name', (tester) async {
         await setupMessageListPage(tester,
           narrow: TopicNarrow.ofMessage(messageEmptyTopic),
-          messages: [messageEmptyTopic]);
+          messages: [messageEmptyTopic], subscriptions: [eg.subscription(stream)]);
         await tester.pump();
         check(findInMessageList('stream name')).isEmpty();
         check(findInMessageList(eg.defaultRealmEmptyTopicDisplayName)).single;

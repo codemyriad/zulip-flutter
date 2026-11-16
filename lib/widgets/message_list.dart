@@ -19,6 +19,7 @@ import '../model/unreads.dart';
 import 'action_sheet.dart';
 import 'actions.dart';
 import 'app_bar.dart';
+import 'banner.dart';
 import 'button.dart';
 import 'color.dart';
 import 'compose_box.dart';
@@ -688,8 +689,11 @@ class MessageListAppBarTitle extends StatelessWidget {
             GestureDetector(
               behavior: HitTestBehavior.translucent,
               onLongPress: () {
+                final store = PerAccountStoreWidget.of(context);
                 final someMessage = MessageListPage.ancestorOf(context)
-                  .model?.messages.lastOrNull;
+                  .model?.messages
+                  .where((m) => store.isLocationReliable(m.id))
+                  .lastOrNull;
                 // If someMessage is null, the topic action sheet won't have a
                 // resolve/unresolve button. That seems OK; in that case we're
                 // either still fetching messages (and the user can reopen the
@@ -896,6 +900,25 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   bool _autofocusDecided = false;
 
+  void _maybeDecideEmptyAutofocus() {
+    if (_autofocusDecided || !model.canDecideEmptyAutofocus) return;
+    if (!ComposeBox.hasComposeBox(model.narrow)) {
+      _autofocusDecided = true;
+      return;
+    }
+    final composeBoxState = MessageListPage.ancestorOf(context).composeBoxState;
+    if (composeBoxState == null || composeBoxState.widget.narrow != model.narrow) {
+      return;
+    }
+    _autofocusDecided = true;
+    if (model.messages.isEmpty) {
+      // If there are no messages to show in the whole history,
+      // opening the keyboard won't be bothersome and could be helpful.
+      // It's definitely helpful if we got here from the new-DM page.
+      composeBoxState.controller.requestFocusIfUnfocused();
+    }
+  }
+
   void _modelChanged() {
     // When you're scrolling quickly, our mark-as-read requests include the
     // messages *between* _messagesRecentlyInViewport and the messages currently
@@ -923,6 +946,8 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     });
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _maybeDecideEmptyAutofocus();
       if (!model.fetched || !scrollController.hasClients) {
         return;
       }
@@ -944,17 +969,7 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
       _fetchMoreIfNeeded(scrollController.position);
     });
 
-    if (!_autofocusDecided && model.fetched
-        && (model.messages.isNotEmpty || (model.haveOldest && model.haveNewest))) {
-      _autofocusDecided = true;
-      if (model.messages.isEmpty) {
-        // If there are no messages to show in the whole history,
-        // opening the keyboard won't be bothersome and could be helpful.
-        // It's definitely helpful if we got here from the new-DM page.
-        MessageListPage.ancestorOf(context)
-          .composeBoxState?.controller.requestFocusIfUnfocused();
-      }
-    }
+    _maybeDecideEmptyAutofocus();
   }
 
   /// Find the range of message IDs on screen, as a (first, last) tuple,
@@ -1119,47 +1134,110 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
     return true;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (!model.fetched) return const Center(child: CircularProgressIndicator());
-
-    if (model.items.isEmpty && model.haveNewest && model.haveOldest) {
-      return _EmptyMessageListPlaceholder(narrow: widget.narrow);
+  Widget? _buildContentStateBanner(BuildContext context) {
+    if (model.showingSavedSearchResults) {
+      final zulipLocalizations = ZulipLocalizations.of(context);
+      return ZulipBanner(
+        intent: ZulipBannerIntent.info,
+        label: zulipLocalizations.searchMessagesBannerLabelShowingSaved,
+        actions: const [],
+      );
     }
 
-    // Pad the left and right insets, for small devices in landscape.
-    return SafeArea(
-      // Don't let this be the place we pad the bottom inset. When there's
-      // no compose box, we want to let the message-list content
-      // and the scroll-to-bottom button avoid it.
-      // TODO(#311) Remove as unnecessary if we do a bottom nav.
-      //   The nav will pad the bottom inset, and an ancestor of this widget
-      //   will have a `MediaQuery.removePadding` with `removeBottom: true`.
-      bottom: false,
+    final bool offline = model.showStaleOfflineBanner;
+    final bool updating = !offline && model.showStaleRevalidatingBanner;
+    if (!offline && !updating) return null;
 
-      // Horizontally, on wide screens, this Center grows the SafeArea
-      // to position its padding over the device insets and centers content.
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: MessageListPage.maxContentWidth),
-          child: NotificationListener<ScrollMetricsNotification>(
-            onNotification: _handleScrollMetricsNotification,
-            child: Stack(
-              children: <Widget>[
-                _buildListView(context),
-                PositionedDirectional(
-                  bottom: 0,
-                  end: 0,
-                  // TODO(#311) SafeArea shouldn't be needed if we have a
-                  //   bottom nav; that will pad the bottom inset. Remove it,
-                  //   and the mention of bottom-inset handling in
-                  //   MessageList's dartdoc.
-                  child: SafeArea(
-                    child: ScrollToBottomButton(
-                      model: model,
-                      scrollController: scrollController,
-                      visible: _scrollToBottomVisible))),
-              ])))));
+    final zulipLocalizations = ZulipLocalizations.of(context);
+    final savedAt = model.contentSavedAt;
+    final String label;
+    if (savedAt == null) {
+      label = offline
+        ? zulipLocalizations.messageListBannerOfflineNoAge
+        : zulipLocalizations.messageListBannerUpdatingNoAge;
+    } else {
+      final elapsed = ZulipBinding.instance.utcNow().difference(savedAt);
+      if (elapsed.inMinutes < 1) {
+        label = offline
+          ? zulipLocalizations.messageListBannerOfflineJustNow
+          : zulipLocalizations.messageListBannerUpdatingJustNow;
+      } else if (elapsed.inHours < 1) {
+        label = offline
+          ? zulipLocalizations.messageListBannerOfflineMinutesAgo(elapsed.inMinutes)
+          : zulipLocalizations.messageListBannerUpdatingMinutesAgo(elapsed.inMinutes);
+      } else if (elapsed.inDays < 1) {
+        label = offline
+          ? zulipLocalizations.messageListBannerOfflineHoursAgo(elapsed.inHours)
+          : zulipLocalizations.messageListBannerUpdatingHoursAgo(elapsed.inHours);
+      } else {
+        label = offline
+          ? zulipLocalizations.messageListBannerOfflineDaysAgo(elapsed.inDays)
+          : zulipLocalizations.messageListBannerUpdatingDaysAgo(elapsed.inDays);
+      }
+    }
+
+    return ZulipBanner(
+      intent: offline ? ZulipBannerIntent.warning : ZulipBannerIntent.info,
+      label: label,
+      actions: const [],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!model.fetched) {
+      return InitialLoadingIndicator(failing: model.fetchInitialFailing);
+    }
+
+    final Widget content;
+    if (model.items.isEmpty
+        && ((model.haveNewest && model.haveOldest)
+            || model.showingSavedSearchResults)) {
+      content = _EmptyMessageListPlaceholder(narrow: widget.narrow);
+    } else {
+      // Pad the left and right insets, for small devices in landscape.
+      content = SafeArea(
+        // Don't let this be the place we pad the bottom inset. When there's
+        // no compose box, we want to let the message-list content
+        // and the scroll-to-bottom button avoid it.
+        // TODO(#311) Remove as unnecessary if we do a bottom nav.
+        //   The nav will pad the bottom inset, and an ancestor of this widget
+        //   will have a `MediaQuery.removePadding` with `removeBottom: true`.
+        bottom: false,
+
+        // Horizontally, on wide screens, this Center grows the SafeArea
+        // to position its padding over the device insets and centers content.
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: MessageListPage.maxContentWidth),
+            child: NotificationListener<ScrollMetricsNotification>(
+              onNotification: _handleScrollMetricsNotification,
+              child: Stack(
+                children: <Widget>[
+                  _buildListView(context),
+                  PositionedDirectional(
+                    bottom: 0,
+                    end: 0,
+                    // TODO(#311) SafeArea shouldn't be needed if we have a
+                    //   bottom nav; that will pad the bottom inset. Remove it,
+                    //   and the mention of bottom-inset handling in
+                    //   MessageList's dartdoc.
+                    child: SafeArea(
+                      child: ScrollToBottomButton(
+                        model: model,
+                        scrollController: scrollController,
+                        visible: _scrollToBottomVisible))),
+                ])))));
+    }
+
+    final banner = _buildContentStateBanner(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ?banner,
+        Expanded(child: content),
+      ],
+    );
   }
 
   Widget _buildListView(BuildContext context) {
@@ -1291,14 +1369,16 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
 
   Widget _buildStartCap() {
     // If we're done fetching older messages, show that.
+    // Else if older pagination hit an offline failure / gap, show that notice.
     // Else if we're busy with fetching, then show a loading indicator.
-    //
-    // This applies even if the fetch is over, but failed, and we're still
-    // in backoff from it; and even if the fetch is/was for the other direction.
-    // The loading indicator really means "busy, working on it"; and that's the
-    // right summary even if the fetch is internally queued behind other work.
-    return model.haveOldest ? const _MessageListHistoryStart()
-      : model.busyFetchingMore ? const _MessageListLoadingMore()
+    if (model.haveOldest) return const _MessageListHistoryStart();
+    if (model.showOfflineOlderNotice) {
+      return _MessageListEdgeNotice(
+        text: ZulipLocalizations.of(context).messageListCantLoadOlderOffline,
+      );
+    }
+    return model.busyFetchingMore
+      ? const _MessageListLoadingMore()
       : const SizedBox.shrink();
   }
 
@@ -1312,6 +1392,14 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
         //   https://chat.zulip.org/#narrow/channel/48-mobile/topic/space.20at.20end.20of.20thread/near/2203391
         const SizedBox(height: 12),
       ]);
+    } else if (model.showAnchorFallbackOfflineNotice) {
+      return _MessageListEdgeNotice(
+        text: ZulipLocalizations.of(context).messageListAnchorFallbackOffline,
+      );
+    } else if (model.showOfflineNewerNotice) {
+      return _MessageListEdgeNotice(
+        text: ZulipLocalizations.of(context).messageListCantLoadNewerOffline,
+      );
     } else if (model.busyFetchingMore) {
       // See [_buildStartCap] for why this condition shows a loading indicator.
       return const _MessageListLoadingMore();
@@ -1347,6 +1435,50 @@ class _MessageListState extends State<MessageList> with PerAccountStoreAwareStat
           isLastInFeed: isLastInFeed,
           item: data);
     }
+  }
+}
+
+/// What a page shows before it has any data to show,
+/// while its initial fetch from the server is in progress:
+/// a loading indicator while online and not failing,
+/// or a notice when the fetch is failing or the device lacks connectivity.
+///
+/// The message list shows this, and so does the topic list.
+class InitialLoadingIndicator extends StatelessWidget {
+  const InitialLoadingIndicator({super.key, required this.failing});
+
+  /// Whether the fetch is failing and being retried,
+  /// as for [MessageListView.fetchInitialFailing].
+  final bool failing;
+
+  @override
+  Widget build(BuildContext context) {
+    final connectivityMonitor = GlobalStoreWidget.of(context).connectivityMonitor;
+    return ListenableBuilder(
+      listenable: connectivityMonitor,
+      builder: (context, _) {
+        if (!failing && connectivityMonitor.hasConnectivity) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final zulipLocalizations = ZulipLocalizations.of(context);
+        final designVariables = DesignVariables.of(context);
+        return SafeArea(
+          bottom: false,
+          minimum: const EdgeInsets.symmetric(horizontal: 24),
+          child: Center(
+            // Scrollable so that it doesn't overflow when there's little room,
+            // e.g. in landscape with the keyboard open.
+            child: SingleChildScrollView(child: Text(
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: designVariables.labelSearchPrompt,
+                fontSize: 17,
+                height: 23 / 17,
+              ).merge(weightVariableTextStyle(context, wght: 500)),
+              zulipLocalizations.messageListCantConnectRetrying))));
+      },
+    );
   }
 }
 
@@ -1452,6 +1584,27 @@ class _MessageListHistoryStart extends StatelessWidget {
   }
 }
 
+class _MessageListEdgeNotice extends StatelessWidget {
+  const _MessageListEdgeNotice({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final designVariables = DesignVariables.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 16.0),
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: designVariables.labelSearchPrompt),
+        ),
+      ),
+    );
+  }
+}
+
 class _MessageListLoadingMore extends StatelessWidget {
   const _MessageListLoadingMore();
 
@@ -1477,7 +1630,7 @@ class ScrollToBottomButton extends StatelessWidget {
   final ValueNotifier<bool> visible;
 
   void _scrollToBottom() {
-    if (model.haveNewest) {
+    if (model.haveNewest || model.atKnownNewest) {
       // Scrolling smoothly from here to the bottom won't require any requests
       // to the server.
       // It also probably isn't *that* far away: the user must have scrolled
@@ -1972,10 +2125,16 @@ class StreamMessageRecipientHeader extends StatelessWidget {
         : () => Navigator.push(context,
             MessageListPage.buildRoute(context: context,
               narrow: TopicNarrow.ofMessage(message))),
-      onLongPress: () => showTopicActionSheet(context,
-        channelId: streamId,
-        topic: topic,
-        someMessageIdInTopic: message.id),
+      onLongPress: () {
+        final messageId = message.id;
+        showTopicActionSheet(context,
+          channelId: streamId,
+          topic: topic,
+          someMessageIdInTopic: messageId != null
+              && PerAccountStoreWidget.of(context).isLocationReliable(messageId)
+            ? messageId
+            : null);
+      },
       child: ColoredBox(
         color: backgroundColor,
         child: Row(

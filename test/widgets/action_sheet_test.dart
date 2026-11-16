@@ -19,6 +19,7 @@ import 'package:zulip/model/emoji.dart';
 import 'package:zulip/model/internal_link.dart';
 import 'package:zulip/model/localizations.dart';
 import 'package:zulip/model/narrow.dart';
+import 'package:zulip/model/settings.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/model/typing_status.dart';
 import 'package:zulip/widgets/action_sheet.dart';
@@ -1035,6 +1036,118 @@ void main() {
         await prepare();
         await showFromRecipientHeader(tester);
         checkButtons();
+      });
+
+      testWidgets('show from app bar: resolve/unresolve not offered when message is maybe-stale', (tester) async {
+        await prepare();
+        final readMsg = eg.streamMessage(
+          id: someMessage.id,
+          stream: someChannel,
+          topic: someTopic,
+          sender: eg.otherUser,
+          flags: [MessageFlag.read],
+        );
+        transitionDurationObserver = TransitionDurationObserver();
+        connection.prepare(json: eg.newestGetMessagesResult(
+          foundOldest: true, messages: [readMsg]).toJson());
+        await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+          navigatorObservers: [transitionDurationObserver],
+          child: MessageListPage(
+            initNarrow: TopicNarrow(someChannel.streamId, TopicName(someTopic)))));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(Duration.zero);
+
+        await store.handleEvent(SubscriptionRemoveEvent(
+          id: 1, channelIds: [someChannel.streamId]));
+        await tester.pump();
+        check(store.isLocationReliable(readMsg.id)).isFalse();
+
+        final topicRow = find.descendant(
+          of: find.byType(ZulipAppBar),
+          matching: find.textContaining(someTopic, findRichText: true));
+        await tester.longPress(topicRow);
+        await transitionDurationObserver.pumpPastTransition(tester);
+
+        check(findButtonForLabel('Mark as resolved')).findsNothing();
+        check(findButtonForLabel('Mark as unresolved')).findsNothing();
+        check(findButtonForLabel('Copy link to topic')).findsOne();
+      });
+
+      testWidgets('show from recipient header: resolve/unresolve not offered when message is maybe-stale', (tester) async {
+        await prepare();
+        final readMsg = eg.streamMessage(
+          id: someMessage.id,
+          stream: someChannel,
+          topic: someTopic,
+          sender: eg.otherUser,
+          flags: [MessageFlag.read],
+        );
+        transitionDurationObserver = TransitionDurationObserver();
+        connection.prepare(json: eg.newestGetMessagesResult(
+          foundOldest: true, messages: [readMsg]).toJson());
+        await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+          navigatorObservers: [transitionDurationObserver],
+          child: MessageListPage(
+            initNarrow: ChannelNarrow(someChannel.streamId))));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(Duration.zero);
+
+        await store.handleEvent(SubscriptionRemoveEvent(
+          id: 1, channelIds: [someChannel.streamId]));
+        await tester.pump();
+        check(store.isLocationReliable(readMsg.id)).isFalse();
+
+        await tester.longPress(find.descendant(
+          of: find.byType(RecipientHeader),
+          matching: find.textContaining(someTopic, findRichText: true)));
+        await transitionDurationObserver.pumpPastTransition(tester);
+
+        check(findButtonForLabel('Mark as resolved')).findsNothing();
+        check(findButtonForLabel('Mark as unresolved')).findsNothing();
+        check(findButtonForLabel('Copy link to topic')).findsOne();
+      });
+
+      testWidgets('show from inbox: resolve/unresolve not offered when store is unconfirmed', (tester) async {
+        addTearDown(testBinding.reset);
+        UpdateMachine.debugEnableFetchEmojiData = false;
+        addTearDown(() => UpdateMachine.debugEnableFetchEmojiData = true);
+        final snap = eg.initialSnapshot(
+          queueId: 'q-unconf',
+          lastEventId: 10,
+          realmUsers: [eg.selfUser, eg.otherUser],
+          streams: [someChannel],
+          subscriptions: [eg.subscription(someChannel)],
+          unreadMsgs: eg.unreadMsgs(count: 1, channels: [
+            eg.unreadChannelMsgs(
+              streamId: someChannel.streamId,
+              topic: someTopic,
+              unreadMessageIds: [someMessage.id],
+            ),
+          ]),
+        );
+        final backend = testBinding.globalStore.backend;
+        final seedGlobal = TestGlobalStore(backend: backend, accounts: []);
+        await seedGlobal.settings.setBool(BoolGlobalSetting.messageDatabase, true);
+        await seedGlobal.add(eg.selfAccount, snap);
+        final seedStore = await seedGlobal.perAccount(eg.selfAccount.id);
+        await seedStore.initMessageDbFromRegister(lastEventId: 10);
+        await backend.messageDbWriterForAccount(eg.selfAccount.id).drainForTesting();
+        seedGlobal.dispose();
+        await tester.pump();
+
+        await testBinding.globalStore.settings.setBool(
+          BoolGlobalSetting.messageDatabase, true);
+        await testBinding.globalStore.add(eg.selfAccount, snap);
+        store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+        await store.initMessageDbFromPersisted(ackEventId: 10);
+        check(store.confirmed).isFalse();
+
+        await showFromInbox(tester);
+        check(findButtonForLabel('Mark as resolved')).findsNothing();
+        check(findButtonForLabel('Mark as unresolved')).findsNothing();
+        check(findButtonForLabel('Copy link to topic')).findsOne();
       });
     });
 

@@ -8,6 +8,7 @@ import '../model/topics.dart';
 import '../model/unreads.dart';
 import 'action_sheet.dart';
 import 'app_bar.dart';
+import 'banner.dart';
 import 'icons.dart';
 import 'inbox.dart';
 import 'message_list.dart';
@@ -125,77 +126,103 @@ class _TopicList extends StatefulWidget {
 }
 
 class _TopicListState extends State<_TopicList> with PerAccountStoreAwareStateMixin {
-  Topics? topicsModel;
+  TopicListView? model;
   Unreads? unreadsModel;
 
   @override
   void onNewStore() {
     final newStore = PerAccountStoreWidget.of(context);
-    topicsModel?.removeListener(_modelChanged);
-    topicsModel = newStore.topics..addListener(_modelChanged);
+    final previousTopics = model?.topics;
+    final previousShowingSavedTopics = model?.showingSavedTopics ?? true;
+    model?.dispose();
+    model = TopicListView.init(store: newStore, channelId: widget.channelId)
+      ..addListener(_modelChanged);
     unreadsModel?.removeListener(_modelChanged);
     unreadsModel = newStore.unreads..addListener(_modelChanged);
-    _fetchTopics();
+    _fetchTopics(
+      previousTopics: previousTopics,
+      previousShowingSavedTopics: previousShowingSavedTopics,
+    );
   }
 
   @override
   void dispose() {
-    topicsModel?.removeListener(_modelChanged);
+    model?.dispose();
     unreadsModel?.removeListener(_modelChanged);
     super.dispose();
   }
 
   void _modelChanged() {
     setState(() {
-      // The actual state lives in `topicsModel` and `unreadsModel`.
+      // The actual state lives in `model` and `unreadsModel`.
     });
   }
 
-  void _fetchTopics() async {
-    // If the fetch succeeds, `topicsModel` will notify listeners.
-    // Do nothing when the fetch fails; the topic-list will stay on
-    // the loading screen, until the user navigates away and back.
+  void _fetchTopics({
+    List<GetChannelTopicsEntry>? previousTopics,
+    bool previousShowingSavedTopics = true,
+  }) async {
+    // If the fetch succeeds, `model` will notify listeners.
+    // On errors that may be temporary, it retries until it succeeds,
+    // meanwhile saying it's failing; see [TopicListView.fetchFailing].
+    // On other errors, the topic list stays on the loading screen,
+    // until the user navigates away and back.
     // TODO(design) show a nice error message on screen when this fails
-    await topicsModel!.getChannelTopics(widget.channelId);
+    await model!.fetch(
+      previousTopics: previousTopics,
+      previousShowingSavedTopics: previousShowingSavedTopics,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final channelTopics = topicsModel!.channelTopics(widget.channelId);
+    final model = this.model!;
+    final channelTopics = model.topics;
     if (channelTopics == null) {
-      return const Center(child: CircularProgressIndicator());
+      return InitialLoadingIndicator(failing: model.fetchFailing);
     }
 
+    final Widget body;
     if (channelTopics.isEmpty) {
       final zulipLocalizations = ZulipLocalizations.of(context);
-      return PageBodyEmptyContentPlaceholder(
+      body = PageBodyEmptyContentPlaceholder(
         header: zulipLocalizations.topicListEmptyPlaceholderHeader);
+    } else {
+      // This is adapted from parts of the build method on [_InboxPageState].
+      final topicItems = <_TopicItemData>[];
+      for (final GetChannelTopicsEntry(:maxId, name: topic) in channelTopics) {
+        final unreadMessageIds =
+          unreadsModel!.streams[widget.channelId]?[topic] ?? <int>[];
+        final countInTopic = unreadMessageIds.length;
+        final hasMention = unreadMessageIds.any((messageId) =>
+          unreadsModel!.mentions.contains(messageId));
+        topicItems.add(_TopicItemData(
+          topic: topic,
+          unreadCount: countInTopic,
+          hasMention: hasMention,
+          maxId: maxId,
+        ));
+      }
+
+      body = SafeArea(
+        // Don't pad the bottom here; we want the list content to do that.
+        bottom: false,
+        child: ListView.builder(
+          itemCount: topicItems.length,
+          itemBuilder: (context, index) =>
+            _TopicItem(channelId: widget.channelId, data: topicItems[index])),
+      );
     }
 
-    // This is adapted from parts of the build method on [_InboxPageState].
-    final topicItems = <_TopicItemData>[];
-    for (final GetChannelTopicsEntry(:maxId, name: topic) in channelTopics) {
-      final unreadMessageIds =
-        unreadsModel!.streams[widget.channelId]?[topic] ?? <int>[];
-      final countInTopic = unreadMessageIds.length;
-      final hasMention = unreadMessageIds.any((messageId) =>
-        unreadsModel!.mentions.contains(messageId));
-      topicItems.add(_TopicItemData(
-        topic: topic,
-        unreadCount: countInTopic,
-        hasMention: hasMention,
-        maxId: maxId,
-      ));
-    }
-
-    return SafeArea(
-      // Don't pad the bottom here; we want the list content to do that.
-      bottom: false,
-      child: ListView.builder(
-        itemCount: topicItems.length,
-        itemBuilder: (context, index) =>
-          _TopicItem(channelId: widget.channelId, data: topicItems[index])),
-    );
+    return Column(children: [
+      if (model.showingSavedTopics)
+        ZulipBanner(
+          intent: .info,
+          label: ZulipLocalizations.of(context)
+            .topicListBannerLabelShowingSavedTopics,
+          actions: const []),
+      Expanded(child: body),
+    ]);
   }
 }
 
@@ -234,7 +261,9 @@ class _TopicItem extends StatelessWidget {
     // if not, we just won't have `someMessageIdInTopic` for the action sheet.
     final maxIdMessage = store.messages[maxId];
     final someMessageIdInTopic =
-      (maxIdMessage != null && TopicNarrow(channelId, topic).containsMessage(maxIdMessage))
+      (maxIdMessage != null
+          && store.isLocationReliable(maxIdMessage.id)
+          && TopicNarrow(channelId, topic).containsMessage(maxIdMessage))
         ? maxIdMessage.id
         : null;
 
