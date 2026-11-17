@@ -317,8 +317,22 @@ class MessageDatabase extends _$MessageDatabase {
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
+      await _createStoredChannelTopicsTable();
     },
   );
+
+  Future<void> _createStoredChannelTopicsTable() async {
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS stored_channel_topics ('
+      'account_id INTEGER NOT NULL REFERENCES message_db_accounts(account_id) ON DELETE CASCADE, '
+      'channel_id INTEGER NOT NULL, '
+      'topic_key TEXT NOT NULL, '
+      'topic TEXT NOT NULL, '
+      'max_id INTEGER NOT NULL, '
+      'PRIMARY KEY (account_id, channel_id, topic_key)'
+      ')',
+    );
+  }
 
   Future<void> _createFtsObjects() async {
     await customStatement(
@@ -337,6 +351,7 @@ class MessageDatabase extends _$MessageDatabase {
       'DELETE FROM stored_message_fts WHERE rowid = old.rowid; '
       'END',
     );
+    await _createStoredChannelTopicsTable();
   }
 
   Future<void> _backfillFtsFromExistingRows() async {
@@ -404,6 +419,7 @@ class MessageDatabase extends _$MessageDatabase {
     try {
       await customStatement('DROP TRIGGER IF EXISTS trg_stored_message_bodies_delete_fts');
       await customStatement('DROP TABLE IF EXISTS stored_message_fts');
+      await customStatement('DROP TABLE IF EXISTS stored_channel_topics');
       for (final table in allTables.toList().reversed) {
         await m.deleteTable(table.actualTableName);
       }
@@ -489,6 +505,15 @@ class MessageDatabase extends _$MessageDatabase {
     for (final row in storedChannelRows) {
       final cid = row.readNullable<int>('channel_id');
       if (cid != null) channelsWithData.add(cid);
+    }
+
+    final storedTopicChannelRows = await customSelect(
+      'SELECT DISTINCT channel_id FROM stored_channel_topics '
+      'WHERE account_id = ?',
+      variables: [Variable.withInt(accountId)],
+    ).get();
+    for (final row in storedTopicChannelRows) {
+      channelsWithData.add(row.read<int>('channel_id'));
     }
 
     return (
@@ -638,6 +663,10 @@ class MessageDatabase extends _$MessageDatabase {
       'DELETE FROM stored_messages WHERE account_id = ? AND channel_id = ?',
       variables: [Variable.withInt(accountId), Variable.withInt(channelId)],
       updates: {storedMessages},
+    );
+    await customUpdate(
+      'DELETE FROM stored_channel_topics WHERE account_id = ? AND channel_id = ?',
+      variables: [Variable.withInt(accountId), Variable.withInt(channelId)],
     );
     await customUpdate(
       'DELETE FROM message_db_channels WHERE account_id = ? AND channel_id = ?',
@@ -1042,8 +1071,34 @@ class MessageDatabase extends _$MessageDatabase {
     ));
   }
 
+  /// Replace persisted fetched topic list entries for [channelId].
+  Future<void> replaceStoredChannelTopicsInTxn(
+    int accountId,
+    int channelId,
+    List<({String topicKey, String topic, int maxId})> topics,
+  ) async {
+    await customUpdate(
+      'DELETE FROM stored_channel_topics WHERE account_id = ? AND channel_id = ?',
+      variables: [Variable.withInt(accountId), Variable.withInt(channelId)],
+    );
+    for (final entry in topics) {
+      await customInsert(
+        'INSERT OR REPLACE INTO stored_channel_topics '
+        '(account_id, channel_id, topic_key, topic, max_id) '
+        'VALUES (?, ?, ?, ?, ?)',
+        variables: [
+          Variable.withInt(accountId),
+          Variable.withInt(channelId),
+          Variable.withString(entry.topicKey),
+          Variable.withString(entry.topic),
+          Variable.withInt(entry.maxId),
+        ],
+      );
+    }
+  }
+
   /// Return stored topics for [channelId] grouped by [StoredMessages.topicKey],
-  /// with display [topic] taken from the row with `MAX(id)`.
+  /// merged with persisted channel topic-list entries, sorted by `maxId` desc.
   Future<List<({String topic, String topicKey, int maxId})>>
       queryStoredChannelTopics(
     int accountId,
@@ -1067,14 +1122,45 @@ class MessageDatabase extends _$MessageDatabase {
       ],
       readsFrom: {storedMessages},
     ).get();
-    return [
-      for (final row in rows)
-        (
-          topic: row.read<String?>('topic') ?? row.read<String>('topic_key'),
-          topicKey: row.read<String>('topic_key'),
-          maxId: row.read<int>('max_id'),
-        ),
-    ];
+
+    final excludeTopicMaxClause = excludeIds.isEmpty
+      ? ''
+      : ' AND max_id NOT IN (SELECT value FROM json_each(?))';
+    final topicListRows = await customSelect(
+      'SELECT topic, topic_key, max_id '
+      'FROM stored_channel_topics '
+      'WHERE account_id = ? AND channel_id = ?'
+      '$excludeTopicMaxClause',
+      variables: [
+        Variable.withInt(accountId),
+        Variable.withInt(channelId),
+        if (excludeIds.isNotEmpty) Variable.withString(jsonEncode(excludeIds.toList())),
+      ],
+    ).get();
+
+    final byTopicKey = <String, ({String topic, String topicKey, int maxId})>{};
+    for (final row in rows) {
+      final topicKey = row.read<String>('topic_key');
+      byTopicKey[topicKey] = (
+        topic: row.read<String?>('topic') ?? topicKey,
+        topicKey: topicKey,
+        maxId: row.read<int>('max_id'),
+      );
+    }
+    for (final row in topicListRows) {
+      final topicKey = row.read<String>('topic_key');
+      final maxId = row.read<int>('max_id');
+      final existing = byTopicKey[topicKey];
+      if (existing == null || maxId > existing.maxId) {
+        byTopicKey[topicKey] = (
+          topic: row.read<String>('topic'),
+          topicKey: topicKey,
+          maxId: maxId,
+        );
+      }
+    }
+    return byTopicKey.values.toList()
+      ..sort((a, b) => b.maxId.compareTo(a.maxId));
   }
 
   /// Load a local window of stored rows for a narrow scope within [chain] around
@@ -1568,6 +1654,18 @@ class MessageDatabase extends _$MessageDatabase {
           Variable.withString(jsonEncode(deletedIds.sublist(start, end))),
         ],
         updates: {storedMessages},
+      );
+    }
+
+    for (final entry in maxDeletedByChannelId.entries) {
+      await customUpdate(
+        'DELETE FROM stored_channel_topics '
+        'WHERE account_id = ? AND channel_id = ? AND max_id <= ?',
+        variables: [
+          Variable.withInt(accountId),
+          Variable.withInt(entry.key),
+          Variable.withInt(entry.value),
+        ],
       );
     }
 

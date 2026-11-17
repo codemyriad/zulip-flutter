@@ -26,7 +26,12 @@ const kShowSavedTopicsDelay = Duration(seconds: 1);
 /// server and then use [channelTopics] to get those topics, affected
 /// by the relevant events.
 class Topics extends PerAccountStoreBase with ChangeNotifier {
-  Topics({required super.core});
+  Topics({
+    required super.core,
+    this.onTopicsFetched,
+  });
+
+  final void Function(int channelId, List<GetChannelTopicsEntry> topics)? onTopicsFetched;
 
   /// Maps indexed by channel IDs, of the known latest message IDs in each topic.
   ///
@@ -85,8 +90,10 @@ class Topics extends PerAccountStoreBase with ChangeNotifier {
       allowEmptyTopicName: true);
     (_latestMessageIdsByChannelTopic[channelId] = makeTopicKeyedMap())
       .addEntries(result.topics.map((entry) => MapEntry(entry.name, entry.maxId)));
+    final fetched = channelTopics(channelId)!;
+    onTopicsFetched?.call(channelId, fetched);
     notifyListeners();
-    return channelTopics(channelId)!;
+    return fetched;
   }
 
   /// The topics the user can access, along with their latest message ID,
@@ -323,8 +330,10 @@ class TopicListView extends ChangeNotifier {
       if (previousTopics != null
           && (previousTopics.isNotEmpty || previousShowingSavedTopics)) {
         _savedTopics = previousTopics;
-        _showSavedTopicsBanner = previousShowingSavedTopics;
-        if (!previousShowingSavedTopics) {
+        if (previousShowingSavedTopics || !store.connectivityMonitor.hasConnectivity) {
+          _showSavedTopicsBanner = true;
+        } else {
+          _showSavedTopicsBanner = false;
           _showSavedTopicsTimer = Timer(kShowSavedTopicsDelay, () {
             _showSavedTopicsTimer = null;
             if (_disposed || store.disposed || !_fetching || _liveTopics != null) return;
@@ -334,11 +343,15 @@ class TopicListView extends ChangeNotifier {
         }
         notifyListeners();
       } else {
-        _showSavedTopicsTimer = Timer(kShowSavedTopicsDelay, () {
-          _showSavedTopicsTimer = null;
+        if (!store.connectivityMonitor.hasConnectivity) {
           _shouldShowSavedTopics = true;
-          _maybeShowSavedTopics();
-        });
+        } else {
+          _showSavedTopicsTimer = Timer(kShowSavedTopicsDelay, () {
+            _showSavedTopicsTimer = null;
+            _shouldShowSavedTopics = true;
+            _maybeShowSavedTopics();
+          });
+        }
         unawaited(_loadSavedTopics());
       }
     }

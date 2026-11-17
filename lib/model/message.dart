@@ -871,6 +871,45 @@ class MessageStoreImpl extends HasChannelStore
     }, isMaintenance: true));
   }
 
+  /// Persist a channel's fetched topic list for offline topic browsing and
+  /// autocomplete on future runs.
+  void saveChannelTopics(int channelId, List<GetChannelTopicsEntry> topics) {
+    if (_disposed || !coverageEnabled || !dbActive) return;
+    final channel = streams[channelId];
+    if (channel == null || !selfHasContentAccess(channel)) return;
+
+    final writer = _dbWriter;
+    final accountId = _dbAccountId;
+    if (writer == null || accountId == null || writer.isPoisoned) return;
+
+    _channelsWithData.add(channelId);
+    _channelHistoryPublic[channelId] = channel.historyPublicToSubscribers;
+    final epoch = _coverage.epoch;
+    final genBefore = _channelGeneration[channelId] ?? 0;
+    final historyPublic = channel.historyPublicToSubscribers;
+    final rows = [
+      for (final entry in topics)
+        (
+          topicKey: serverTopicFold(entry.name.apiName),
+          topic: entry.name.apiName,
+          maxId: entry.maxId,
+        ),
+    ];
+
+    unawaited(writer.enqueueWrite<void>((db, {required removalOnly}) async {
+      if (removalOnly || _disposed) return;
+      if ((_channelGeneration[channelId] ?? 0) != genBefore) return;
+      final currentCh = streams[channelId];
+      if (currentCh == null || !selfHasContentAccess(currentCh)) return;
+      await db.transaction(() async {
+        final current = await db.loadAccountEpochAndWatermarkInTxn(accountId);
+        if (current == null || current.epoch != epoch) return;
+        await db.upsertChannelsInTxn(accountId, {channelId: historyPublic});
+        await db.replaceStoredChannelTopicsInTxn(accountId, channelId, rows);
+      });
+    }).catchError((_) {}));
+  }
+
   /// Load the channel's locally known topics (DB rows merged with in-memory
   /// messages and [unreads]), folded by [serverTopicFold] with the newest
   /// message's topic display name.
@@ -4331,6 +4370,7 @@ class MessageStoreImpl extends HasChannelStore
       newTopic: newTopic,
       untrack: newStreamId != origStreamId && subscriptions[newStreamId] == null,
       markMoved: !wasResolveOrUnresolve,
+      propagateMode: messageMove.propagateMode,
     );
     _recordEffect(effect);
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:collection/collection.dart';
@@ -1253,6 +1254,14 @@ class TopicAutocompleteView extends AutocompleteView<TopicAutocompleteQuery, Top
   final int channelId;
 
   Iterable<TopicName> _topics = [];
+  Timer? _savedTopicsTimer;
+
+  @override
+  void dispose() {
+    _savedTopicsTimer?.cancel();
+    _savedTopicsTimer = null;
+    super.dispose();
+  }
 
   /// Fetches topics of the current stream narrow, if needed.
   ///
@@ -1260,12 +1269,44 @@ class TopicAutocompleteView extends AutocompleteView<TopicAutocompleteQuery, Top
   /// are fetched it restarts search to refresh UI showing the newly
   /// fetched topics.
   Future<void> _fetch() async {
+    bool liveDone = false;
+    if (store.topics.channelTopics(channelId) == null && store.coverageEnabled) {
+      void loadSaved() {
+        unawaited(store.loadSavedTopics(channelId).then((saved) {
+          if (_disposed || store.disposed || liveDone || saved == null) return;
+          _topics = saved.map((e) => e.name);
+          unawaited(_startSearch());
+        }).catchError((_) {}));
+      }
+      if (!store.connectivityMonitor.hasConnectivity) {
+        loadSaved();
+      } else {
+        _savedTopicsTimer = Timer(const Duration(milliseconds: 500), () {
+          _savedTopicsTimer = null;
+          if (_disposed || store.disposed || liveDone) return;
+          loadSaved();
+        });
+      }
+    }
+
     List<GetChannelTopicsEntry>? result;
     try {
       result = await store.topics.getChannelTopics(channelId);
+      liveDone = true;
+      _savedTopicsTimer?.cancel();
+      _savedTopicsTimer = null;
     } catch (e) {
+      liveDone = true;
+      _savedTopicsTimer?.cancel();
+      _savedTopicsTimer = null;
       if (_disposed || store.disposed) return;
-      if (!isRetryableRequestError(e)) rethrow;
+      if (!isRetryableRequestError(e)) {
+        if (_topics.isNotEmpty) {
+          _topics = const [];
+          unawaited(_startSearch());
+        }
+        rethrow;
+      }
       if (!store.coverageEnabled) return;
       result = await store.loadSavedTopics(channelId);
     }

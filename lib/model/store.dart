@@ -1006,6 +1006,18 @@ class PerAccountStore extends PerAccountStoreBase with
       userMap: userMap);
     final channels = ChannelStoreImpl(users: users,
       initialSnapshot: initialSnapshot);
+    final messages = MessageStoreImpl(channels: channels,
+      initialStarredMessages: initialSnapshot.starredMessages,
+      // On an event queue used by an earlier run of the app,
+      // local message IDs counting up from 1 might collide with ones
+      // that run used for messages whose events we have yet to receive.
+      // That run's IDs were less than the time it started, in milliseconds,
+      // unless it sent messages faster than one per millisecond.
+      firstLocalMessageId: persisted
+        ? ZulipBinding.instance.utcNow().millisecondsSinceEpoch : 1,
+      initialMaxMessageId: initialSnapshot.maxMessageId,
+      coverageEnabled: !persisted
+        && globalStore.settings.getBool(BoolGlobalSetting.messageDatabase));
     return PerAccountStore._(
       core: core,
       groups: groups,
@@ -1024,19 +1036,8 @@ class PerAccountStore extends PerAccountStoreBase with
       presence: Presence(realm: realm,
         initial: initialSnapshot.presences),
       channels: channels,
-      topics: Topics(core: core),
-      messages: MessageStoreImpl(channels: channels,
-        initialStarredMessages: initialSnapshot.starredMessages,
-        // On an event queue used by an earlier run of the app,
-        // local message IDs counting up from 1 might collide with ones
-        // that run used for messages whose events we have yet to receive.
-        // That run's IDs were less than the time it started, in milliseconds,
-        // unless it sent messages faster than one per millisecond.
-        firstLocalMessageId: persisted
-          ? ZulipBinding.instance.utcNow().millisecondsSinceEpoch : 1,
-        initialMaxMessageId: initialSnapshot.maxMessageId,
-        coverageEnabled: !persisted
-          && globalStore.settings.getBool(BoolGlobalSetting.messageDatabase)),
+      topics: Topics(core: core, onTopicsFetched: messages.saveChannelTopics),
+      messages: messages,
       unreads: Unreads(core: core, channelStore: channels,
         initial: initialSnapshot.unreadMsgs),
       recentDmConversationsView: RecentDmConversationsView(core: core,

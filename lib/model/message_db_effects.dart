@@ -102,9 +102,56 @@ Future<void> applyMessageEffectToDb(
       :final newTopic,
       :final untrack,
       :final markMoved,
+      :final propagateMode,
     ):
       if (messageIds.isEmpty) return;
       final origTopicKey = serverTopicFold(origTopic.apiName);
+      final movedIdsJson = jsonEncode(messageIds);
+      final int deletedTopicRows;
+      if (propagateMode == PropagateMode.changeAll) {
+        deletedTopicRows = await db.customUpdate(
+          'DELETE FROM stored_channel_topics '
+          'WHERE account_id = ? AND channel_id = ? AND topic_key = ?',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(origChannelId),
+            Variable.withString(origTopicKey),
+          ],
+        );
+      } else {
+        deletedTopicRows = await db.customUpdate(
+          'DELETE FROM stored_channel_topics '
+          'WHERE account_id = ? AND channel_id = ? AND topic_key = ? '
+          '  AND max_id IN (SELECT value FROM json_each(?))',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(origChannelId),
+            Variable.withString(origTopicKey),
+            Variable.withString(movedIdsJson),
+          ],
+        );
+      }
+      if (!untrack && deletedTopicRows > 0) {
+        final maxMovedId = messageIds.reduce((a, b) => a > b ? a : b);
+        final destTopicName = newTopic.apiName;
+        final destTopicKey = serverTopicFold(destTopicName);
+        await db.customInsert(
+          'INSERT INTO stored_channel_topics '
+          '(account_id, channel_id, topic_key, topic, max_id) '
+          'VALUES (?, ?, ?, ?, ?) '
+          'ON CONFLICT (account_id, channel_id, topic_key) DO UPDATE SET '
+          'topic = CASE WHEN excluded.max_id >= stored_channel_topics.max_id '
+          '  THEN excluded.topic ELSE stored_channel_topics.topic END, '
+          'max_id = MAX(stored_channel_topics.max_id, excluded.max_id)',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(newChannelId),
+            Variable.withString(destTopicKey),
+            Variable.withString(destTopicName),
+            Variable.withInt(maxMovedId),
+          ],
+        );
+      }
       final matchedRows = await db.customSelect(
         'SELECT id FROM stored_messages '
         'WHERE account_id = ? AND channel_id = ? AND topic_key = ? '
@@ -113,7 +160,7 @@ Future<void> applyMessageEffectToDb(
           Variable.withInt(accountId),
           Variable.withInt(origChannelId),
           Variable.withString(origTopicKey),
-          Variable.withString(jsonEncode(messageIds)),
+          Variable.withString(movedIdsJson),
         ],
       ).get();
       if (matchedRows.isEmpty) return;
@@ -482,6 +529,11 @@ Future<void> deleteMessagesFromDb(
     'WHERE account_id = ? AND id IN (SELECT value FROM json_each(?))',
     variables: [Variable.withInt(accountId), Variable.withString(idsJson)],
     updates: {db.storedMessages},
+  );
+  await db.customUpdate(
+    'DELETE FROM stored_channel_topics '
+    'WHERE account_id = ? AND max_id IN (SELECT value FROM json_each(?))',
+    variables: [Variable.withInt(accountId), Variable.withString(idsJson)],
   );
   if (removedBytes != 0) {
     await _adjustTotalBodyBytes(db, accountId: accountId, delta: -removedBytes);
