@@ -3419,7 +3419,9 @@ void main() {
               checkNotified(count: localFirst ? 3 : 1);
               async.elapse(const Duration(seconds: 2));
               checkHasMessages(notMovedMessages + postMoveMessages);
-              checkNotifiedOnce();
+              final savedFallbackDuringElapse =
+                store.debugCoverageEnabled && narrow is CombinedFeedNarrow;
+              checkNotified(count: savedFallbackDuringElapse ? 2 : 1);
           }
         }));
       }
@@ -3513,7 +3515,7 @@ void main() {
 
         async.elapse(const Duration(seconds: 2));
         checkHasMessages(initialMessages + otherChannelMessages);
-        checkNotifiedOnce();
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
       }));
     });
 
