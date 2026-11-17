@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
+import 'package:zulip/api/backoff.dart';
 import 'package:zulip/api/exception.dart';
 import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
@@ -139,7 +140,14 @@ void main() {
     ]);
 
     store.dispose();
-    check(async.pendingTimers).single.duration.equals(const Duration(seconds: 1));
+    // Both outbox timers are cancelled; the in-flight send request timer and
+    // PerAccountStore.dispose's 10s grace timer remain until the send settles.
+    check(async.pendingTimers).deepEquals(<Condition<Object?>>[
+      (it) => it.isA<FakeTimer>().duration.equals(const Duration(seconds: 1)),
+      (it) => it.isA<FakeTimer>().duration.equals(const Duration(seconds: 10)),
+    ]);
+    async.elapse(const Duration(seconds: 1));
+    check(async.pendingTimers).isEmpty();
   }));
 
   group('sendMessage', () {
@@ -836,8 +844,13 @@ void main() {
           await store.addSubscription(eg.subscription(otherChannel));
 
           await store.handleEvent(ChannelDeleteEvent(id: 1, channelIds: [otherChannel.streamId]));
-          // Message was in a channel that became unknown, so clobber.
-          checkClobber();
+          // With coverage enabled, deleting an unsubscribed channel clears all
+          // stored messages via _purgeChannel; otherwise it clobbers the view.
+          if (store.debugCoverageEnabled) {
+            check(store.messages).isEmpty();
+          } else {
+            checkClobber();
+          }
         });
 
         test('in unsubscribed channel on first call', () async {
@@ -869,6 +882,54 @@ void main() {
           checkNoClobber();
           checkNoClobber();
         });
+      });
+
+      test('unconfirmed store clobbers subscribed channel messages', () async {
+        final store = eg.store();
+        final stream = eg.stream();
+        await store.addStream(stream);
+        await store.addSubscription(eg.subscription(stream));
+        store.debugSetConfirmed(false);
+
+        final msg1 = eg.streamMessage(id: 1, stream: stream, content: '<p>old</p>');
+        store.reconcileMessages([msg1]);
+        check(store.isLocationReliable(1)).isFalse();
+
+        final msg2 = eg.streamMessage(id: 1, stream: stream, content: '<p>new</p>');
+        store.reconcileMessages([msg2]);
+        check(identical(store.messages[1], msg2)).isTrue();
+
+        store.debugSetConfirmed(true);
+        check(store.isLocationReliable(1)).isTrue();
+
+        final msg3 = eg.streamMessage(id: 1, stream: stream, content: '<p>ignored</p>');
+        store.reconcileMessages([msg3]);
+        check(identical(store.messages[1], msg2)).isTrue();
+      });
+
+      test('isLocationReliable checks confirmed, maybeStale, and locationUnknown', () async {
+        final store = eg.store();
+        final stream = eg.stream();
+        await store.addStream(stream);
+        await store.addSubscription(eg.subscription(stream));
+
+        check(store.isLocationReliable(1)).isFalse();
+        store.reconcileMessages([eg.streamMessage(id: 1, stream: stream)]);
+        check(store.isLocationReliable(1)).isTrue();
+
+        store.debugMaybeStaleMessages.add(1);
+        check(store.isLocationReliable(1)).isFalse();
+        store.debugMaybeStaleMessages.remove(1);
+        check(store.isLocationReliable(1)).isTrue();
+
+        store.debugLocationUnknown.add(1);
+        check(store.isLocationReliable(1)).isFalse();
+
+        // A fetch of a forgotten message clobbers it and restores reliability.
+        final fresh = eg.streamMessage(id: 1, stream: stream, content: '<p>fresh</p>');
+        store.reconcileMessages([fresh]);
+        check(identical(store.messages[1], fresh)).isTrue();
+        check(store.isLocationReliable(1)).isTrue();
       });
     });
 
@@ -2346,6 +2407,32 @@ void main() {
           checkPollNotNotified();
           checkPoll(message).options.deepEquals([conditionPollOption('foo')]);
         });
+
+        test('skip already-applied submessageId', () async {
+          message = await preparePollMessage(
+            optionVoterIdsPairs: [('foo', [])]);
+          final voteEvent = eg.submessageEvent(message.id, eg.otherUser.userId,
+            submessageId: 777,
+            content: PollVoteEventSubmessage(
+              key: PollEventSubmessage.optionKey(senderId: null, idx: 0),
+              op: PollVoteOp.add));
+          await store.handleEvent(voteEvent);
+          checkPollNotifiedOnce();
+          checkPoll(message).options.deepEquals([
+            conditionPollOption('foo', voters: [eg.otherUser.userId]),
+          ]);
+
+          // Re-applying the same submessageId is a no-op (even if content differs).
+          await store.handleEvent(eg.submessageEvent(message.id, eg.otherUser.userId,
+            submessageId: 777,
+            content: PollVoteEventSubmessage(
+              key: PollEventSubmessage.optionKey(senderId: null, idx: 0),
+              op: PollVoteOp.remove)));
+          checkPollNotNotified();
+          checkPoll(message).options.deepEquals([
+            conditionPollOption('foo', voters: [eg.otherUser.userId]),
+          ]);
+        });
       });
     });
 
@@ -2440,6 +2527,7 @@ void main() {
       test('content with invalid widget_type', () async {
         message = eg.streamMessage(sender: eg.otherUser, submessages: [
           Submessage(
+            id: 1,
             msgType: SubmessageType.widget,
             content: jsonEncode({'widget_type': 'other'}),
             senderId: eg.otherUser.userId,
@@ -2450,6 +2538,157 @@ void main() {
         check(store.messages[message.id]).isNotNull().poll.isNull();
       });
     });
+  });
+
+  group('markReadFromScroll', () {
+    void checkUpdateFlagsRequest(http.BaseRequest req, List<int> expectedIds) {
+      check(req).isA<http.Request>()
+        ..method.equals('POST')
+        ..url.path.equals('/api/v1/messages/flags')
+        ..bodyFields.deepEquals({
+          'messages': jsonEncode(expectedIds),
+          'op': 'add',
+          'flag': 'read',
+        });
+    }
+
+    test('holds and coalesces IDs while event stream is recovering, then flushes on recovery', () => awaitFakeAsync((async) async {
+      await prepare();
+      final m1 = eg.streamMessage(id: 1, flags: []);
+      final m2 = eg.streamMessage(id: 2, flags: []);
+      final m3 = eg.streamMessage(id: 3, flags: []);
+      await store.addMessages([m1, m2, m3]);
+
+      store.isRecoveringEventStream = true;
+      store.markReadFromScroll([m1.id, m2.id]);
+      async.elapse(Duration(seconds: 5));
+      check(connection.takeRequests()).isEmpty();
+
+      // Additional calls while recovering coalesce into the same queue.
+      store.markReadFromScroll([m2.id, m3.id]);
+      async.elapse(Duration(seconds: 5));
+      check(connection.takeRequests()).isEmpty();
+
+      connection.prepare(json: UpdateMessageFlagsResult(messages: [1, 2, 3]).toJson());
+      store.isRecoveringEventStream = false;
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1, 2, 3]);
+
+      // Drain debounce timer before fakeAsync checks for pending timers.
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotified(count: 0, storeCount: 2);
+    }));
+
+    void checkRetriesWithBackoff(
+      void Function() prepareFailure,
+    ) => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+
+      await prepare();
+      final m1 = eg.streamMessage(id: 1, flags: []);
+      await store.addMessage(m1);
+
+      prepareFailure();
+      store.markReadFromScroll([m1.id]);
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      // Before backoff expires, no retry is sent.
+      async.elapse(const Duration(seconds: 9));
+      check(connection.takeRequests()).isEmpty();
+
+      // After backoff expires, request retries and succeeds.
+      connection.prepare(json: UpdateMessageFlagsResult(messages: [1]).toJson());
+      async.elapse(const Duration(seconds: 1));
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      // Drain debounce timer.
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotNotified();
+    });
+
+    test('retries NetworkException with backoff', () => checkRetriesWithBackoff(
+      () => connection.prepare(
+        httpException: const HandshakeException('handshake failed'))));
+
+    test('retries Server5xxException with backoff', () => checkRetriesWithBackoff(
+      () => connection.prepare(httpStatus: 500, body: 'splat')));
+
+    test('retries HTTP 429 rate limit with backoff', () => checkRetriesWithBackoff(
+      () => connection.prepare(httpStatus: 429, json: {
+        'result': 'error', 'code': 'BAD_REQUEST', 'msg': 'Rate limit'})));
+
+    test('wakes from backoff immediately when event stream recovers', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+
+      await prepare();
+      final m1 = eg.streamMessage(id: 1, flags: []);
+      await store.addMessage(m1);
+
+      connection.prepare(httpStatus: 500, body: 'splat');
+      store.markReadFromScroll([m1.id]);
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      // Stream starts recovering during backoff, then recovers after 1s (< 10s).
+      store.isRecoveringEventStream = true;
+      async.elapse(const Duration(seconds: 1));
+      check(connection.takeRequests()).isEmpty();
+
+      connection.prepare(json: UpdateMessageFlagsResult(messages: [1]).toJson());
+      store.isRecoveringEventStream = false;
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotified(count: 0, storeCount: 2);
+    }));
+
+    test('drops batch on permanent 4xx error and proceeds to next batch', () => awaitFakeAsync((async) async {
+      await prepare();
+      final m1 = eg.streamMessage(id: 1, flags: []);
+      final m2 = eg.streamMessage(id: 2, flags: []);
+      await store.addMessages([m1, m2]);
+
+      connection.prepare(apiException: eg.apiBadRequest());
+      store.markReadFromScroll([m1.id]);
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      // Queue another message during the post-drop debounce window.
+      store.markReadFromScroll([m2.id]);
+      async.elapse(const Duration(milliseconds: 499));
+      check(connection.takeRequests()).isEmpty();
+
+      connection.prepare(json: UpdateMessageFlagsResult(messages: [2]).toJson());
+      async.elapse(const Duration(milliseconds: 1));
+      checkUpdateFlagsRequest(connection.takeRequests().single, [2]);
+
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotNotified();
+    }));
+
+    test('dispose cancels debounce and recovery wait cleanly', () => awaitFakeAsync((async) async {
+      final stream = eg.stream();
+      final store = eg.store();
+      await store.addStream(stream);
+      await store.addSubscription(eg.subscription(stream));
+      final m1 = eg.streamMessage(id: 1, stream: stream, flags: []);
+      await store.addMessage(m1);
+
+      final connection = store.connection as FakeApiConnection;
+      connection.prepare(json: UpdateMessageFlagsResult(messages: [1]).toJson());
+      store.markReadFromScroll([m1.id]);
+      async.elapse(Duration.zero);
+      checkUpdateFlagsRequest(connection.takeRequests().single, [1]);
+
+      // Dispose while debounce timer is pending; should cancel cleanly.
+      store.dispose();
+      async.elapse(Duration.zero);
+      check(async.pendingTimers).isEmpty();
+    }));
   });
 }
 

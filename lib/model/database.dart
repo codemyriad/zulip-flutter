@@ -14,6 +14,17 @@ import 'legacy_app_data.dart';
 import 'schema_versions.g.dart';
 import 'settings.dart';
 
+export 'message_database.dart'
+  show
+    ServerData,
+    ServerEventBatch,
+    ServerEventBatchesCompanion,
+    ServerSnapshot,
+    ServerSnapshotBlob,
+    ServerSnapshotBlobsCompanion,
+    ServerSnapshotInfo,
+    ServerSnapshotsCompanion;
+
 part 'database.g.dart';
 
 /// The table of one [GlobalSettingsData] record, the user's chosen settings
@@ -217,6 +228,18 @@ const _allTables = [
   GlobalSettings, BoolGlobalSettings, IntGlobalSettings,
   Accounts, PushKeys,
 ];
+
+/// Configure a newly opened connection to the app's database file.
+///
+/// Pass this as the `setup` callback when opening the file,
+/// as with `NativeDatabase.createInBackground`.
+/// It may run on another isolate, so it must be a top-level function.
+void setupDatabaseConnection(CommonDatabase database) {
+  // The same file may be open in another isolate or process at once,
+  // for handling notifications.  If that one holds a lock we need,
+  // wait a bit for it, rather than failing immediately with SQLITE_BUSY.
+  database.execute('PRAGMA busy_timeout = 3000;');
+}
 
 @DriftDatabase(tables: _allTables)
 class AppDatabase extends _$AppDatabase {

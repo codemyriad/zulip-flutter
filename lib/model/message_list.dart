@@ -4,14 +4,20 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
 import '../api/backoff.dart';
+import '../api/exception.dart';
 import '../api/model/events.dart';
 import '../api/model/model.dart';
 import '../api/route/messages.dart';
+import '../log.dart';
 import 'algorithms.dart';
+import 'binding.dart';
 import 'channel.dart';
+import 'connectivity.dart';
 import 'content.dart';
 import 'message.dart';
+import 'message_coverage.dart';
 import 'narrow.dart';
+import 'race_buffer.dart';
 import 'store.dart';
 import 'user.dart';
 
@@ -102,10 +108,51 @@ enum FetchingStatus {
   backoff,
 }
 
+/// State of the background network revalidation while a local window is shown.
+enum RevalidationState { none, inFlight, failing }
+
+/// How fresh the currently shown window in [MessageListView] is known to be.
+enum ContentState { current, unconfirmed, stale }
+
+/// A request in the retry loop of [MessageListView.fetchInitial].
+class _FetchInitialAttempt {
+  _FetchInitialAttempt({
+    required this.sentWhileRecovering,
+    required this.connectivityCount,
+  });
+
+  /// Whether [PerAccountStore.isRecoveringEventStream] was true
+  /// when the request was sent.
+  final bool sentWhileRecovering;
+
+  /// The value of [ConnectivityMonitor.updateCount]
+  /// when the request was sent.
+  final int connectivityCount;
+
+  /// Whether, if the request fails, to retry it at once
+  /// rather than after a backoff wait.
+  bool retryPromptly = false;
+
+  /// The abort trigger for the request; see [abort].
+  Future<void> get abortTrigger => _abortCompleter.future;
+  final Completer<void> _abortCompleter = Completer();
+
+  /// Whether [abort] has been called.
+  bool get aborted => _abortCompleter.isCompleted;
+
+  /// Abort the request, if it hasn't already completed.
+  void abort() {
+    if (_abortCompleter.isCompleted) return;
+    _abortCompleter.complete();
+  }
+}
+
 /// The sequence of messages in a message list, and how to display them.
 ///
 /// This comprises much of the guts of [MessageListView].
 mixin _MessageSequence {
+  PerAccountStore get store;
+
   /// Whether each message should have its own recipient header,
   /// even if it's in the same conversation as the previous message.
   ///
@@ -181,6 +228,87 @@ mixin _MessageSequence {
     _ => true,
   };
 
+  /// Whether the initial fetch is failing and being retried.
+  ///
+  /// This becomes true when a request in the retry loop of
+  /// [MessageListView.fetchInitial] fails in a way that may be temporary,
+  /// for example because the device is offline.
+  /// A request the view aborted itself, to retry it at once, doesn't count.
+  /// It becomes false when a request succeeds,
+  /// or the fetch stops on an error not to retry,
+  /// or the view is reset (as by [MessageListView.renarrowAndFetch]).
+  ///
+  /// While this is true, [fetched] is false.
+  bool get fetchInitialFailing => _fetchInitialFailing;
+  bool _fetchInitialFailing = false;
+
+  RevalidationState get revalidation => _revalidation;
+  RevalidationState _revalidation = RevalidationState.none;
+
+  /// Whether the view is showing synthesized saved messages while the server
+  /// fetch has not yet completed.
+  bool get showingSavedMessages => _showingSavedMessages;
+  bool _showingSavedMessages = false;
+
+  bool _hasUnsupersededStalePiece = false;
+  int? _stalePieceOldestVerifiedAt;
+
+  Timer? _staleBannerTimer;
+  bool _revalidatingBannerVisible = false;
+
+  bool get atKnownNewest => _atKnownNewest;
+  bool _atKnownNewest = false;
+
+  bool get _canShowOutbox => haveNewest || atKnownNewest;
+
+  bool get anchorFallback => _anchorFallback;
+  bool _anchorFallback = false;
+
+  bool _exhaustedLocalOlder = false;
+  bool _exhaustedLocalNewer = false;
+  bool _localOlderBusy = false;
+  bool _localNewerBusy = false;
+  bool _olderPaginationFailing = false;
+  bool _newerPaginationFailing = false;
+
+  /// Whether the top edge should show the "Can't load older messages offline"
+  /// affordance instead of a spinner.
+  bool get showOfflineOlderNotice =>
+    store.coverageEnabled
+    && !_haveOldest
+    && (_olderPaginationFailing
+        || ((_revalidation == RevalidationState.failing
+                || (_revalidation != RevalidationState.none
+                    && !store.connectivityMonitor.hasConnectivity))
+            && _exhaustedLocalOlder));
+
+  /// Whether the bottom edge should show the anchor-fallback offline note.
+  bool get showAnchorFallbackOfflineNotice =>
+    store.coverageEnabled
+    && !_haveNewest
+    && _anchorFallback
+    && _revalidation == RevalidationState.failing;
+
+  /// Whether the bottom edge should show the "Can't load newer messages offline"
+  /// affordance instead of a spinner.
+  bool get showOfflineNewerNotice =>
+    store.coverageEnabled
+    && !_haveNewest
+    && !_anchorFallback
+    && (_newerPaginationFailing
+        || ((_revalidation == RevalidationState.failing
+                || (_revalidation != RevalidationState.none
+                    && !store.connectivityMonitor.hasConnectivity))
+            && _exhaustedLocalNewer));
+
+  bool _localWindowWasLive = false;
+  bool _haveNewestInvalidated = false;
+
+  int? _networkOldestId;
+  int? _networkNewestId;
+  bool _networkHaveOldest = false;
+  bool _networkHaveNewest = false;
+
   /// Whether we know we have the oldest messages for this narrow.
   ///
   /// See also [haveNewest].
@@ -209,6 +337,46 @@ mixin _MessageSequence {
   FetchingStatus _status = FetchingStatus.unstarted;
 
   BackoffMachine? _fetchBackoffMachine;
+
+  /// Completed to stop the backoff wait in progress, if any,
+  /// in the retry loop of [MessageListView.fetchInitial],
+  /// when the loop is no longer wanted.
+  ///
+  /// See [_cancelFetchInitial].
+  Completer<void>? _fetchInitialAbort;
+
+  /// The request in flight, if any,
+  /// in the retry loop of [MessageListView.fetchInitial].
+  _FetchInitialAttempt? _fetchInitialAttempt;
+
+  /// Timer for showing a [CoverageStatus.stale] local window if the initial
+  /// network fetch takes longer than 500 ms.
+  Timer? _fetchInitialStaleTimer;
+  VoidCallback? _fetchInitialRunLocalNow;
+
+  /// Stop the retry loop of [MessageListView.fetchInitial], if running,
+  /// from waiting further on its request or backoff.
+  ///
+  /// The loop also needs to see, when it resumes, that it should stop;
+  /// for example because [generation] has changed.
+  void _cancelStaleBannerTimer() {
+    _staleBannerTimer?.cancel();
+    _staleBannerTimer = null;
+    _revalidatingBannerVisible = false;
+  }
+
+  void _cancelFetchInitial() {
+    _cancelStaleBannerTimer();
+    _fetchInitialStaleTimer?.cancel();
+    _fetchInitialStaleTimer = null;
+    _fetchInitialRunLocalNow = null;
+    final abort = _fetchInitialAbort;
+    _fetchInitialAbort = null;
+    abort?.complete();
+    final attempt = _fetchInitialAttempt;
+    _fetchInitialAttempt = null;
+    attempt?.abort();
+  }
 
   /// The parsed message contents, as a list parallel to [messages].
   ///
@@ -315,14 +483,16 @@ mixin _MessageSequence {
 
   /// Replace the message at [index] with [message],
   /// which must have the same message ID,
-  /// and update [contents] accordingly.
+  /// and update [contents] accordingly unless [reuseContent] is true.
   ///
   /// The caller is responsible for updating [items],
   /// for example by calling [_reprocessAll].
-  void _replaceMessage(int index, Message message) {
+  void _replaceMessage(int index, Message message, {bool reuseContent = false}) {
     assert(messages[index].id == message.id);
     messages[index] = message;
-    contents[index] = parseMessageContent(message);
+    if (!reuseContent) {
+      contents[index] = parseMessageContent(message);
+    }
   }
 
   /// Removes all messages from the list that satisfy [test].
@@ -413,7 +583,7 @@ mixin _MessageSequence {
   /// The caller is responsible for ensuring this is an appropriate thing to do
   /// given [narrow] and other concerns.
   void _addOutboxMessage(OutboxMessage outboxMessage) {
-    assert(haveNewest);
+    assert(_canShowOutbox);
     assert(!outboxMessages.contains(outboxMessage));
     outboxMessages.add(outboxMessage);
     _processOutboxMessage(outboxMessages.length - 1);
@@ -472,20 +642,47 @@ mixin _MessageSequence {
     assert(haveNewest);
     _removeOutboxMessagesWhere((_) => true);
     _haveNewest = false;
+    _atKnownNewest = false;
+    _networkHaveNewest = false;
+    _haveNewestInvalidated = true;
   }
 
   /// Reset all [_MessageSequence] data, and cancel any active fetches.
   void _reset() {
     generation += 1;
+    _clearContents();
+    _status = FetchingStatus.unstarted;
+    _fetchInitialFailing = false;
+    _revalidation = RevalidationState.none;
+    _showingSavedMessages = false;
+    _hasUnsupersededStalePiece = false;
+    _stalePieceOldestVerifiedAt = null;
+    _anchorFallback = false;
+    _exhaustedLocalOlder = false;
+    _exhaustedLocalNewer = false;
+    _localOlderBusy = false;
+    _localNewerBusy = false;
+    _olderPaginationFailing = false;
+    _newerPaginationFailing = false;
+    _fetchBackoffMachine = null;
+    _cancelFetchInitial();
+  }
+
+  void _clearContents() {
     messages.clear();
     middleMessage = 0;
     _oldestFetchedMessageId = null;
     _newestFetchedMessageId = null;
+    _networkOldestId = null;
+    _networkNewestId = null;
+    _networkHaveOldest = false;
+    _networkHaveNewest = false;
     outboxMessages.clear();
     _haveOldest = false;
     _haveNewest = false;
-    _status = FetchingStatus.unstarted;
-    _fetchBackoffMachine = null;
+    _atKnownNewest = false;
+    _localWindowWasLive = false;
+    _haveNewestInvalidated = false;
     contents.clear();
     items.clear();
     middleItem = 0;
@@ -611,7 +808,7 @@ mixin _MessageSequence {
   ///
   /// All [messages] should have been processed when this is called.
   void _reprocessOutboxMessages() {
-    assert(haveNewest);
+    assert(_canShowOutbox || outboxMessages.isEmpty);
     _removeOutboxMessageItems();
     for (var i = 0; i < outboxMessages.length; i++) {
       _processOutboxMessage(i);
@@ -674,6 +871,11 @@ bool _sameDay(DateTime date1, DateTime date2) {
 ///  * When the object will no longer be used, call [dispose] to free
 ///    resources on the [PerAccountStore].
 class MessageListView with ChangeNotifier, _MessageSequence {
+  /// Debug hook called when revalidating a live local window changes its
+  /// message IDs or message instances beyond racing events.
+  @visibleForTesting
+  static void Function(MessageListView view, String detail)?
+    debugOnLiveRevalidationChanged;
   factory MessageListView.init({
     required PerAccountStore store,
     required Narrow narrow,
@@ -689,6 +891,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     required this._anchor,
   });
 
+  @override
   final PerAccountStore store;
 
   bool _disposed = false;
@@ -707,7 +910,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _anchor = anchor;
     _reset();
     notifyListeners();
-    fetchInitial();
+    unawaited(fetchInitial());
   }
 
   /// The anchor point this message list starts from in the message history.
@@ -723,16 +926,168 @@ class MessageListView with ChangeNotifier, _MessageSequence {
 
   void _register() {
     store.registerMessageList(this);
+    _retrySignalSubscription = store.connectivityMonitor.retrySignals
+      .listen(_handleConnectivityRetrySignal);
+    store.connectivityMonitor.addListener(_handleConnectivityChanged);
+  }
+
+  StreamSubscription<void>? _retrySignalSubscription;
+
+  void _handleConnectivityChanged() {
+    if (_disposed) return;
+    if (!store.connectivityMonitor.hasConnectivity) {
+      final runNow = _fetchInitialRunLocalNow;
+      if (runNow != null) {
+        runNow();
+        return;
+      }
+    }
+    if (_revalidation != RevalidationState.none
+        && ((!_haveOldest && _exhaustedLocalOlder && !_olderPaginationFailing)
+            || (!_haveNewest && !_anchorFallback && _exhaustedLocalNewer && !_newerPaginationFailing))) {
+      notifyListeners();
+    }
   }
 
   @override
   void dispose() {
     assert(!_disposed);
     store.unregisterMessageList(this);
+    _retrySignalSubscription?.cancel();
+    store.connectivityMonitor.removeListener(_handleConnectivityChanged);
     // Fetches in progress check this when they resume, so that they
     // don't act on, or notify listeners of, this disposed object.
     _disposed = true;
+    _cancelFetchInitial();
     super.dispose();
+  }
+
+  /// How fresh the currently shown window is known to be.
+  ContentState get contentState {
+    if (_hasUnsupersededStalePiece
+        || messages.any((m) => store.isMessageMaybeStale(m.id))) {
+      return ContentState.stale;
+    }
+    if (messages.isNotEmpty && !store.confirmed) {
+      return ContentState.unconfirmed;
+    }
+    return ContentState.current;
+  }
+
+  /// Timestamp corresponding to the oldest shown stale or unconfirmed content,
+  /// if known.
+  DateTime? get contentSavedAt {
+    switch (contentState) {
+      case ContentState.stale:
+        return _timestampFromSeconds(_stalePieceOldestVerifiedAt ?? store.lastLiveAt);
+      case ContentState.unconfirmed:
+        return _timestampFromSeconds(store.lastLiveAt);
+      case ContentState.current:
+        return null;
+    }
+  }
+
+  /// Whether the view is showing local saved-message search results for a
+  /// [KeywordSearchNarrow] while the server search has not yet completed.
+  bool get showingSavedSearchResults =>
+    _showingSavedMessages && narrow is KeywordSearchNarrow;
+
+  /// Whether the view should show the "Updating…" banner for possibly stale
+  /// content whose revalidation has been in flight for at least 3 seconds.
+  bool get showStaleRevalidatingBanner =>
+    !showingSavedSearchResults
+    && _revalidation == RevalidationState.inFlight
+    && _revalidatingBannerVisible
+    && contentState != ContentState.current;
+
+  /// Whether the view should show the offline banner for possibly stale content.
+  bool get showStaleOfflineBanner =>
+    !showingSavedSearchResults
+    && (_revalidation == RevalidationState.failing
+        || _olderPaginationFailing
+        || _newerPaginationFailing)
+    && contentState != ContentState.current;
+
+  /// Whether empty-state autofocus can safely decide that the narrow is empty.
+  bool get canDecideEmptyAutofocus =>
+    fetched
+    && (messages.isNotEmpty
+        || (store.confirmed
+            && contentState == ContentState.current
+            && haveOldest
+            && haveNewest));
+
+  /// Notify this view when [PerAccountStore.confirmed] changes.
+  void handleStoreConfirmedChanged() {
+    _syncStaleBannerTimer();
+    notifyListeners();
+  }
+
+  void _syncStaleBannerTimer() {
+    if (_disposed
+        || _revalidation != RevalidationState.inFlight
+        || contentState == ContentState.current) {
+      _cancelStaleBannerTimer();
+      return;
+    }
+    if (_revalidatingBannerVisible || _staleBannerTimer != null) return;
+    Timer? timer;
+    timer = _staleBannerTimer = Timer(const Duration(seconds: 3), () {
+      if (identical(_staleBannerTimer, timer)) {
+        _staleBannerTimer = null;
+      }
+      if (_disposed
+          || _revalidation != RevalidationState.inFlight
+          || contentState == ContentState.current) {
+        return;
+      }
+      _revalidatingBannerVisible = true;
+      notifyListeners();
+    });
+  }
+
+  static DateTime? _timestampFromSeconds(int? seconds) {
+    if (seconds == null || seconds <= 0) return null;
+    return DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+  }
+
+  void _setContentStateFromChain(CoverageChain chain) {
+    if (chain.status == CoverageStatus.stale) {
+      _hasUnsupersededStalePiece = true;
+      _stalePieceOldestVerifiedAt = chain.oldestVerifiedAt;
+    } else {
+      _hasUnsupersededStalePiece = false;
+      _stalePieceOldestVerifiedAt = null;
+    }
+  }
+
+  void _mergeContentStateFromChain(CoverageChain chain) {
+    if (chain.status == CoverageStatus.stale) {
+      _hasUnsupersededStalePiece = true;
+      final ts = chain.oldestVerifiedAt;
+      if (ts != null
+          && (_stalePieceOldestVerifiedAt == null || ts < _stalePieceOldestVerifiedAt!)) {
+        _stalePieceOldestVerifiedAt = ts;
+      }
+    }
+  }
+
+  void _maybeClearSupersededStalePiece() {
+    if (!_hasUnsupersededStalePiece || _revalidation != RevalidationState.none) {
+      return;
+    }
+    final olderSuperseded = _networkHaveOldest
+      || (_networkOldestId != null
+          && _oldestFetchedMessageId != null
+          && _networkOldestId! <= _oldestFetchedMessageId!);
+    final newerSuperseded = _networkHaveNewest
+      || (_networkNewestId != null
+          && _newestFetchedMessageId != null
+          && _networkNewestId! >= _newestFetchedMessageId!);
+    if (olderSuperseded && newerSuperseded) {
+      _hasUnsupersededStalePiece = false;
+      _stalePieceOldestVerifiedAt = null;
+    }
   }
 
   @override bool get oneMessagePerBlock => switch (narrow) {
@@ -757,11 +1112,9 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   /// UI logic mitigates harassment by obscuring messages from muted senders,
   /// with a "reveal" button;
   /// see [RevealedMutedMessagesState] in lib/widgets/message_list.dart.
-  ///
-  /// See also [_allMessagesVisible].
-  // When updating this, check [_allMessagesVisible], [_willAffectVisibility],
-  // [_mutedUsersEventWillAffectVisibility], and [messagesMoved] to see whether
-  // they need to be updated too.
+  // When updating this, check [_willAffectVisibility],
+  // [_mutedUsersEventWillAffectVisibility], [handleSubscriptionEvent],
+  // and [messagesMoved] to see whether they need to be updated too.
   // Also check the unread-count methods in [Unreads] to make sure they count
   // exactly the unread messages for which this would return true.
   bool _messageVisible(MessageBase message) {
@@ -819,34 +1172,26 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
-  /// Whether [message] belongs in this view:
-  /// it's known to be in [narrow], and it's visible ([_messageVisible]).
+  /// Whether [message] belongs in this view after a fetch, accounting for
+  /// both [narrow] (which may no longer match if a move raced the fetch) and
+  /// [_messageVisible].
+  bool _messageBelongsInFetchedView(MessageBase message) {
+    final matchesNarrow = switch (narrow) {
+      ChannelNarrow() || TopicNarrow() || DmNarrow() =>
+        narrow.containsMessage(message) != false,
+      CombinedFeedNarrow() ||
+      MentionsNarrow() ||
+      StarredMessagesNarrow() ||
+      KeywordSearchNarrow() =>
+        true,
+    };
+    return matchesNarrow && _messageVisible(message);
+  }
+
+  /// Whether [message] is known to belong in [narrow], and is visible
+  /// ([_messageVisible]).
   bool _messageBelongsHere(MessageBase message) =>
     narrow.containsMessage(message) == true && _messageVisible(message);
-
-  /// Whether [_messageVisible] is true for all possible messages.
-  ///
-  /// This is useful for an optimization.
-  bool get _allMessagesVisible {
-    switch (narrow) {
-      case CombinedFeedNarrow():
-      case ChannelNarrow():
-        return false;
-
-      case TopicNarrow():
-      case DmNarrow():
-        return true;
-
-      case MentionsNarrow():
-        return false;
-
-      case StarredMessagesNarrow():
-        return true;
-
-      case KeywordSearchNarrow():
-        return false;
-    }
-  }
 
   /// Whether this event could affect the result that [_messageVisible]
   /// would ever have returned for any possible message in this message list.
@@ -898,7 +1243,15 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   }
 
   /// Fetch messages, starting from scratch.
-  Future<void> fetchInitial() async {
+  ///
+  /// If the request fails in a way that may be temporary,
+  /// such as a network failure or a 5xx error,
+  /// this retries with backoff until a request succeeds,
+  /// or until this view is disposed or reset (as by [renarrowAndFetch]),
+  /// or the store is disposed.
+  /// See [isRetryableRequestError].
+  /// On other errors, this throws.
+  Future<void> fetchInitial({bool skipInitialLocal = false}) async {
     assert(!_disposed);
     assert(!fetched && !haveOldest && !haveNewest && !busyFetchingMore);
     assert(messages.isEmpty && contents.isEmpty);
@@ -917,47 +1270,736 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _setStatus(FetchingStatus.fetchInitial, was: FetchingStatus.unstarted);
     // TODO schedule all this in another isolate
     final generation = this.generation;
-    // TODO(#2085): handle request failure
-    final result = await getMessages(store.connection,
-      narrow: narrow.apiEncode(),
-      anchor: anchor,
-      numBefore: kMessageListFetchBatchSize,
-      numAfter: kMessageListFetchBatchSize,
-      allowEmptyTopicName: true,
+    bool isStale() => _disposed || store.disposed || this.generation != generation;
+    assert(_fetchInitialAbort == null);
+    final abort = _fetchInitialAbort = Completer<void>();
+
+    BackoffMachine? backoffMachine;
+    GetMessagesResult result;
+    FetchTicket? ticket;
+    bool redirected = false;
+    final int? narrowChannelId = switch (narrow) {
+      ChannelNarrow(:final channelId) || TopicNarrow(:final channelId) => channelId,
+      _ => null,
+    };
+
+    bool networkDone = false;
+    bool initialLocalSuperseded = false;
+    Timer? staleTimer;
+    if (!skipInitialLocal) {
+      if (_useSavedMessagesForFetchInitial) {
+        void runSavedMessages() {
+          unawaited(store.savedMessagesForNarrow(
+            narrow,
+            limit: kMessageListFetchBatchSize,
+          ).then((savedMessages) {
+            if (networkDone || initialLocalSuperseded || isStale()
+                || _status != FetchingStatus.fetchInitial
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            if (savedMessages == null) return;
+            initialLocalSuperseded = true;
+            _showSavedMessages(
+              savedMessages,
+              revalidation: RevalidationState.inFlight,
+            );
+          }).catchError((_) {}));
+        }
+        if (!store.connectivityMonitor.hasConnectivity) {
+          runSavedMessages();
+        } else {
+          void triggerSavedMessages() {
+            staleTimer?.cancel();
+            if (identical(_fetchInitialStaleTimer, staleTimer)) {
+              _fetchInitialStaleTimer = null;
+            }
+            if (identical(_fetchInitialRunLocalNow, triggerSavedMessages)) {
+              _fetchInitialRunLocalNow = null;
+            }
+            if (networkDone || initialLocalSuperseded || isStale()
+                || _status != FetchingStatus.fetchInitial
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            runSavedMessages();
+          }
+          _fetchInitialRunLocalNow = triggerSavedMessages;
+          staleTimer = _fetchInitialStaleTimer = Timer(
+            const Duration(milliseconds: 500),
+            triggerSavedMessages,
+          );
+        }
+      } else if (store.dbActive) {
+        final localStopwatch = ZulipBinding.instance.stopwatch()..start();
+        unawaited(_findLocalWindowAsync(afterFailure: false).then((found) {
+          if (networkDone || initialLocalSuperseded || isStale()
+              || _status != FetchingStatus.fetchInitial
+              || _revalidation != RevalidationState.none) {
+            return;
+          }
+          if (found == null) return;
+          final (local, usedFallback) = found;
+          if (local.chain.status != CoverageStatus.stale) {
+            _showLocalWindow(
+              local,
+              usedFallback: usedFallback,
+              revalidation: RevalidationState.inFlight,
+            );
+            return;
+          }
+          final remaining = const Duration(milliseconds: 500) - localStopwatch.elapsed;
+          if (remaining <= Duration.zero || !store.connectivityMonitor.hasConnectivity) {
+            _showLocalWindow(
+              local,
+              usedFallback: usedFallback,
+              revalidation: RevalidationState.inFlight,
+            );
+          } else {
+            void triggerDbStaleLocal() {
+              staleTimer?.cancel();
+              if (identical(_fetchInitialStaleTimer, staleTimer)) {
+                _fetchInitialStaleTimer = null;
+              }
+              if (identical(_fetchInitialRunLocalNow, triggerDbStaleLocal)) {
+                _fetchInitialRunLocalNow = null;
+              }
+              if (networkDone || initialLocalSuperseded || isStale()
+                  || _status != FetchingStatus.fetchInitial
+                  || _revalidation != RevalidationState.none) {
+                return;
+              }
+              _showLocalWindow(
+                local,
+                usedFallback: usedFallback,
+                revalidation: RevalidationState.inFlight,
+              );
+            }
+            _fetchInitialRunLocalNow = triggerDbStaleLocal;
+            staleTimer = _fetchInitialStaleTimer = Timer(remaining, triggerDbStaleLocal);
+          }
+        }).catchError((_) {}));
+      } else {
+        final initialLocal = _findLocalWindow(afterFailure: false);
+        if (initialLocal != null) {
+          final (local, usedFallback) = initialLocal;
+          if (local.chain.status != CoverageStatus.stale
+              || !store.connectivityMonitor.hasConnectivity) {
+            _showLocalWindow(
+              local,
+              usedFallback: usedFallback,
+              revalidation: RevalidationState.inFlight,
+            );
+          } else {
+            void triggerMemStaleLocal() {
+              staleTimer?.cancel();
+              if (identical(_fetchInitialStaleTimer, staleTimer)) {
+                _fetchInitialStaleTimer = null;
+              }
+              if (identical(_fetchInitialRunLocalNow, triggerMemStaleLocal)) {
+                _fetchInitialRunLocalNow = null;
+              }
+              if (isStale() || _revalidation != RevalidationState.none) return;
+              final delayedLocal = _findLocalWindow(afterFailure: false);
+              if (delayedLocal == null) return;
+              _showLocalWindow(
+                delayedLocal.$1,
+                usedFallback: delayedLocal.$2,
+                revalidation: RevalidationState.inFlight,
+              );
+            }
+            _fetchInitialRunLocalNow = triggerMemStaleLocal;
+            staleTimer = _fetchInitialStaleTimer = Timer(
+              const Duration(milliseconds: 500),
+              triggerMemStaleLocal,
+            );
+          }
+        }
+      }
+    }
+
+    try {
+      while (true) {
+        assert(_fetchInitialAttempt == null);
+        final attempt = _fetchInitialAttempt = _FetchInitialAttempt(
+          sentWhileRecovering: store.isRecoveringEventStream,
+          connectivityCount: store.connectivityMonitor.updateCount);
+        final attemptTicket = ticket = store.openFetchTicket(channelId: narrowChannelId);
+        try {
+          result = await getMessages(store.connection,
+            narrow: narrow.apiEncode(),
+            anchor: anchor,
+            numBefore: kMessageListFetchBatchSize,
+            numAfter: kMessageListFetchBatchSize,
+            allowEmptyTopicName: true,
+            abortTrigger: attempt.abortTrigger,
+          );
+          break;
+        } catch (e) {
+          store.closeFetchTicket(attemptTicket);
+          ticket = null;
+          if (isStale()) return;
+          if (!isRetryableRequestError(e)) {
+            _fetchInitialAbort = null;
+            if (_revalidation != RevalidationState.none) {
+              _reset();
+              notifyListeners();
+            } else if (fetchInitialFailing) {
+              _fetchInitialFailing = false;
+              notifyListeners(); // [_setStatus] wouldn't, as [fetched] is false
+            }
+            rethrow;
+          }
+          // If we aborted the request ourselves, to retry promptly,
+          // the retry may well succeed fast; don't count it as failing.
+          if (!attempt.aborted) {
+            if (_revalidation != RevalidationState.none) {
+              if (_revalidation != RevalidationState.failing) {
+                _revalidation = RevalidationState.failing;
+                _syncStaleBannerTimer();
+                notifyListeners();
+              }
+            } else {
+              staleTimer?.cancel();
+              if (identical(_fetchInitialStaleTimer, staleTimer)) {
+                _fetchInitialStaleTimer = null;
+              }
+              _fetchInitialRunLocalNow = null;
+              initialLocalSuperseded = true;
+              if (_useSavedMessagesForFetchInitial) {
+                final savedMessages = await store.savedMessagesForNarrow(
+                  narrow,
+                  limit: kMessageListFetchBatchSize,
+                );
+                if (isStale()) return;
+                if (savedMessages != null) {
+                  _showSavedMessages(
+                    savedMessages,
+                    revalidation: RevalidationState.failing,
+                  );
+                } else if (!fetchInitialFailing) {
+                  _fetchInitialFailing = true;
+                  notifyListeners(); // [_setStatus] wouldn't, as [fetched] is false
+                }
+              } else {
+                final failureLocal = store.dbActive
+                  ? await _findLocalWindowAsync(afterFailure: true)
+                  : _findLocalWindow(afterFailure: true);
+                if (isStale()) return;
+                if (failureLocal != null) {
+                  _showLocalWindow(
+                    failureLocal.$1,
+                    usedFallback: failureLocal.$2,
+                    revalidation: RevalidationState.failing,
+                  );
+                } else if (!fetchInitialFailing) {
+                  _fetchInitialFailing = true;
+                  notifyListeners(); // [_setStatus] wouldn't, as [fetched] is false
+                }
+              }
+            }
+          }
+        } finally {
+          if (identical(_fetchInitialAttempt, attempt)) _fetchInitialAttempt = null;
+        }
+        // TODO(log) the error
+        if (attempt.retryPromptly) {
+          // The network is probably working again, or is a new one;
+          // see [handleEventStreamRecovered] and [_handleConnectivityRetrySignal].
+          // Retry now, and if that fails too, start backoff over small.
+          backoffMachine = null;
+          continue;
+        }
+        final wake = _fetchInitialBackoffWake = Completer<void>();
+        await (backoffMachine ??= BackoffMachine())
+          .wait(abortTrigger: Future.any([abort.future, wake.future]));
+        if (isStale()) return;
+        _fetchInitialBackoffWake = null;
+        if (wake.isCompleted) {
+          // The network is probably working again;
+          // if the retry fails anyway, start backoff over small.
+          backoffMachine = null;
+        }
+      }
+      if (isStale()) return;
+      networkDone = true;
+      _fetchInitialAbort = null;
+      staleTimer?.cancel();
+      if (identical(_fetchInitialStaleTimer, staleTimer)) {
+        _fetchInitialStaleTimer = null;
+      }
+      _fetchInitialRunLocalNow = null;
+
+      final narrowBefore = narrow;
+      _adjustNarrowForTopicPermalink(result.messages.firstOrNull);
+      redirected = narrow != narrowBefore;
+
+      store.reconcileMessages(
+        result.messages,
+        rawMessages: result.rawMessages,
+        ticket: ticket,
+        requester: this,
+        coverageRequest: FetchCoverageRequest(
+          narrow: narrow,
+          numBefore: kMessageListFetchBatchSize,
+          numAfter: kMessageListFetchBatchSize,
+          includeAnchor: true,
+          foundOldest: result.foundOldest,
+          foundNewest: result.foundNewest,
+          historyLimited: result.historyLimited,
+          resolvedAnchor: result.anchor,
+        ),
+      );
+      store.recentSenders.handleMessages(result.messages); // TODO(#824)
+    } finally {
+      _cancelStaleBannerTimer();
+      staleTimer?.cancel();
+      if (identical(_fetchInitialStaleTimer, staleTimer)) {
+        _fetchInitialStaleTimer = null;
+      }
+      _fetchInitialRunLocalNow = null;
+      if (ticket != null) {
+        store.closeFetchTicket(ticket);
+      }
+    }
+    if (isStale()) return;
+
+    _networkOldestId = result.messages.firstOrNull?.id;
+    _networkNewestId = result.messages.lastOrNull?.id;
+    _networkHaveOldest = result.foundOldest;
+    _networkHaveNewest = result.foundNewest;
+
+    if (_revalidation == RevalidationState.none) {
+      _populateFromResult(
+        messages: result.messages,
+        anchorId: result.anchor,
+        foundOldest: result.foundOldest,
+        foundNewest: result.foundNewest,
+      );
+      _atKnownNewest = haveNewest;
+      _hasUnsupersededStalePiece = false;
+      _stalePieceOldestVerifiedAt = null;
+      _syncStaleBannerTimer();
+      _fetchInitialFailing = false;
+      _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+    } else {
+      final wasAnchorFallback = _anchorFallback;
+      final wasShowingSavedMessages = _showingSavedMessages;
+      _revalidation = RevalidationState.none;
+      _showingSavedMessages = false;
+      _anchorFallback = false;
+      _exhaustedLocalOlder = false;
+      _exhaustedLocalNewer = false;
+      _olderPaginationFailing = false;
+      _newerPaginationFailing = false;
+      _hasUnsupersededStalePiece = false;
+      _stalePieceOldestVerifiedAt = null;
+      _syncStaleBannerTimer();
+      if (redirected || wasAnchorFallback || wasShowingSavedMessages) {
+        // Saved messages are shown with [haveNewest] true,
+        // so message events during the fetch got appended;
+        // the server may have computed its response before they existed.
+        final resultNewestId = result.messages.lastOrNull?.id ?? 0;
+        final liveArrivals = (wasShowingSavedMessages && !redirected && result.foundNewest)
+          ? [for (final m in messages) if (m.id > resultNewestId) m.id]
+          : const <int>[];
+        _clearContents();
+        _populateFromResult(
+          messages: result.messages,
+          anchorId: result.anchor,
+          foundOldest: result.foundOldest,
+          foundNewest: result.foundNewest,
+        );
+        var addedLive = false;
+        for (final id in liveArrivals) {
+          final current = store.messages[id];
+          if (current == null || !_messageBelongsInFetchedView(current)) continue;
+          _addMessage(current);
+          _newestFetchedMessageId = current.id;
+          _networkNewestId = current.id;
+          _oldestFetchedMessageId ??= current.id;
+          _networkOldestId ??= current.id;
+          addedLive = true;
+        }
+        if (addedLive) _reprocessAll();
+        _atKnownNewest = haveNewest;
+        notifyListeners();
+      } else {
+        _mergeWindow(result);
+        notifyListeners();
+      }
+    }
+  }
+
+  (LocalWindow, bool)? _findLocalWindow({required bool afterFailure}) {
+    final direct = store.localWindow(
+      narrow,
+      anchor,
+      kMessageListFetchBatchSize,
+      kMessageListFetchBatchSize,
+      afterFailure: afterFailure,
     );
-    if (_disposed || this.generation > generation) return;
+    if (direct != null) return (direct, false);
+    if (afterFailure && anchor != AnchorCode.newest) {
+      final fallback = store.localWindow(
+        narrow,
+        AnchorCode.newest,
+        kMessageListFetchBatchSize,
+        kMessageListFetchBatchSize,
+        afterFailure: true,
+      );
+      if (fallback != null) return (fallback, true);
+    }
+    return null;
+  }
 
-    _oldestFetchedMessageId = result.messages.firstOrNull?.id;
-    _newestFetchedMessageId = result.messages.lastOrNull?.id;
+  Future<(LocalWindow, bool)?> _findLocalWindowAsync({required bool afterFailure}) async {
+    final direct = await store.localWindowAsync(
+      narrow,
+      anchor,
+      kMessageListFetchBatchSize,
+      kMessageListFetchBatchSize,
+      afterFailure: afterFailure,
+    );
+    if (direct != null) return (direct, false);
+    if (afterFailure && anchor != AnchorCode.newest) {
+      final fallback = await store.localWindowAsync(
+        narrow,
+        AnchorCode.newest,
+        kMessageListFetchBatchSize,
+        kMessageListFetchBatchSize,
+        afterFailure: true,
+      );
+      if (fallback != null) return (fallback, true);
+    }
+    return null;
+  }
 
-    _adjustNarrowForTopicPermalink(result.messages.firstOrNull);
+  void _showLocalWindow(
+    LocalWindow local, {
+    required bool usedFallback,
+    required RevalidationState revalidation,
+  }) {
+    _anchorFallback = usedFallback;
+    _localWindowWasLive = local.chain.status == CoverageStatus.live && !usedFallback;
+    _setContentStateFromChain(local.chain);
+    _populateFromResult(
+      messages: local.messages,
+      anchorId: local.anchorId,
+      foundOldest: local.haveOldest,
+      foundNewest: local.haveNewest,
+      atKnownNewest: local.atKnownNewest,
+    );
+    _fetchInitialFailing = false;
+    _revalidation = revalidation;
+    _syncStaleBannerTimer();
+    _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+  }
 
-    store.reconcileMessages(result.messages);
-    store.recentSenders.handleMessages(result.messages); // TODO(#824)
+  /// Whether [fetchInitial] should fall back to [PerAccountStore.savedMessagesForNarrow].
+  ///
+  /// That shows the newest saved messages,
+  /// so it doesn't serve a view anchored elsewhere, like at the first unread.
+  bool get _useSavedMessagesForFetchInitial =>
+    _usesSavedMessagesFallback(narrow)
+      && anchor == AnchorCode.newest
+      && store.coverageEnabled;
+
+  static bool _usesSavedMessagesFallback(Narrow narrow) => switch (narrow) {
+    CombinedFeedNarrow()
+    || MentionsNarrow()
+    || StarredMessagesNarrow()
+    || KeywordSearchNarrow() => true,
+    ChannelNarrow() || TopicNarrow() || DmNarrow() => false,
+  };
+
+  void _showSavedMessages(
+    SavedMessageSearchResult saved, {
+    required RevalidationState revalidation,
+  }) {
+    _showingSavedMessages = true;
+    _anchorFallback = false;
+    _localWindowWasLive = false;
+    _hasUnsupersededStalePiece = narrow is! KeywordSearchNarrow;
+    _stalePieceOldestVerifiedAt = null;
+    _exhaustedLocalOlder = !saved.hasMoreOlder;
+    _exhaustedLocalNewer = false;
+    _olderPaginationFailing = false;
+    _newerPaginationFailing = false;
+    _populateFromResult(
+      messages: saved.messages,
+      anchorId: saved.messages.lastOrNull?.id ?? kNewestMessageId,
+      foundOldest: false,
+      foundNewest: true,
+      atKnownNewest: true,
+    );
+    _fetchInitialFailing = false;
+    _revalidation = revalidation;
+    _syncStaleBannerTimer();
+    _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+  }
+
+  void _mergeWindow(GetMessagesResult result) {
+    final wasLive = _localWindowWasLive;
+    _localWindowWasLive = false;
+    final sentOutbox = [
+      for (final om in outboxMessages)
+        if (om.state == OutboxMessageState.sent) om,
+    ];
+    final l = result.foundOldest
+      ? 0
+      : (result.messages.firstOrNull?.id ?? result.anchor);
+    final h = result.foundNewest
+      ? kNewestMessageId
+      : (result.messages.lastOrNull?.id ?? result.anchor);
+
+    final disjoint = messages.isNotEmpty
+      && (h < messages.first.id || l > messages.last.id);
+    if (disjoint) {
+      assert(() {
+        if (wasLive) {
+          _reportLiveRevalidationChanged('disjoint window [$l, $h]');
+        }
+        return true;
+      }());
+      _clearContents();
+      _populateFromResult(
+        messages: result.messages,
+        anchorId: result.anchor,
+        foundOldest: result.foundOldest,
+        foundNewest: result.foundNewest,
+      );
+      if (_canShowOutbox) {
+        var addedSent = false;
+        for (final om in sentOutbox) {
+          if (om.messageId != null
+              && _findMessageWithId(om.messageId!) == -1
+              && outboxMessages.none((x) => x.localMessageId == om.localMessageId)) {
+            outboxMessages.add(om);
+            addedSent = true;
+          }
+        }
+        if (addedSent) {
+          _reprocessOutboxMessages();
+        }
+      }
+      return;
+    }
+
+    final oldContentsById = <int, (Message, ZulipMessageContent)>{
+      for (int i = 0; i < messages.length; i++)
+        messages[i].id: (messages[i], contents[i]),
+    };
+    final oldMiddleId = messages.isNotEmpty && middleMessage < messages.length
+      ? messages[middleMessage].id
+      : null;
+    final oldTopId = messages.lastOrNull?.id;
+    final wasAtEnd = messages.isEmpty || middleMessage == messages.length - 1;
+
+    // Collect merged messages:
+    // - outside [l, h]: keep existing messages still in store & visible
+    // - inside [l, h]: union of result.messages and existing messages (like
+    //   racing event arrivals) that are still in store & visible.
+    final byId = <int, Message>{};
+    for (final m in messages) {
+      final current = store.messages[m.id];
+      if (current != null
+          && !store.isLocationUnknown(current.id)
+          && _messageBelongsInFetchedView(current)) {
+        byId[m.id] = current;
+      }
+    }
+    for (final m in result.messages) {
+      final current = store.messages[m.id] ?? m;
+      if (_messageBelongsInFetchedView(current)) {
+        byId[current.id] = current;
+      }
+    }
+
+    final merged = byId.values.toList()..sort((a, b) => a.id.compareTo(b.id));
+
+    assert(() {
+      if (wasLive) {
+        _debugCheckLiveRevalidation(l, h, oldContentsById, merged);
+      }
+      return true;
+    }());
+
+    final belowL = merged.any((m) => m.id < l);
+    final aboveH = merged.any((m) => m.id > h);
+    _haveOldest = result.foundOldest || (belowL && _haveOldest);
+    _haveNewest = result.foundNewest || (aboveH && _haveNewest);
+    _atKnownNewest = haveNewest;
+    _oldestFetchedMessageId = result.foundOldest
+      ? (merged.firstOrNull?.id ?? _oldestFetchedMessageId)
+      : _minNullable(_oldestFetchedMessageId, result.messages.firstOrNull?.id);
+    _newestFetchedMessageId = result.foundNewest
+      ? (merged.lastOrNull?.id ?? _newestFetchedMessageId)
+      : _maxNullable(_newestFetchedMessageId, result.messages.lastOrNull?.id);
+
+    messages
+      ..clear()
+      ..addAll(merged);
+    contents.clear();
+    for (final m in merged) {
+      final prev = oldContentsById[m.id];
+      if (prev != null
+          && prev.$1.content == m.content
+          && prev.$1.poll == null
+          && m.poll == null) {
+        contents.add(prev.$2);
+      } else {
+        contents.add(parseMessageContent(m));
+      }
+    }
+
+    if (merged.isEmpty) {
+      middleMessage = 0;
+    } else if (anchor == AnchorCode.newest
+        && wasAtEnd
+        && oldTopId != null
+        && merged.last.id > oldTopId) {
+      middleMessage = merged.length - 1;
+    } else if (oldMiddleId != null) {
+      final idx = merged.indexWhere((m) => m.id >= oldMiddleId);
+      middleMessage = idx == -1 ? merged.length - 1 : idx;
+    } else {
+      final idx = merged.indexWhere((m) => m.id >= result.anchor);
+      middleMessage = idx == -1 ? merged.length - 1 : idx;
+    }
+
+    _reconcileOutboxMessages();
+    _reprocessAll();
+  }
+
+  void _debugCheckLiveRevalidation(
+    int l,
+    int h,
+    Map<int, (Message, ZulipMessageContent)> oldContentsById,
+    List<Message> merged,
+  ) {
+    final mergedById = <int, Message>{for (final m in merged) m.id: m};
+    for (final m in merged) {
+      if (m.id < l || m.id > h) continue;
+      final prev = oldContentsById[m.id];
+      if (prev == null) {
+        _reportLiveRevalidationChanged('added message ${m.id}');
+        return;
+      }
+      if (!identical(prev.$1, m)) {
+        _reportLiveRevalidationChanged('replaced message ${m.id}');
+        return;
+      }
+    }
+    for (final id in oldContentsById.keys) {
+      if (id < l || id > h) continue;
+      if (!mergedById.containsKey(id)) {
+        _reportLiveRevalidationChanged('removed message $id');
+        return;
+      }
+    }
+  }
+
+  void _reportLiveRevalidationChanged(String detail) {
+    final callback = MessageListView.debugOnLiveRevalidationChanged;
+    if (callback != null) {
+      callback(this, detail);
+    } else {
+      assert(debugLog('revalidation changed live data ($narrow): $detail'));
+    }
+  }
+
+  static int? _minNullable(int? a, int? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a < b ? a : b;
+  }
+
+  static int? _maxNullable(int? a, int? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a > b ? a : b;
+  }
+
+  void _populateFromResult({
+    required List<Message> messages,
+    required int anchorId,
+    required bool foundOldest,
+    required bool foundNewest,
+    bool? atKnownNewest,
+  }) {
+    _oldestFetchedMessageId = messages.firstOrNull?.id;
+    _newestFetchedMessageId = messages.lastOrNull?.id;
 
     // The bottom slice will start at the "anchor message".
     // This is the first visible message at or past [anchor] if any,
     // else the last visible message if any.  [reachedAnchor] helps track that.
     bool reachedAnchor = false;
-    for (final message in result.messages) {
-      if (!_messageVisible(message)) continue;
+    for (final message in messages) {
+      if (!_messageBelongsInFetchedView(message)) continue;
       if (!reachedAnchor) {
         // Push the previous message into the top slice.
-        middleMessage = messages.length;
+        middleMessage = this.messages.length;
         // We could interpret [anchor] for ourselves; but the server has already
         // done that work, reducing it to an int, `result.anchor`.  So use that.
-        reachedAnchor = message.id >= result.anchor;
+        reachedAnchor = message.id >= anchorId;
       }
       _addMessage(message);
     }
-    _haveOldest = result.foundOldest;
-    _haveNewest = result.foundNewest;
+    _haveOldest = foundOldest;
+    _haveNewest = foundNewest;
+    _atKnownNewest = atKnownNewest ?? foundNewest;
 
-    if (haveNewest) {
+    if (_canShowOutbox) {
       _syncOutboxMessagesFromStore();
     }
+  }
 
-    _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchInitial);
+  /// Completed to cut short the backoff wait in progress, if any,
+  /// in the retry loop of [fetchInitial].
+  ///
+  /// See [handleEventStreamRecovered].
+  Completer<void>? _fetchInitialBackoffWake;
+
+  /// Called when the store's event stream has recovered from failures:
+  /// [PerAccountStore.isRecoveringEventStream] has become false.
+  ///
+  /// If [fetchInitial] is waiting to retry, this makes it retry now,
+  /// because the network is probably working again.
+  ///
+  /// If [fetchInitial] has a request in flight
+  /// that was sent while the event stream was recovering,
+  /// the request may be stuck on a dead connection;
+  /// this aborts it, so that [fetchInitial] retries now.
+  /// If the request in flight was sent otherwise,
+  /// and goes on to fail, [fetchInitial] retries without waiting.
+  void handleEventStreamRecovered() {
+    if (_fetchInitialAttempt case final attempt?) {
+      attempt.retryPromptly = true;
+      if (attempt.sentWhileRecovering) attempt.abort();
+    }
+    final wake = _fetchInitialBackoffWake;
+    _fetchInitialBackoffWake = null;
+    wake?.complete();
+  }
+
+  /// Handle a [ConnectivityMonitor.retrySignals] event:
+  /// the network changed.
+  ///
+  /// A [fetchInitial] request sent before the change
+  /// may be stuck on a dead connection; abort it,
+  /// so that [fetchInitial] retries now on the new network.
+  ///
+  /// Compare [UpdateMachine]'s handling of the same signal.
+  void _handleConnectivityRetrySignal(void _) {
+    final attempt = _fetchInitialAttempt;
+    if (attempt == null) return;
+    if (attempt.connectivityCount == store.connectivityMonitor.updateCount) {
+      // The request was sent after the change.
+      return;
+    }
+    attempt.retryPromptly = true;
+    attempt.abort();
   }
 
   /// Update [narrow] for the result of a "with" narrow (topic permalink) fetch.
@@ -1003,26 +2045,130 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   Future<void> fetchOlder() async {
     assert(!_disposed);
     if (haveOldest) return;
+    if (_revalidation != RevalidationState.none) {
+      if (_localOlderBusy) return;
+      _localOlderBusy = true;
+      final bool didLoad;
+      try {
+        if (_showingSavedMessages && _usesSavedMessagesFallback(narrow)) {
+          didLoad = await _fetchOlderSavedMessagesAsync();
+        } else if (store.dbActive) {
+          didLoad = await _fetchOlderLocallyAsync();
+        } else {
+          didLoad = _fetchOlderLocally();
+        }
+      } finally {
+        _localOlderBusy = false;
+      }
+      if (!_disposed && !didLoad && !_haveOldest
+          && (_revalidation == RevalidationState.failing
+              || !store.connectivityMonitor.hasConnectivity)
+          && !_exhaustedLocalOlder) {
+        _exhaustedLocalOlder = true;
+        notifyListeners();
+      }
+      return;
+    }
     if (busyFetchingMore) return;
     assert(fetched);
     assert(oldestFetchedMessageId != null);
+
+    final generation = this.generation;
+    final anchorId = oldestFetchedMessageId!;
+    final needsNetworkCatchUp = !_networkHaveOldest
+      && _networkOldestId != null
+      && _networkOldestId! > anchorId;
+    var networkDone = false;
+    if (!needsNetworkCatchUp) {
+      if (store.dbActive) {
+        if (store.hasLiveLocalPaginationCoverage(
+            narrow, anchorId: anchorId, older: true)) {
+          final didLoad = await _fetchOlderLocallyAsync(
+            requireRevalidation: false,
+            afterFailure: false,
+          );
+          if (_disposed || this.generation != generation) return;
+          if (didLoad) {
+            _networkOldestId = _oldestFetchedMessageId;
+            _networkHaveOldest = _haveOldest;
+            return;
+          }
+        } else {
+          unawaited(store.localWindowAsync(
+            narrow,
+            NumericAnchor(anchorId),
+            kMessageListFetchBatchSize,
+            0,
+            afterFailure: false,
+          ).then((window) {
+            if (networkDone || _disposed || this.generation != generation
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            if (window == null) return;
+            _applyOlderLocalWindow(window, anchorId);
+          }).catchError((_) {}));
+        }
+      } else {
+        final local = store.localWindow(
+          narrow,
+          NumericAnchor(anchorId),
+          kMessageListFetchBatchSize,
+          0,
+          afterFailure: false,
+        );
+        if (local != null) {
+          final didLoad = _fetchOlderLocally(local: local);
+          if (didLoad && local.chain.status == CoverageStatus.live) {
+            _networkOldestId = _oldestFetchedMessageId;
+            _networkHaveOldest = _haveOldest;
+            return;
+          }
+        }
+      }
+    }
+
+    final networkAnchorId = _networkOldestId ?? oldestFetchedMessageId!;
     await _fetchMore(
-      anchor: NumericAnchor(oldestFetchedMessageId!),
+      anchor: NumericAnchor(networkAnchorId),
       numBefore: kMessageListFetchBatchSize,
       numAfter: 0,
-      processResult: (result) {
+      processResult: (result, ticket) {
+        networkDone = true;
         if (result.messages.isNotEmpty) {
-          _oldestFetchedMessageId = result.messages.first.id;
+          _networkOldestId = result.messages.first.id;
+          _oldestFetchedMessageId = _minNullable(
+            _oldestFetchedMessageId, result.messages.first.id);
         }
-        store.reconcileMessages(result.messages);
+        _networkHaveOldest = result.foundOldest;
+        store.reconcileMessages(
+          result.messages,
+          rawMessages: result.rawMessages,
+          ticket: ticket,
+          requester: this,
+          coverageRequest: FetchCoverageRequest(
+            narrow: narrow,
+            numBefore: kMessageListFetchBatchSize,
+            numAfter: 0,
+            includeAnchor: false,
+            foundOldest: result.foundOldest,
+            foundNewest: result.foundNewest,
+            historyLimited: result.historyLimited,
+            resolvedAnchor: result.anchor,
+          ),
+        );
         store.recentSenders.handleMessages(result.messages); // TODO(#824)
+        if (_disposed || this.generation != generation) return;
 
-        final fetchedMessages = _allMessagesVisible
-          ? result.messages // Avoid unnecessarily copying the list.
-          : result.messages.where(_messageVisible);
-
-        _insertAllMessages(0, fetchedMessages);
-        _haveOldest = result.foundOldest;
+        if (messages.isEmpty || result.messages.isEmpty
+            || result.messages.last.id < messages.first.id) {
+          final fetchedMessages = result.messages.where(_messageBelongsInFetchedView);
+          _insertAllMessages(0, fetchedMessages);
+        } else {
+          _mergeSortedMessages(result.messages);
+        }
+        _haveOldest = _haveOldest || result.foundOldest;
+        _maybeClearSupersededStalePiece();
       });
   }
 
@@ -1037,38 +2183,377 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   Future<void> fetchNewer() async {
     assert(!_disposed);
     if (haveNewest) return;
+    if (_revalidation != RevalidationState.none) {
+      if (_localNewerBusy) return;
+      _localNewerBusy = true;
+      final bool didLoad;
+      try {
+        if (store.dbActive) {
+          didLoad = await _fetchNewerLocallyAsync();
+        } else {
+          didLoad = _fetchNewerLocally();
+        }
+      } finally {
+        _localNewerBusy = false;
+      }
+      if (!_disposed && !didLoad && !_haveNewest && !_anchorFallback
+          && (_revalidation == RevalidationState.failing
+              || !store.connectivityMonitor.hasConnectivity)
+          && !_exhaustedLocalNewer) {
+        _exhaustedLocalNewer = true;
+        notifyListeners();
+      }
+      return;
+    }
     if (busyFetchingMore) return;
     assert(fetched);
     assert(newestFetchedMessageId != null);
-    await _fetchMore(
-      anchor: NumericAnchor(newestFetchedMessageId!),
-      numBefore: 0,
-      numAfter: kMessageListFetchBatchSize,
-      processResult: (result) {
-        if (result.messages.isNotEmpty) {
-          _newestFetchedMessageId = result.messages.last.id;
-        }
-        store.reconcileMessages(result.messages);
-        store.recentSenders.handleMessages(result.messages); // TODO(#824)
 
-        for (final message in result.messages) {
-          if (_messageVisible(message)) {
-            _addMessage(message);
+    final generation = this.generation;
+    final anchorId = newestFetchedMessageId!;
+    final needsNetworkCatchUp = _haveNewestInvalidated
+      || (!_networkHaveNewest
+          && _networkNewestId != null
+          && _networkNewestId! < anchorId);
+    var networkDone = false;
+    if (!needsNetworkCatchUp) {
+      if (store.dbActive) {
+        if (store.hasLiveLocalPaginationCoverage(
+            narrow, anchorId: anchorId, older: false)) {
+          final didLoad = await _fetchNewerLocallyAsync(
+            requireRevalidation: false,
+            afterFailure: false,
+          );
+          if (_disposed || this.generation != generation) return;
+          if (didLoad) {
+            _networkNewestId = _newestFetchedMessageId;
+            _networkHaveNewest = _haveNewest;
+            return;
+          }
+        } else {
+          unawaited(store.localWindowAsync(
+            narrow,
+            NumericAnchor(anchorId),
+            0,
+            kMessageListFetchBatchSize,
+            afterFailure: false,
+          ).then((window) {
+            if (networkDone || _disposed || this.generation != generation
+                || _revalidation != RevalidationState.none) {
+              return;
+            }
+            if (window == null) return;
+            _applyNewerLocalWindow(window, anchorId);
+          }).catchError((_) {}));
+        }
+      } else {
+        final local = store.localWindow(
+          narrow,
+          NumericAnchor(anchorId),
+          0,
+          kMessageListFetchBatchSize,
+          afterFailure: false,
+        );
+        if (local != null) {
+          final didLoad = _fetchNewerLocally(local: local);
+          if (didLoad && local.chain.status == CoverageStatus.live) {
+            _networkNewestId = _newestFetchedMessageId;
+            _networkHaveNewest = _haveNewest;
+            return;
           }
         }
-        _haveNewest = result.foundNewest;
+      }
+    }
 
-        if (haveNewest) {
-          _syncOutboxMessagesFromStore();
+    final networkAnchorId = _networkNewestId ?? newestFetchedMessageId!;
+    await _fetchMore(
+      anchor: NumericAnchor(networkAnchorId),
+      numBefore: 0,
+      numAfter: kMessageListFetchBatchSize,
+      processResult: (result, ticket) {
+        networkDone = true;
+        if (result.messages.isNotEmpty) {
+          _networkNewestId = result.messages.last.id;
+          _newestFetchedMessageId = _maxNullable(
+            _newestFetchedMessageId, result.messages.last.id);
+        }
+        _haveNewestInvalidated = false;
+        _networkHaveNewest = result.foundNewest;
+        store.reconcileMessages(
+          result.messages,
+          rawMessages: result.rawMessages,
+          ticket: ticket,
+          requester: this,
+          coverageRequest: FetchCoverageRequest(
+            narrow: narrow,
+            numBefore: 0,
+            numAfter: kMessageListFetchBatchSize,
+            includeAnchor: false,
+            foundOldest: result.foundOldest,
+            foundNewest: result.foundNewest,
+            historyLimited: result.historyLimited,
+            resolvedAnchor: result.anchor,
+          ),
+        );
+        store.recentSenders.handleMessages(result.messages); // TODO(#824)
+        if (_disposed || this.generation != generation) return;
+
+        if (messages.isEmpty || result.messages.isEmpty
+            || result.messages.first.id > messages.last.id) {
+          _removeOutboxMessageItems();
+          for (final message in result.messages) {
+            if (_messageBelongsInFetchedView(message)) {
+              _addMessage(message);
+            }
+          }
+          _reprocessOutboxMessages();
+        } else {
+          _mergeSortedMessages(result.messages);
+        }
+        _haveNewest = _haveNewest || result.foundNewest;
+        _atKnownNewest = _atKnownNewest || _haveNewest;
+        _maybeClearSupersededStalePiece();
+
+        if (_canShowOutbox) {
+          _reconcileOutboxMessages();
+          _reprocessOutboxMessages();
         }
       });
   }
 
+  void _mergeSortedMessages(List<Message> incoming) {
+    final oldContentsById = <int, (Message, ZulipMessageContent)>{
+      for (int i = 0; i < messages.length; i++)
+        messages[i].id: (messages[i], contents[i]),
+    };
+    final oldMiddleId = messages.isNotEmpty && middleMessage < messages.length
+      ? messages[middleMessage].id
+      : null;
+
+    final byId = <int, Message>{};
+    for (final m in messages) {
+      final current = store.messages[m.id];
+      if (current != null
+          && !store.isLocationUnknown(current.id)
+          && _messageBelongsInFetchedView(current)) {
+        byId[current.id] = current;
+      }
+    }
+    for (final m in incoming) {
+      final current = store.messages[m.id] ?? m;
+      if (_messageBelongsInFetchedView(current)) {
+        byId[current.id] = current;
+      } else {
+        byId.remove(m.id);
+      }
+    }
+
+    final merged = byId.values.toList()..sort((a, b) => a.id.compareTo(b.id));
+    messages
+      ..clear()
+      ..addAll(merged);
+    contents
+      ..clear()
+      ..addAll(merged.map((m) {
+        final prev = oldContentsById[m.id];
+        if (prev != null && identical(prev.$1, m)) return prev.$2;
+        return parseMessageContent(m);
+      }));
+
+    if (merged.isEmpty) {
+      middleMessage = 0;
+    } else if (oldMiddleId != null) {
+      final idx = merged.indexWhere((m) => m.id >= oldMiddleId);
+      middleMessage = idx == -1 ? merged.length - 1 : idx;
+    }
+    _reprocessAll();
+  }
+
+  bool _fetchOlderLocally({LocalWindow? local}) {
+    final anchorId = oldestFetchedMessageId;
+    if (anchorId == null) return false;
+    final window = local ?? store.localWindow(
+      narrow,
+      NumericAnchor(anchorId),
+      kMessageListFetchBatchSize,
+      0,
+      afterFailure: true,
+    );
+    if (window == null) return false;
+    return _applyOlderLocalWindow(window, anchorId);
+  }
+
+  Future<bool> _runAsyncLocalPagination({
+    required int anchorId,
+    required int before,
+    required int after,
+    required bool afterFailure,
+    required bool requireRevalidation,
+    required bool Function(LocalWindow window) apply,
+  }) async {
+    final generation = this.generation;
+    if (!requireRevalidation) {
+      _setStatus(FetchingStatus.fetchingMore, was: FetchingStatus.idle);
+    }
+    final LocalWindow? window;
+    try {
+      window = await store.localWindowAsync(
+        narrow,
+        NumericAnchor(anchorId),
+        before,
+        after,
+        afterFailure: afterFailure,
+      );
+    } catch (_) {
+      if (!requireRevalidation && !_disposed && !store.disposed
+          && this.generation == generation
+          && _status == FetchingStatus.fetchingMore) {
+        _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchingMore);
+      }
+      rethrow;
+    }
+    if (_disposed || store.disposed || this.generation != generation) {
+      return false;
+    }
+    if (!requireRevalidation && _status == FetchingStatus.fetchingMore) {
+      _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchingMore);
+    }
+    if (window == null) return false;
+    if (requireRevalidation && _revalidation == RevalidationState.none) {
+      return false;
+    }
+    return apply(window);
+  }
+
+  Future<bool> _fetchOlderLocallyAsync({
+    bool requireRevalidation = true,
+    bool afterFailure = true,
+  }) async {
+    final anchorId = oldestFetchedMessageId;
+    if (anchorId == null) return false;
+    return _runAsyncLocalPagination(
+      anchorId: anchorId,
+      before: kMessageListFetchBatchSize,
+      after: 0,
+      afterFailure: afterFailure,
+      requireRevalidation: requireRevalidation,
+      apply: (window) => _applyOlderLocalWindow(window, anchorId),
+    );
+  }
+
+  bool _applyOlderLocalWindow(LocalWindow window, int anchorId) {
+    final olderMessages = [
+      for (final m in window.messages)
+        if (m.id < anchorId && _messageBelongsInFetchedView(m)) m,
+    ];
+    if (olderMessages.isEmpty && !window.haveOldest) return false;
+    if (olderMessages.isNotEmpty) {
+      _oldestFetchedMessageId = olderMessages.first.id;
+      _insertAllMessages(0, olderMessages);
+    }
+    _haveOldest = window.haveOldest;
+    _exhaustedLocalOlder = false;
+    _mergeContentStateFromChain(window.chain);
+    _syncStaleBannerTimer();
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> _fetchOlderSavedMessagesAsync() async {
+    final currentNarrow = narrow;
+    if (!_usesSavedMessagesFallback(currentNarrow)) return false;
+    final anchorId = oldestFetchedMessageId;
+    if (anchorId == null) return false;
+    final generation = this.generation;
+    final older = await store.savedMessagesForNarrow(
+      currentNarrow,
+      beforeMessageId: anchorId,
+      limit: kMessageListFetchBatchSize,
+    );
+    if (_disposed || store.disposed || this.generation != generation
+        || _revalidation == RevalidationState.none
+        || !_showingSavedMessages
+        || older == null) {
+      return false;
+    }
+    final olderMessages = [
+      for (final m in older.messages)
+        if (m.id < anchorId && _messageBelongsInFetchedView(m)) m,
+    ];
+    if (olderMessages.isEmpty) return false;
+    _oldestFetchedMessageId = olderMessages.first.id;
+    _insertAllMessages(0, olderMessages);
+    _exhaustedLocalOlder = !older.hasMoreOlder;
+    notifyListeners();
+    return true;
+  }
+
+  bool _fetchNewerLocally({LocalWindow? local}) {
+    if (_atKnownNewest) return false;
+    final anchorId = newestFetchedMessageId;
+    if (anchorId == null) return false;
+    final window = local ?? store.localWindow(
+      narrow,
+      NumericAnchor(anchorId),
+      0,
+      kMessageListFetchBatchSize,
+      afterFailure: true,
+    );
+    if (window == null) return false;
+    return _applyNewerLocalWindow(window, anchorId);
+  }
+
+  Future<bool> _fetchNewerLocallyAsync({
+    bool requireRevalidation = true,
+    bool afterFailure = true,
+  }) async {
+    if (_atKnownNewest) return false;
+    final anchorId = newestFetchedMessageId;
+    if (anchorId == null) return false;
+    return _runAsyncLocalPagination(
+      anchorId: anchorId,
+      before: 0,
+      after: kMessageListFetchBatchSize,
+      afterFailure: afterFailure,
+      requireRevalidation: requireRevalidation,
+      apply: (window) => _applyNewerLocalWindow(window, anchorId),
+    );
+  }
+
+  bool _applyNewerLocalWindow(LocalWindow window, int anchorId) {
+    final newerMessages = [
+      for (final m in window.messages)
+        if (m.id > anchorId && _messageBelongsInFetchedView(m)) m,
+    ];
+    final effectiveAtKnownNewest = _revalidation != RevalidationState.none
+      ? window.atKnownNewest
+      : window.haveNewest;
+    if (newerMessages.isEmpty && !effectiveAtKnownNewest) return false;
+    if (newerMessages.isNotEmpty) {
+      _newestFetchedMessageId = newerMessages.last.id;
+      _removeOutboxMessageItems();
+      for (final m in newerMessages) {
+        _addMessage(m);
+      }
+    }
+    _haveNewest = window.haveNewest;
+    _atKnownNewest = effectiveAtKnownNewest;
+    _exhaustedLocalNewer = false;
+    _mergeContentStateFromChain(window.chain);
+    _syncStaleBannerTimer();
+    if (_canShowOutbox) {
+      _reconcileOutboxMessages();
+      _reprocessOutboxMessages();
+    }
+    notifyListeners();
+    return true;
+  }
+
   Future<void> _fetchMore({
-    required Anchor anchor,
+    required NumericAnchor anchor,
     required int numBefore,
     required int numAfter,
-    required void Function(GetMessagesResult) processResult,
+    required void Function(GetMessagesResult, FetchTicket) processResult,
   }) async {
     assert(narrow is! TopicNarrow
       // We only intend to send "with" in [fetchInitial]; see there.
@@ -1076,6 +2561,12 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     _setStatus(FetchingStatus.fetchingMore, was: FetchingStatus.idle);
     final generation = this.generation;
     bool hasFetchError = false;
+    bool isConnectionFailure = false;
+    final int? narrowChannelId = switch (narrow) {
+      ChannelNarrow(:final channelId) || TopicNarrow(:final channelId) => channelId,
+      _ => null,
+    };
+    final ticket = store.openFetchTicket(channelId: narrowChannelId);
     try {
       final GetMessagesResult result;
       try {
@@ -1089,14 +2580,23 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         );
       } catch (e) {
         hasFetchError = true;
+        isConnectionFailure = e is NetworkException
+          && e.kind == NetworkExceptionKind.connectionFailed;
         rethrow;
       }
       if (_disposed || this.generation > generation) return;
 
-      processResult(result);
+      processResult(result, ticket);
     } finally {
+      store.closeFetchTicket(ticket);
       if (!_disposed && this.generation == generation) {
         if (hasFetchError) {
+          if (numBefore > 0) {
+            _olderPaginationFailing = store.coverageEnabled && isConnectionFailure;
+          }
+          if (numAfter > 0) {
+            _newerPaginationFailing = store.coverageEnabled && isConnectionFailure;
+          }
           _setStatus(FetchingStatus.backoff, was: FetchingStatus.fetchingMore);
           unawaited((_fetchBackoffMachine ??= BackoffMachine())
             .wait().then((_) {
@@ -1104,6 +2604,8 @@ class MessageListView with ChangeNotifier, _MessageSequence {
               _setStatus(FetchingStatus.idle, was: FetchingStatus.backoff);
             }));
         } else {
+          if (numBefore > 0) _olderPaginationFailing = false;
+          if (numAfter > 0) _newerPaginationFailing = false;
           _setStatus(FetchingStatus.idle, was: FetchingStatus.fetchingMore);
           _fetchBackoffMachine = null;
         }
@@ -1119,28 +2621,78 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     assert(!_disposed);
     assert(fetched);
     assert(!haveNewest);
+    if (_anchor == AnchorCode.newest && _revalidation != RevalidationState.none) {
+      if (store.dbActive) {
+        unawaited(_jumpToEndLocallyAsync());
+      } else {
+        final pair = _findLocalWindow(
+          afterFailure: _revalidation == RevalidationState.failing);
+        if (pair != null) {
+          _applyLocalJump(pair.$1, usedFallback: pair.$2);
+          return;
+        }
+        _reset();
+        notifyListeners();
+        unawaited(fetchInitial());
+      }
+      return;
+    }
     // [anchor] is usually not [AnchorCode.newest] here, but it can be,
     // when [haveNewest] was invalidated.  See [handleMessagesLearnedFromFetch].
+    final skipInitialLocal = _haveNewestInvalidated;
     _anchor = AnchorCode.newest;
     _reset();
     notifyListeners();
-    fetchInitial();
+    unawaited(fetchInitial(skipInitialLocal: skipInitialLocal));
+  }
+
+  Future<void> _jumpToEndLocallyAsync() async {
+    final generation = this.generation;
+    final pair = await _findLocalWindowAsync(
+      afterFailure: _revalidation == RevalidationState.failing);
+    if (_disposed || this.generation != generation) return;
+    if (pair != null && _revalidation != RevalidationState.none) {
+      _applyLocalJump(pair.$1, usedFallback: pair.$2);
+      return;
+    }
+    if (_revalidation == RevalidationState.none) return;
+    _reset();
+    notifyListeners();
+    unawaited(fetchInitial());
+  }
+
+  void _applyLocalJump(LocalWindow local, {required bool usedFallback}) {
+    _clearContents();
+    _anchorFallback = usedFallback;
+    _localWindowWasLive = local.chain.status == CoverageStatus.live && !usedFallback;
+    _setContentStateFromChain(local.chain);
+    _populateFromResult(
+      messages: local.messages,
+      anchorId: local.anchorId,
+      foundOldest: local.haveOldest,
+      foundNewest: local.haveNewest,
+      atKnownNewest: local.atKnownNewest,
+    );
+    _exhaustedLocalOlder = false;
+    _exhaustedLocalNewer = false;
+    _syncStaleBannerTimer();
+    notifyListeners();
   }
 
   bool _shouldAddOutboxMessage(OutboxMessage outboxMessage) {
-    assert(haveNewest);
+    assert(_canShowOutbox);
     return !outboxMessage.hidden && _messageBelongsHere(outboxMessage);
   }
 
   /// Reads [MessageStore.outboxMessages] and copies to [outboxMessages]
   /// the ones belonging to this view.
   ///
-  /// This should only be called when [haveNewest] is true
+  /// This should only be called when [haveNewest] or [atKnownNewest] is true
   /// because outbox messages are considered newer than regular messages.
   ///
   /// This does not call [notifyListeners].
   void _syncOutboxMessagesFromStore() {
-    assert(haveNewest);
+    assert(_canShowOutbox);
     assert(outboxMessages.isEmpty);
     for (final outboxMessage in store.outboxMessages.values) {
       if (_shouldAddOutboxMessage(outboxMessage)) {
@@ -1149,11 +2701,29 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
+  void _reconcileOutboxMessages() {
+    if (!_canShowOutbox) {
+      outboxMessages.clear();
+      return;
+    }
+    outboxMessages.removeWhere((om) =>
+      om.messageId != null && _findMessageWithId(om.messageId!) != -1);
+    for (final outboxMessage in store.outboxMessages.values) {
+      if (_shouldAddOutboxMessage(outboxMessage)
+          && (outboxMessage.messageId == null
+              || _findMessageWithId(outboxMessage.messageId!) == -1)
+          && outboxMessages.none(
+            (existing) => existing.localMessageId == outboxMessage.localMessageId)) {
+        outboxMessages.add(outboxMessage);
+      }
+    }
+  }
+
   /// Add [outboxMessage] if it belongs to the view.
   void addOutboxMessage(OutboxMessage outboxMessage) {
-    // We don't have the newest messages;
+    // We don't have the newest known messages;
     // we shouldn't show any outbox messages until we do.
-    if (!haveNewest) return;
+    if (!_canShowOutbox) return;
 
     assert(outboxMessages.none(
       (message) => message.localMessageId == outboxMessage.localMessageId));
@@ -1220,7 +2790,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       if (newlyLearned.any(_messageBelongsHere)) {
         _reset();
         notifyListeners();
-        fetchInitial();
+        unawaited(fetchInitial(skipInitialLocal: true));
       }
       return;
     }
@@ -1232,6 +2802,55 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     if (!hasNewerMessage) return;
     _invalidateHaveNewest();
     notifyListeners();
+  }
+
+  /// Update messages in this view that were clobbered during
+  /// [MessageStoreImpl.reconcileMessages].
+  void handleMessagesClobbered(
+    List<({Message oldMessage, Message newMessage})> clobbered, {
+    bool isRequester = false,
+  }) {
+    bool swappedAny = false;
+    List<({Message oldMessage, Message newMessage})>? relocated;
+    for (final entry in clobbered) {
+      final (:oldMessage, :newMessage) = entry;
+      final isRelocated = !oldMessage.conversation.isSameAs(newMessage.conversation);
+      final index = _findMessageWithId(newMessage.id);
+      if (index != -1) {
+        _replaceMessage(index, newMessage,
+          reuseContent: newMessage.content == oldMessage.content
+            && oldMessage.poll == null
+            && newMessage.poll == null);
+        if (!isRelocated) swappedAny = true;
+      }
+      if (isRelocated) {
+        (relocated ??= []).add(entry);
+      }
+    }
+    if (swappedAny) {
+      _reprocessAll();
+      notifyListeners();
+    }
+    if (relocated != null) {
+      for (final (:oldMessage, :newMessage) in relocated) {
+        if (oldMessage is StreamMessage && newMessage is StreamMessage) {
+          messagesMoved(
+            messageMove: UpdateMessageMoveData(
+              origStreamId: oldMessage.streamId,
+              newStreamId: newMessage.streamId,
+              origTopic: oldMessage.topic,
+              newTopic: newMessage.topic,
+              propagateMode: PropagateMode.changeOne,
+            ),
+            messageIds: [newMessage.id],
+            allowRefetch: !isRequester,
+          );
+        } else {
+          // A message cannot relocate to or from a DM in Zulip.
+          assert(false);
+        }
+      }
+    }
   }
 
   void handleUserTopicEvent(UserTopicEvent event) {
@@ -1302,6 +2921,108 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
+  /// Update for [event], a change to the user's subscriptions,
+  /// which the store has already applied.
+  ///
+  /// Of the narrows, only the combined feed's [_messageVisible] depends on
+  /// whether the user is subscribed to a channel
+  /// (see [ChannelStore.isTopicVisible]).
+  /// On unsubscribing from a channel,
+  /// this removes the channel's messages that are no longer visible there.
+  /// On subscribing to a channel unmuted,
+  /// some of its messages may become visible,
+  /// so this refetches the list from scratch, as for unmuting a topic.
+  /// (Subscribing to a channel muted changes no message's visibility:
+  /// a topic the user has unmuted or follows is visible either way,
+  /// and any other topic is hidden either way.)
+  ///
+  /// A view of a channel, or of a topic in it, shows the same messages
+  /// whether or not the user is subscribed.
+  /// But while the user isn't subscribed,
+  /// the event queue doesn't bring the channel's new messages,
+  /// so the view may lack some.
+  /// On subscribing to the channel, this refetches such a view from scratch,
+  /// so it doesn't go on to add new messages after a gap.
+  void handleSubscriptionEvent(SubscriptionEvent event) {
+    switch (narrow) {
+      case CombinedFeedNarrow():
+        break;
+
+      case ChannelNarrow(:final channelId):
+      case TopicNarrow(:final channelId):
+        switch (event) {
+          case SubscriptionAddEvent(:final subscriptions)
+              when subscriptions.any((s) => s.streamId == channelId):
+            // Restart even a fetch still in progress: its result may have been
+            // computed before the user subscribed, and so lack messages
+            // which no event will bring either.
+            if (_status != FetchingStatus.unstarted) {
+              _reset();
+              notifyListeners();
+              unawaited(fetchInitial());
+            }
+          case SubscriptionRemoveEvent(:final channelIds)
+              when channelIds.contains(channelId) && store.dbActive:
+            _syncStaleBannerTimer();
+            notifyListeners();
+          default:
+            break;
+        }
+        return;
+
+      case DmNarrow():
+      case MentionsNarrow():
+      case StarredMessagesNarrow():
+      case KeywordSearchNarrow():
+        return;
+    }
+
+    switch (event) {
+      case SubscriptionAddEvent(:final subscriptions):
+        if (subscriptions.every((subscription) => subscription.isMuted)) return;
+        _refetchFromScratch();
+
+      case SubscriptionRemoveEvent(:final channelIds):
+        _removeMessagesNoLongerVisible(channelIds: channelIds);
+
+      case SubscriptionUpdateEvent():
+        // Handled in [handleSubscriptionUpdateEvent], before `_channels` updates.
+        return;
+
+      case SubscriptionPeerAddEvent():
+      case SubscriptionPeerRemoveEvent():
+        return;
+    }
+  }
+
+  /// Remove the messages in [channelIds], including outbox messages,
+  /// that [_messageVisible] no longer allows.
+  void _removeMessagesNoLongerVisible({required Iterable<int> channelIds}) {
+    bool shouldRemove(MessageBase message) => switch (message.conversation) {
+      StreamConversation(:final streamId) =>
+        channelIds.contains(streamId) && !_messageVisible(message),
+      DmConversation() => false,
+    };
+    bool removed = _removeMessagesWhere(shouldRemove);
+    removed |= _removeOutboxMessagesWhere(shouldRemove);
+    if (removed) {
+      notifyListeners();
+    }
+  }
+
+  /// Refetch from scratch, if fetched,
+  /// because messages this view lacks may now belong in it.
+  void _refetchFromScratch() {
+    // TODO take the messages from the message store, where it has them
+    // For now, we simplify the task by just refetching this message list
+    // from scratch.
+    if (fetched) {
+      _reset();
+      notifyListeners();
+      unawaited(fetchInitial());
+    }
+  }
+
   void handleMutedUsersEvent(MutedUsersEvent event) {
     switch (_mutedUsersEventWillAffectVisibility(event)) {
       case MutedUsersVisibilityEffect.none:
@@ -1336,9 +3057,36 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     }
   }
 
+  /// Remove [messageIds] that were forgotten by an authoritative fetch
+  /// of this view's narrow or a containing narrow.
+  void handleMessagesForgotten(List<int> messageIds) {
+    if (_removeMessagesById(messageIds)) {
+      notifyListeners();
+    }
+  }
+
+  /// Remove [messageIds] purged under the realm or channel retention policy.
+  void handleMessagesPurgedForRetention(Iterable<int> messageIds) {
+    if (_removeMessagesById(messageIds)) {
+      notifyListeners();
+    }
+  }
+
+  /// Remove all messages in [channelId] after access loss or channel deletion.
+  void handleChannelPurged(int channelId) {
+    final idsToRemove = [
+      for (final message in messages)
+        if (message is StreamMessage && message.streamId == channelId)
+          message.id,
+    ];
+    if (idsToRemove.isNotEmpty && _removeMessagesById(idsToRemove)) {
+      notifyListeners();
+    }
+  }
+
   /// Add [MessageEvent.message] to this view if it belongs here,
   /// or adopt the event's copy if we already have the message.
-  void handleMessageEvent(MessageEvent event) {
+  void handleMessageEvent(MessageEvent event, {OutboxMessage? sentOutboxMessage}) {
     final message = event.message;
 
     final index = _findMessageWithId(message.id);
@@ -1356,8 +3104,6 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       // but this message is already here and must stay in sync with the store.
       _replaceMessage(index, message);
       // If we sent this message, drop its outbox counterpart.
-      // (When [haveNewest] is false there are no [outboxMessages], so this
-      // is a no-op; see [_syncOutboxMessagesFromStore].)
       _removeOutboxMessageOfEvent(event);
       // This is a rare race, so the cost of rebuilding [items] is fine.
       // [_reprocessAll] also rebuilds the outbox items, so there's no need
@@ -1373,15 +3119,30 @@ class MessageListView with ChangeNotifier, _MessageSequence {
       return;
     }
     if (!haveNewest) {
-      // This message list's [messages] doesn't yet reach the new end
-      // of the narrow's message history.  (Either [fetchInitial] hasn't yet
-      // completed, or if it has then it was in the middle of history and no
-      // subsequent [fetchNewer] has reached the end.)
-      // So this still-newer message doesn't belong.
-      // Leave it to be found by a subsequent fetch when appropriate.
-      // TODO mitigate this fetch/event race: save message to add to list later,
-      //   in case the fetch that reaches the end is already ongoing and
-      //   didn't include this message.
+      if (atKnownNewest && (sentOutboxMessage != null || event.localMessageId != null)) {
+        if (sentOutboxMessage != null) {
+          final existingIndex = outboxMessages.indexWhere(
+            (om) => om.localMessageId == sentOutboxMessage.localMessageId);
+          if (existingIndex != -1) {
+            _reprocessOutboxMessages();
+            notifyListeners();
+          } else {
+            _addOutboxMessage(sentOutboxMessage);
+            notifyListeners();
+          }
+        }
+        // The event shows the server connection is working; trigger revalidation
+        // so any gap before this message is fetched promptly.
+        if (_revalidation == RevalidationState.failing) {
+          handleEventStreamRecovered();
+        } else if (_revalidation == RevalidationState.none
+            && !busyFetchingMore
+            && newestFetchedMessageId != null) {
+          unawaited(fetchNewer());
+        }
+      }
+      // Leave the server message itself to be found by revalidation / fetchNewer
+      // so we don't append it after an unknown gap.
       return;
     }
 
@@ -1394,9 +3155,11 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // [fetchNewer], so that such a fetch can't return this message again
     // (which would corrupt [messages] with a duplicate).
     _newestFetchedMessageId = message.id;
+    _networkNewestId = message.id;
     // If the view had no messages at all, this message also bounds
     // the history on the other end.
     _oldestFetchedMessageId ??= message.id;
+    _networkOldestId ??= message.id;
     _removeOutboxMessageOfEvent(event);
     _reprocessOutboxMessages();
     notifyListeners();
@@ -1430,7 +3193,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
     // TODO in cases where we do have data to do better, do better.
     _reset();
     notifyListeners();
-    fetchInitial();
+    unawaited(fetchInitial());
   }
 
   void _messagesMovedFromMessageList(List<int> messageIds) {
@@ -1452,6 +3215,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
   void messagesMoved({
     required UpdateMessageMoveData messageMove,
     required List<int> messageIds,
+    bool allowRefetch = true,
   }) {
     final UpdateMessageMoveData(
       :origStreamId, :newStreamId, :origTopic, :newTopic, :propagateMode,
@@ -1468,7 +3232,7 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         switch ((wasVisible, isVisible)) {
           case (false, false): return;
           case (true,  true ): _messagesMovedInternally(messageIds);
-          case (false, true ): _messagesMovedIntoMessageList();
+          case (false, true ): if (allowRefetch) _messagesMovedIntoMessageList();
           case (true,  false): _messagesMovedFromMessageList(messageIds);
         }
 
@@ -1497,17 +3261,19 @@ class MessageListView with ChangeNotifier, _MessageSequence {
         switch ((wasInChannelAndVisible, isInChannelAndVisible)) {
           case (false, false): return;
           case (true,  true ): _messagesMovedInternally(messageIds);
-          case (false, true ): _messagesMovedIntoMessageList();
+          case (false, true ): if (allowRefetch) _messagesMovedIntoMessageList();
           case (true,  false): _messagesMovedFromMessageList(messageIds);
         }
 
       case TopicNarrow(:final channelId, :final topic):
-        final oldMatch = (origStreamId == channelId && origTopic.isSameAs(topic));
-        final newMatch = (newStreamId == channelId && newTopic.isSameAs(topic));
+        final oldMatch = origStreamId == channelId
+          && serverTopicFold(origTopic.apiName) == serverTopicFold(topic.apiName);
+        final newMatch = newStreamId == channelId
+          && serverTopicFold(newTopic.apiName) == serverTopicFold(topic.apiName);
         switch ((oldMatch, newMatch)) {
           case (false, false): return;
           case (true,  true ): return; // TODO(log) when no-op move
-          case (false, true ): _messagesMovedIntoMessageList();
+          case (false, true ): if (allowRefetch) _messagesMovedIntoMessageList();
           case (true,  false):
             _messagesMovedFromMessageList(messageIds);
             _handlePropagateMode(propagateMode, TopicNarrow(newStreamId, newTopic));

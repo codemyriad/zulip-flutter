@@ -1,10 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:zulip/api/model/model.dart';
+import 'package:zulip/model/avatar_url.dart';
 import 'package:zulip/model/store.dart';
 import 'package:zulip/widgets/icons.dart';
 import 'package:zulip/widgets/image.dart';
@@ -142,5 +144,81 @@ void main() {
       debugNetworkImageHttpClientProvider = null;
     });
 
+  });
+
+  group('AvatarImage disk cache', () {
+    late FakeImageHttpClient httpClient;
+    late Uri shownUrl;
+
+    // As in the server's file name for an uploaded avatar.
+    const avatarHash = 'ff062b0fee41738b38c4312bb33bdf3fe2aad463';
+
+    /// Show the avatar for [avatarUrl], with its image already on disk.
+    Future<void> prepare(WidgetTester tester, String avatarUrl, {
+      double size = 30,
+    }) async {
+      addTearDown(testBinding.reset);
+      addTearDown(imageCache.clear);
+      await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
+      final store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+      final user = eg.user(avatarUrl: avatarUrl);
+      await store.addUser(user);
+
+      shownUrl = AvatarUrl.fromUserData(resolvedUrl: store.realmUrl.resolve(avatarUrl),
+        userId: user.userId, realmUrl: store.realmUrl,
+      ).get((tester.view.devicePixelRatio * size).ceil());
+      await testBinding.imageDiskCache.put(eg.selfAccount.id, shownUrl,
+        Uint8List.fromList(kSolidBlueAvatar));
+
+      httpClient = prepareBoringImageHttpClient();
+      await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+        child: AvatarImage(userId: user.userId, size: size)));
+      await tester.pump(); // Load the store.
+      // Let the image load, from the cache or network, and decode;
+      // decoding happens outside the test's fake async.
+      for (int i = 0; i < 50; i++) {
+        final rawImages = tester.widgetList<RawImage>(find.byType(RawImage));
+        if (rawImages.any((w) => w.image != null)) break;
+        await tester.runAsync(() => Future<void>.delayed(Duration(milliseconds: 10)));
+        await tester.pump();
+      }
+      check(tester.widget<RawImage>(find.byType(RawImage)).image).isNotNull();
+    }
+
+    testWidgets('uploaded avatar on realm: no request', (tester) async {
+      await prepare(tester, '/user_avatars/2/$avatarHash.png');
+      check(shownUrl.path).endsWith('/$avatarHash.png');
+      check(httpClient.requestedUrls).isEmpty();
+      debugNetworkImageHttpClientProvider = null;
+    });
+
+    testWidgets('uploaded avatar on realm, medium: no request', (tester) async {
+      await prepare(tester, '/user_avatars/2/$avatarHash.png', size: 100);
+      check(shownUrl.path).endsWith('/$avatarHash-medium.png');
+      check(httpClient.requestedUrls).isEmpty();
+      debugNetworkImageHttpClientProvider = null;
+    });
+
+    testWidgets('uploaded avatar off realm: no request', (tester) async {
+      // As when the server keeps avatars in S3-style storage.
+      await prepare(tester, 'https://uploads.example/2/$avatarHash.png');
+      check(shownUrl.path).endsWith('/$avatarHash.png');
+      check(httpClient.requestedUrls).isEmpty();
+      debugNetworkImageHttpClientProvider = null;
+    });
+
+    testWidgets('uploaded avatar off realm, medium: no request', (tester) async {
+      await prepare(tester, 'https://uploads.example/2/$avatarHash.png', size: 100);
+      check(shownUrl.path).endsWith('/$avatarHash-medium.png');
+      check(httpClient.requestedUrls).isEmpty();
+      debugNetworkImageHttpClientProvider = null;
+    });
+
+    testWidgets('Gravatar: fetch', (tester) async {
+      await prepare(tester,
+        'https://secure.gravatar.com/avatar/abc?d=identicon&version=3');
+      check(httpClient.requestedUrls).single.equals(shownUrl);
+      debugNetworkImageHttpClientProvider = null;
+    });
   });
 }

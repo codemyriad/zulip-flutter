@@ -249,4 +249,42 @@ void main() {
         eg.dmOutboxMessage(from: eg.selfUser, to: []))).isFalse();
     });
   });
+
+  group('serverTopicFold', () {
+    test('ASCII and empty', () {
+      check(serverTopicFold('')).equals('');
+      check(serverTopicFold('hello World 123!')).equals('HELLO WORLD 123!');
+    });
+
+    test('Greek final sigma matches uppercase sigma', () {
+      check(serverTopicFold('τέλος')).equals('ΤΈΛΟΣ');
+      check(serverTopicFold('ΤΈΛΟΣ')).equals('ΤΈΛΟΣ');
+    });
+
+    test('sharp s does not expand to SS and stays distinct from capital sharp s', () {
+      check(serverTopicFold('straße')).equals('STRAßE');
+      check(serverTopicFold('STRAẞE')).equals('STRAẞE');
+      check(serverTopicFold('straße')).not((it) => it.equals(serverTopicFold('STRASSE')));
+    });
+
+    test('ligature fi does not expand to FI', () {
+      check(serverTopicFold('ﬁle')).equals('ﬁLE');
+    });
+  });
+
+  group('coverageKey', () {
+    test('keys per narrow type', () {
+      check(coverageKey(const CombinedFeedNarrow())).isNull();
+      check(coverageKey(const ChannelNarrow(42))).equals('channel:42');
+      check(coverageKey(TopicNarrow(42, eg.t('Hello'), with_: 99)))
+        .equals('topic:42:HELLO');
+      check(coverageKey(TopicNarrow(42, eg.t(''))))
+        .equals('topic:42:');
+      check(coverageKey(DmNarrow.withUsers([7, 3, 12], selfUserId: 7)))
+        .equals('dm:3,7,12');
+      check(coverageKey(const MentionsNarrow())).isNull();
+      check(coverageKey(const StarredMessagesNarrow())).isNull();
+      check(coverageKey(KeywordSearchNarrow('foo'))).isNull();
+    });
+  });
 }

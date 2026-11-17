@@ -13,6 +13,7 @@ InitialSnapshot _$InitialSnapshotFromJson(
 ) => InitialSnapshot(
   queueId: json['queue_id'] as String?,
   lastEventId: (json['last_event_id'] as num).toInt(),
+  maxMessageId: (json['max_message_id'] as num?)?.toInt(),
   zulipFeatureLevel: (json['zulip_feature_level'] as num).toInt(),
   zulipVersion: json['zulip_version'] as String,
   zulipMergeBase: json['zulip_merge_base'] as String,
@@ -112,6 +113,8 @@ InitialSnapshot _$InitialSnapshotFromJson(
     unknownValue: RealmTopicsPolicy.unknown,
   ),
   realmMandatoryTopics: json['realm_mandatory_topics'] as bool?,
+  realmMessageRetentionDays: (json['realm_message_retention_days'] as num?)
+      ?.toInt(),
   realmName: json['realm_name'] as String,
   realmWaitingPeriodThreshold: (json['realm_waiting_period_threshold'] as num)
       .toInt(),
@@ -170,6 +173,7 @@ Map<String, dynamic> _$InitialSnapshotToJson(
 ) => <String, dynamic>{
   'queue_id': instance.queueId,
   'last_event_id': instance.lastEventId,
+  'max_message_id': instance.maxMessageId,
   'zulip_feature_level': instance.zulipFeatureLevel,
   'zulip_version': instance.zulipVersion,
   'zulip_merge_base': instance.zulipMergeBase,
@@ -209,6 +213,7 @@ Map<String, dynamic> _$InitialSnapshotToJson(
   'realm_wildcard_mention_policy': instance.realmWildcardMentionPolicy,
   'realm_topics_policy': _$RealmTopicsPolicyEnumMap[instance.realmTopicsPolicy],
   'realm_mandatory_topics': instance.realmMandatoryTopics,
+  'realm_message_retention_days': instance.realmMessageRetentionDays,
   'realm_name': instance.realmName,
   'realm_waiting_period_threshold': instance.realmWaitingPeriodThreshold,
   'realm_message_content_delete_limit_seconds':

@@ -89,6 +89,12 @@ class _IosNotifFlutterApiImpl extends IosNotifFlutterApi {
   }
 
   Future<ImprovedNotificationContent> _onNotifPayloadNewMessage(NotifPayloadNewMessage data) async {
+    // Note: Unlike Android's FCM handlers (which run in the app's own process
+    // with access to Application Support), the iOS NotificationService
+    // extension runs in a separate sandbox container. [MessageDatabase] is
+    // deliberately kept in the main app's private Application Support directory
+    // (outside the shared App Group) to avoid iOS `0xdead10cc` termination on
+    // shared SQLite WAL locks, so message prefetching does not run here.
     final zulipLocalizations = GlobalLocalizations.zulipLocalizations;
     final title = titleForNotifPayload(data, zulipLocalizations);
     final subtitle = subtitleForNotifPayloadOnIos(data);

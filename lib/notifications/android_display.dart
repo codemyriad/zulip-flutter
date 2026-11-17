@@ -217,7 +217,7 @@ class AndroidNotificationDisplayManager {
     await AndroidNotificationChannelManager.ensureChannel();
   }
 
-  static void onNotifPayload(NotifPayloadWithIdentity data, Account account) async {
+  static Future<void> onNotifPayload(NotifPayloadWithIdentity data, Account account) async {
     assert(defaultTargetPlatform == TargetPlatform.android);
     switch (data) {
       case NotifPayloadNewMessage(): await _onNotifPayloadNewMessage(data, account);

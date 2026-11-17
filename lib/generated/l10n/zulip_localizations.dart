@@ -1362,6 +1362,12 @@ abstract class ZulipLocalizations {
   /// **'No search results.'**
   String get emptyMessageListSearch;
 
+  /// Text shown with a loading indicator in the message list, or a channel's topic list, when loading messages or topics from the server keeps failing, as when the device is offline.
+  ///
+  /// In en, this message translates to:
+  /// **'Can’t connect. Retrying…'**
+  String get messageListCantConnectRetrying;
+
   /// Message list recipient header for a DM group that only includes yourself.
   ///
   /// In en, this message translates to:
@@ -2507,6 +2513,96 @@ abstract class ZulipLocalizations {
   /// In en, this message translates to:
   /// **'There are no topics here yet.'**
   String get topicListEmptyPlaceholderHeader;
+
+  /// Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, without a known age.
+  ///
+  /// In en, this message translates to:
+  /// **'Updating… Showing messages saved on this device.'**
+  String get messageListBannerUpdatingNoAge;
+
+  /// Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified less than a minute ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Updating… Showing messages saved on this device, last updated just now.'**
+  String get messageListBannerUpdatingJustNow;
+
+  /// Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified minutes ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Updating… Showing messages saved on this device, last updated {minutes, plural, =1{1 minute} other{{minutes} minutes}} ago.'**
+  String messageListBannerUpdatingMinutesAgo(int minutes);
+
+  /// Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified hours ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Updating… Showing messages saved on this device, last updated {hours, plural, =1{1 hour} other{{hours} hours}} ago.'**
+  String messageListBannerUpdatingHoursAgo(int hours);
+
+  /// Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified days ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Updating… Showing messages saved on this device, last updated {days, plural, =1{1 day} other{{days} days}} ago.'**
+  String messageListBannerUpdatingDaysAgo(int days);
+
+  /// Banner shown when revalidating a message list's local data fails offline, without a known age.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline. Showing messages saved on this device.'**
+  String get messageListBannerOfflineNoAge;
+
+  /// Banner shown when revalidating a message list's local data fails offline, when saved messages were verified less than a minute ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline. Showing messages saved on this device, last updated just now.'**
+  String get messageListBannerOfflineJustNow;
+
+  /// Banner shown when revalidating a message list's local data fails offline, when saved messages were verified minutes ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline. Showing messages saved on this device, last updated {minutes, plural, =1{1 minute} other{{minutes} minutes}} ago.'**
+  String messageListBannerOfflineMinutesAgo(int minutes);
+
+  /// Banner shown when revalidating a message list's local data fails offline, when saved messages were verified hours ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline. Showing messages saved on this device, last updated {hours, plural, =1{1 hour} other{{hours} hours}} ago.'**
+  String messageListBannerOfflineHoursAgo(int hours);
+
+  /// Banner shown when revalidating a message list's local data fails offline, when saved messages were verified days ago.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline. Showing messages saved on this device, last updated {days, plural, =1{1 day} other{{days} days}} ago.'**
+  String messageListBannerOfflineDaysAgo(int days);
+
+  /// Edge notice shown when older messages cannot be fetched while offline.
+  ///
+  /// In en, this message translates to:
+  /// **'Can’t load older messages offline'**
+  String get messageListCantLoadOlderOffline;
+
+  /// Edge notice shown when newer messages cannot be fetched while offline.
+  ///
+  /// In en, this message translates to:
+  /// **'Can’t load newer messages offline'**
+  String get messageListCantLoadNewerOffline;
+
+  /// Edge notice shown when opening a message offline fell back to an older saved window.
+  ///
+  /// In en, this message translates to:
+  /// **'Newer messages, including the one you opened, aren’t available offline'**
+  String get messageListAnchorFallbackOffline;
+
+  /// Label text for a banner in a channel's topic list when it shows the topics that have messages saved on the device, because it has not yet been able to load the full topic list from the server.
+  ///
+  /// In en, this message translates to:
+  /// **'Topics with messages saved on this device'**
+  String get topicListBannerLabelShowingSavedTopics;
+
+  /// Label text for a banner in search results when showing matches from messages saved on the device, because the server could not be reached.
+  ///
+  /// In en, this message translates to:
+  /// **'Results from messages saved on this device'**
+  String get searchMessagesBannerLabelShowingSaved;
 }
 
 class _ZulipLocalizationsDelegate

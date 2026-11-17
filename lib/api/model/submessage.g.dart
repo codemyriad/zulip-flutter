@@ -9,6 +9,7 @@ part of 'submessage.dart';
 // **************************************************************************
 
 Submessage _$SubmessageFromJson(Map<String, dynamic> json) => Submessage(
+  id: (json['id'] as num).toInt(),
   senderId: (json['sender_id'] as num).toInt(),
   msgType: $enumDecode(
     _$SubmessageTypeEnumMap,
@@ -20,6 +21,7 @@ Submessage _$SubmessageFromJson(Map<String, dynamic> json) => Submessage(
 
 Map<String, dynamic> _$SubmessageToJson(Submessage instance) =>
     <String, dynamic>{
+      'id': instance.id,
       'sender_id': instance.senderId,
       'msg_type': instance.msgType,
       'content': instance.content,

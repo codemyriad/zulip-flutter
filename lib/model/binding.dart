@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart' as connectivity_plus;
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart' as connectivity_plus_platform;
@@ -12,6 +13,8 @@ import 'package:image_picker/image_picker.dart' as image_picker;
 import 'package:image_picker_android/image_picker_android.dart' as image_picker_android;
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart' as image_picker_platform;
 import 'package:package_info_plus/package_info_plus.dart' as package_info_plus;
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart' as path_provider;
 import 'package:sodium/sodium.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 import 'package:wakelock_plus/wakelock_plus.dart' as wakelock_plus;
@@ -21,6 +24,7 @@ import '../host/android_notifications.dart';
 import '../host/ios_notifications.g.dart';
 import '../host/notifications.dart' as notif_pigeon;
 import '../log.dart';
+import 'image_disk_cache.dart';
 import 'store.dart';
 
 export 'package:connectivity_plus/connectivity_plus.dart' show ConnectivityResult;
@@ -287,6 +291,14 @@ abstract class ZulipBinding {
   ///   https://developer.apple.com/documentation/uikit/uiapplication/1623070-idletimerdisabled
   ///   https://github.com/fluttercommunity/wakelock_plus/blob/5ca5243e7894830ce289fc367bc5fdec27c7f0cf/wakelock_plus/ios/Classes/WakelockPlusPlugin.m
   Future<void> toggleWakelock({required bool enable});
+
+  /// The on-disk cache of images fetched from Zulip servers and elsewhere,
+  /// kept in the platform's cache directory
+  /// via package:path_provider's [path_provider.getApplicationCacheDirectory].
+  ImageDiskCache get imageDiskCache;
+
+  /// Clear decoded images held in Flutter's in-memory [ImageCache].
+  void clearMemoryImageCache();
 }
 
 /// Like [device_info_plus.BaseDeviceInfo], but without things we don't use.
@@ -491,14 +503,33 @@ class LiveZulipBinding extends ZulipBinding {
   @override
   GlobalStore? getGlobalStoreSync() => _globalStore;
 
+  /// Dispose and clear any cached [GlobalStore] in a background isolate
+  /// after handling a background push message, so subsequent wakes reload
+  /// fresh accounts, credentials, and settings from SQLite.
+  Future<void> closeBackgroundGlobalStore() async {
+    final loading = _globalStoreLoading;
+    if (loading != null) {
+      try {
+        await loading;
+      } catch (_) {}
+    }
+    final store = _globalStore;
+    _globalStore = null;
+    store?.dispose();
+  }
+
   GlobalStore? _globalStore;
   Future<GlobalStore>? _globalStoreLoading;
 
   @override
-  Future<GlobalStore> getGlobalStoreUniquely() {
+  Future<GlobalStore> getGlobalStoreUniquely() async {
     assert(debugRelaxGetGlobalStoreUniquely
         || _debugEnforceGetGlobalStoreUniquely());
-    return getGlobalStore();
+    final store = await getGlobalStore();
+    if (store is LiveGlobalStore) {
+      unawaited(store.sweepStartupOrphans());
+    }
+    return store;
   }
 
   bool _debugEnforceGetGlobalStoreUniquely() {
@@ -680,5 +711,17 @@ class LiveZulipBinding extends ZulipBinding {
   @override
   Future<void> toggleWakelock({required bool enable}) async {
     return wakelock_plus.WakelockPlus.toggle(enable: enable);
+  }
+
+  @override
+  late final ImageDiskCache imageDiskCache = FileImageDiskCache(
+    getRootDirectory: () async {
+      final cacheDir = await path_provider.getApplicationCacheDirectory();
+      return Directory(p.join(cacheDir.path, 'realm_images'));
+    });
+
+  @override
+  void clearMemoryImageCache() {
+    PaintingBinding.instance.imageCache.clear();
   }
 }

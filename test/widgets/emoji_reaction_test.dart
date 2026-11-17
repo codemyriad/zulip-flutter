@@ -60,6 +60,7 @@ void main() {
     store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
 
     await store.addUser(eg.selfUser);
+    await store.addStream(eg.stream(streamId: eg.defaultStreamMessageStreamId));
   }
 
   // Base JSON for various unicode emoji reactions. Just missing user_id.

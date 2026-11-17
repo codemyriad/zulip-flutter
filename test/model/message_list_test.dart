@@ -6,6 +6,7 @@ import 'package:checks/checks.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:clock/clock.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:http/http.dart' as http;
 import 'package:test/scaffolding.dart';
 import 'package:zulip/api/backoff.dart';
@@ -15,8 +16,11 @@ import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/model/narrow.dart';
 import 'package:zulip/api/route/messages.dart';
 import 'package:zulip/model/algorithms.dart';
+import 'package:zulip/model/binding.dart';
+import 'package:zulip/model/connectivity.dart';
 import 'package:zulip/model/content.dart';
 import 'package:zulip/model/message.dart';
+import 'package:zulip/model/message_coverage.dart';
 import 'package:zulip/model/message_list.dart';
 import 'package:zulip/model/narrow.dart';
 import 'package:zulip/model/store.dart';
@@ -118,6 +122,10 @@ void main() {
     int? anchorMessageId,
     required List<Message> messages,
   }) async {
+    final key = coverageKey(model.narrow);
+    final expectLocalFirstNotify = store.debugCoverageEnabled
+      && key != null
+      && store.debugCoverage.chains(key).any((c) => c.status != CoverageStatus.stale);
     final result = eg.getMessagesResult(
       anchor: model.anchor == AnchorCode.firstUnread
         ? NumericAnchor(anchorMessageId!) : model.anchor,
@@ -126,7 +134,7 @@ void main() {
       messages: messages);
     connection.prepare(json: result.toJson());
     await model.fetchInitial();
-    checkNotifiedOnce();
+    checkNotified(count: expectLocalFirstNotify ? 2 : 1);
   }
 
   Future<void> prepareOutboxMessages({
@@ -190,9 +198,10 @@ void main() {
     group('smoke', () {
       Future<void> smoke(
         Narrow narrow,
-        Message Function(int i) generateMessages,
-      ) async {
-        await prepare(narrow: narrow);
+        Message Function(int i) generateMessages, {
+        ZulipStream? stream,
+      }) async {
+        await prepare(narrow: narrow, stream: stream);
         connection.prepare(json: newestResult(
           foundOldest: false,
           messages: List.generate(kMessageListFetchBatchSize, generateMessages),
@@ -222,7 +231,8 @@ void main() {
 
       test('TopicNarrow', () async {
         await smoke(TopicNarrow(someChannel.streamId, eg.t(someTopic)),
-          (i) => eg.streamMessage(stream: someChannel, topic: someTopic));
+          (i) => eg.streamMessage(stream: someChannel, topic: someTopic),
+          stream: someChannel);
       });
     });
 
@@ -402,6 +412,45 @@ void main() {
       check(model)..haveNewest.isTrue()..outboxMessages.length.equals(1);
     }));
 
+    test('outbox messages not added until haveNewest with coverage enabled', () => awaitFakeAsync((async) async {
+      final stream = eg.stream();
+      await prepare(
+        narrow: eg.topicNarrow(stream.streamId, 'topic'),
+        anchor: AnchorCode.firstUnread,
+        stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      await prepareOutboxMessages(count: 1, stream: stream, topic: 'topic');
+      async.elapse(kLocalEchoDebounceDuration);
+      checkNotNotified();
+      check(model)..fetched.isFalse()..outboxMessages.isEmpty();
+
+      final message = eg.streamMessage(stream: stream, topic: 'topic');
+      connection.prepare(json: nearResult(
+        anchor: message.id,
+        foundOldest: true,
+        foundNewest: false,
+        messages: [message]).toJson());
+      await model.fetchInitial();
+      checkNotifiedOnce();
+      check(model)
+        ..fetched.isTrue()
+        ..haveNewest.isFalse()
+        ..atKnownNewest.isFalse()
+        ..outboxMessages.isEmpty();
+
+      connection.prepare(json: newerResult(anchor: message.id, foundNewest: true,
+        messages: [eg.streamMessage(stream: stream, topic: 'topic')]).toJson());
+      final fetchFuture = model.fetchNewer();
+      checkNotifiedOnce();
+      check(model)
+        ..atKnownNewest.isFalse()
+        ..outboxMessages.isEmpty();
+      await fetchFuture;
+      checkNotifiedOnce();
+      check(model)..haveNewest.isTrue()..outboxMessages.length.equals(1);
+    }));
+
     test('ignore [OutboxMessage]s outside narrow or with `hidden: true`', () => awaitFakeAsync((async) async {
       final stream = eg.stream();
       final otherStream = eg.stream();
@@ -432,10 +481,12 @@ void main() {
     test('recent senders track all the messages', () async {
       const narrow = CombinedFeedNarrow();
       await prepare(narrow: narrow);
+      final unsubscribedStream = eg.stream(streamId: 10);
+      await store.addStream(unsubscribedStream);
       final messages = [
         eg.streamMessage(),
         // Not subscribed to the stream with id 10.
-        eg.streamMessage(stream: eg.stream(streamId: 10)),
+        eg.streamMessage(stream: unsubscribedStream),
       ];
       connection.prepare(json: newestResult(
         foundOldest: false,
@@ -470,6 +521,453 @@ void main() {
         checkNotifiedOnce();
         check(model).narrow
           .equals(TopicNarrow(someChannel.streamId, eg.t(someTopic)));
+      });
+    });
+
+    group('retry', () {
+      void prepareNetworkException() {
+        connection.prepare(httpException: const SocketException('failed'));
+      }
+
+      void prepareSuccess(List<Message> messages) {
+        connection.prepare(json: newestResult(
+          foundOldest: true, messages: messages).toJson());
+      }
+
+      test('retry after failure, then succeed', () => awaitFakeAsync((async) async {
+        await prepare();
+        final message = eg.streamMessage();
+        prepareNetworkException();
+        prepareNetworkException();
+        prepareSuccess([message]);
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        checkNotifiedOnce();
+        check(model)
+          ..fetched.isFalse()
+          ..fetchInitialFailing.isTrue();
+        check(async.pendingTimers).single; // the backoff
+
+        // Wait out the first and second backoffs, at most 100ms and 200ms.
+        async.elapse(const Duration(milliseconds: 300));
+        check(connection.takeRequests()).length.equals(2);
+        checkNotifiedOnce();
+        check(model)
+          ..fetched.isTrue()
+          ..fetchInitialFailing.isFalse()
+          ..messages.single.id.equals(message.id);
+        await fetchFuture;
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      void checkRetry(void Function() prepareError) {
+        awaitFakeAsync((async) async {
+          await prepare();
+          prepareError();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        });
+      }
+
+      test('retry on NetworkException from failed connection', () {
+        checkRetry(prepareNetworkException);
+      });
+
+      test('retry on NetworkException with NetworkExceptionKind.other', () {
+        checkRetry(() => connection.prepare(
+          httpException: const HandshakeException('handshake failed')));
+      });
+
+      test('retry on Server5xxException', () {
+        checkRetry(() => connection.prepare(httpStatus: 500, body: 'splat'));
+      });
+
+      test('retry on MalformedServerResponseException', () {
+        // As from a captive portal, serving its own page in place of ours.
+        checkRetry(() => connection.prepare(httpStatus: 200,
+          body: '<html><body>Please log in to this network.</body></html>'));
+      });
+
+      test('no retry on MalformedServerResponseException with JSON data', () => awaitFakeAsync((async) async {
+        await prepare();
+        connection.prepare(httpStatus: 200, json: {'result': 'success'});
+        await check(model.fetchInitial()).throws<MalformedServerResponseException>();
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        check(model).fetched.isFalse();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('retry on rate limit: code RATE_LIMIT_HIT', () {
+        checkRetry(() => connection.prepare(httpStatus: 400, json: {
+          'result': 'error', 'code': 'RATE_LIMIT_HIT',
+          'msg': 'API usage exceeded rate limit',
+          'retry-after': 28.706807374954224}));
+      });
+
+      test('retry on rate limit: status 429 ZulipApiException', () {
+        checkRetry(() => connection.prepare(httpStatus: 429, json: {
+          'result': 'error', 'code': 'BAD_REQUEST', 'msg': 'Bad request'}));
+      });
+
+      test('no retry on generic ZulipApiException', () => awaitFakeAsync((async) async {
+        await prepare();
+        connection.prepare(apiException: eg.apiBadRequest());
+        await check(model.fetchInitial()).throws<ZulipApiException>();
+        check(connection.takeRequests()).single;
+        checkNotNotified();
+        check(model).fetched.isFalse();
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('no retry when a test forgot to prepare a response', () => awaitFakeAsync((async) async {
+        await prepare();
+        await check(model.fetchInitial()).throws<AssertionError>();
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).isEmpty();
+      }));
+
+      test('disposed during request: request aborted', () => awaitFakeAsync((async) async {
+        await prepare();
+        connection.prepare(json: newestResult(foundOldest: true,
+          messages: [eg.streamMessage()]).toJson(),
+          delay: const Duration(seconds: 60));
+        bool done = false;
+        unawaited(model.fetchInitial().whenComplete(() => done = true));
+        async.flushMicrotasks();
+        check(connection.takeRequests()).single;
+
+        model.dispose();
+        async.flushMicrotasks();
+        check(done).isTrue();
+        check(connection.takeRequests()).isEmpty();
+      }));
+
+      test('disposed during backoff: no retry, no timer left', () => awaitFakeAsync((async) async {
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        model.dispose();
+        async.flushMicrotasks();
+        check(async.pendingTimers).isEmpty();
+        await fetchFuture;
+        check(connection.takeRequests()).isEmpty();
+      }));
+
+      test('store disposed during backoff: no retry', () => awaitFakeAsync((async) async {
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        checkNotifiedOnce(); // fetchInitialFailing
+        store.dispose();
+        async.elapse(const Duration(seconds: 1));
+        await fetchFuture;
+        check(connection.takeRequests()).isEmpty();
+        check(notifiedCount).equals(0);
+      }));
+
+      test('retry promptly when the event stream recovers', () => awaitFakeAsync((async) async {
+        BackoffMachine.debugDuration = const Duration(seconds: 10);
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+
+        checkNotifiedOnce(); // fetchInitialFailing
+        store.isRecoveringEventStream = true;
+        async.elapse(const Duration(seconds: 1));
+        check(connection.takeRequests()).isEmpty();
+
+        prepareSuccess([eg.streamMessage()]);
+        store.isRecoveringEventStream = false;
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        checkNotifiedOnce();
+        check(model).fetched.isTrue();
+        await fetchFuture;
+      }));
+
+      test('backoff starts over when the event stream recovers', () => awaitFakeAsync((async) async {
+        // Fail enough times that the backoff bound grows to 6.4s.
+        BackoffMachine.debugDuration = const Duration(seconds: 1);
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        await prepare();
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        for (int i = 0; i < 5; i++) {
+          prepareNetworkException();
+          async.elapse(const Duration(seconds: 1));
+        }
+        check(connection.takeRequests()).length.equals(6);
+
+        BackoffMachine.debugDuration = null;
+        prepareNetworkException();
+        store.isRecoveringEventStream = true;
+        store.isRecoveringEventStream = false;
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+
+        // The next backoff is at most 100ms, as for a first failure.
+        prepareSuccess([eg.streamMessage()]);
+        async.elapse(const Duration(milliseconds: 100));
+        check(connection.takeRequests()).single;
+        check(model).fetched.isTrue();
+        await fetchFuture;
+      }));
+
+      group('request maybe stuck on a dead connection', () {
+        // A request that would never complete on its own.
+        void prepareStuck() {
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: const Duration(minutes: 15));
+        }
+
+        test('sent while event stream recovering: abort on recovery, and retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          store.isRecoveringEventStream = true;
+          prepareStuck();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          async.elapse(const Duration(seconds: 30));
+          check(connection.takeRequests()).isEmpty();
+
+          final message = eg.streamMessage();
+          prepareSuccess([message]);
+          store.isRecoveringEventStream = false;
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).messages.single.id.equals(message.id);
+          await fetchFuture;
+        }));
+
+        test('sent before network change: abort on retry signal, and retry', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
+          await prepare();
+          prepareStuck();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          prepareSuccess([eg.streamMessage()]);
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+
+        test('sent after network change: no abort on retry signal', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
+          await prepare();
+          async.elapse(Duration.zero); // connectivity baseline
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.elapse(Duration.zero);
+          // A change during the cooldown is signaled when the cooldown ends.
+          testBinding.notifyConnectivityChanged([ConnectivityResult.wifi]);
+          async.elapse(Duration.zero);
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: ConnectivityMonitor.retrySignalCooldown * 2);
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          async.elapse(ConnectivityMonitor.retrySignalCooldown);
+          check(connection.takeRequests()).isEmpty();
+          check(model).fetched.isFalse();
+
+          async.elapse(ConnectivityMonitor.retrySignalCooldown);
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          check(connection.takeRequests()).isEmpty();
+          await fetchFuture;
+        }));
+
+        test('not sent while recovering: no abort on recovery; if it fails, retry at once', () => awaitFakeAsync((async) async {
+          BackoffMachine.debugDuration = const Duration(seconds: 10);
+          addTearDown(() => BackoffMachine.debugDuration = null);
+          await prepare();
+          connection.prepare(httpException: const SocketException('failed'),
+            delay: const Duration(seconds: 5));
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          store.isRecoveringEventStream = true;
+          store.isRecoveringEventStream = false;
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).isEmpty();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(seconds: 5));
+          check(connection.takeRequests()).single;
+          checkNotified(count: 2); // fetchInitialFailing, then fetched
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+      });
+
+      test('renarrowAndFetch during backoff: old loop stops', () => awaitFakeAsync((async) async {
+        final channel = eg.stream();
+        await prepare(stream: channel);
+        prepareNetworkException();
+        final fetchFuture = model.fetchInitial();
+        async.elapse(Duration.zero);
+        check(connection.takeRequests()).single;
+        check(async.pendingTimers).single; // the backoff
+        checkNotifiedOnce(); // fetchInitialFailing
+
+        final message = eg.streamMessage(stream: channel);
+        prepareSuccess([message]);
+        model.renarrowAndFetch(ChannelNarrow(channel.streamId), AnchorCode.newest);
+        checkNotifiedOnce();
+        async.elapse(Duration.zero);
+        await fetchFuture;
+        check(connection.takeRequests()).single;
+        checkNotifiedOnce();
+        check(model)
+          ..narrow.equals(ChannelNarrow(channel.streamId))
+          ..messages.single.id.equals(message.id);
+
+        // The old loop's backoff was cut short, and it made no request.
+        check(async.pendingTimers).isEmpty();
+        async.elapse(const Duration(seconds: 10));
+        check(connection.takeRequests()).isEmpty();
+      }));
+
+      group('fetchInitialFailing', () {
+        test('set on first failure; unchanged on more; cleared on success', () => awaitFakeAsync((async) async {
+          // A fixed backoff, so that a short first wait and a short second wait
+          // don't add up to make the second retry come early.
+          BackoffMachine.debugDuration = const Duration(seconds: 1);
+          addTearDown(() => BackoffMachine.debugDuration = null);
+          await prepare();
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          check(model).fetchInitialFailing.isFalse();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isTrue();
+
+          prepareNetworkException();
+          async.elapse(const Duration(seconds: 1));
+          check(connection.takeRequests()).length.equals(2);
+          checkNotNotified();
+          check(model).fetchInitialFailing.isTrue();
+
+          prepareSuccess([eg.streamMessage()]);
+          async.elapse(const Duration(seconds: 1));
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isTrue()
+            ..fetchInitialFailing.isFalse();
+          await fetchFuture;
+        }));
+
+        test('not set by aborting our own request', () => awaitFakeAsync((async) async {
+          addTearDown(testBinding.reset);
+          await prepare();
+          async.elapse(Duration.zero); // connectivity baseline
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage()]).toJson(),
+            delay: const Duration(minutes: 15));
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          check(connection.takeRequests()).single;
+
+          // The network changes, so we abort the request and retry at once.
+          prepareSuccess([eg.streamMessage()]);
+          testBinding.notifyConnectivityChanged([ConnectivityResult.mobile]);
+          async.flushMicrotasks();
+          check(connection.takeRequests()).single;
+          checkNotNotified();
+          check(model).fetchInitialFailing.isFalse();
+
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+          await fetchFuture;
+        }));
+
+        test('cleared on renarrowAndFetch', () => awaitFakeAsync((async) async {
+          final channel = eg.stream();
+          await prepare(stream: channel);
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
+
+          connection.prepare(json: newestResult(foundOldest: true,
+            messages: [eg.streamMessage(stream: channel)]).toJson(),
+            delay: const Duration(seconds: 1));
+          model.renarrowAndFetch(ChannelNarrow(channel.streamId), AnchorCode.newest);
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isFalse();
+          await fetchFuture;
+
+          async.elapse(const Duration(seconds: 1));
+          checkNotifiedOnce();
+          check(model).fetched.isTrue();
+        }));
+
+        test('cleared on error not to retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          prepareNetworkException();
+          final fetchFuture = model.fetchInitial();
+          final throwsCheck = check(fetchFuture).throws<ZulipApiException>();
+          async.elapse(Duration.zero);
+          checkNotifiedOnce();
+          check(model).fetchInitialFailing.isTrue();
+
+          connection.prepare(apiException: eg.apiBadRequest());
+          async.elapse(const Duration(milliseconds: 100)); // max first backoff
+          await throwsCheck;
+          checkNotifiedOnce();
+          check(model)
+            ..fetched.isFalse()
+            ..fetchInitialFailing.isFalse();
+        }));
+
+        test('not set on error not to retry', () => awaitFakeAsync((async) async {
+          await prepare();
+          connection.prepare(apiException: eg.apiBadRequest());
+          await check(model.fetchInitial()).throws<ZulipApiException>();
+          checkNotNotified();
+          check(model).fetchInitialFailing.isFalse();
+        }));
       });
     });
   });
@@ -607,6 +1105,34 @@ void main() {
         // the disposed model, that error would fail this test.
         async.elapse(const Duration(seconds: 1));
         check(async.pendingTimers).isEmpty();
+      }));
+
+      test('showOfflineOlderNotice requires coverageEnabled and connectionFailed', () => awaitFakeAsync((async) async {
+        addTearDown(() => BackoffMachine.debugDuration = null);
+        BackoffMachine.debugDuration = const Duration(seconds: 1);
+
+        await prepare();
+        store.debugSetCoverageEnabled(false);
+        await prepareMessages(foundOldest: false, messages: [eg.streamMessage(id: 1000)]);
+
+        connection.prepare(httpException: SocketException('offline'));
+        await check(model.fetchOlder()).throws<NetworkException>();
+        check(model.showOfflineOlderNotice).isFalse();
+        async.elapse(const Duration(seconds: 1));
+        checkNotified(count: 3);
+
+        store.debugSetCoverageEnabled(true);
+        connection.prepare(httpStatus: 500, body: 'splat');
+        await check(model.fetchOlder()).throws<Server5xxException>();
+        check(model.showOfflineOlderNotice).isFalse();
+        async.elapse(const Duration(seconds: 1));
+        checkNotified(count: 3);
+
+        connection.prepare(httpException: SocketException('offline'));
+        await check(model.fetchOlder()).throws<NetworkException>();
+        check(model.showOfflineOlderNotice).isTrue();
+        async.elapse(const Duration(seconds: 1));
+        checkNotified(count: 3);
       }));
     });
 
@@ -781,12 +1307,14 @@ void main() {
     // TODO(#824): move this test
     test('fetchOlder recent senders track all the messages', () async {
       await prepare();
+      final unsubscribedStream = eg.stream(streamId: 10);
+      await store.addStream(unsubscribedStream);
       final initialMessages = List.generate(10, (i) => eg.streamMessage(id: 100 + i));
       await prepareMessages(foundOldest: false, messages: initialMessages);
 
       final oldMessages = List.generate(10, (i) => eg.streamMessage(id: 89 + i))
         // Not subscribed to the stream with id 10.
-        ..add(eg.streamMessage(id: 99, stream: eg.stream(streamId: 10)));
+        ..add(eg.streamMessage(id: 99, stream: unsubscribedStream));
       connection.prepare(json: olderResult(
         anchor: 100, foundOldest: false,
         messages: oldMessages,
@@ -801,13 +1329,15 @@ void main() {
     // TODO(#824): move this test
     test('TODO fetchNewer recent senders track all the messages', () async {
       await prepare(anchor: NumericAnchor(100));
+      final unsubscribedStream = eg.stream(streamId: 10);
+      await store.addStream(unsubscribedStream);
       final initialMessages = List.generate(10, (i) => eg.streamMessage(id: 100 + i));
       await prepareMessages(foundOldest: true, foundNewest: false,
         messages: initialMessages);
 
       final newMessages = List.generate(10, (i) => eg.streamMessage(id: 110 + i))
         // Not subscribed to the stream with id 10.
-        ..add(eg.streamMessage(id: 120, stream: eg.stream(streamId: 10)));
+        ..add(eg.streamMessage(id: 120, stream: unsubscribedStream));
       connection.prepare(json: newerResult(
         anchor: 100, foundNewest: false,
         messages: newMessages,
@@ -1087,7 +1617,7 @@ void main() {
 
     test('in topic narrow: topics compared case-insensitively', () async {
       final channel = eg.stream();
-      await prepare(narrow: eg.topicNarrow(channel.streamId, 't'));
+      await prepare(narrow: eg.topicNarrow(channel.streamId, 't'), stream: channel);
       await prepareMessages(foundOldest: true, messages:
         .generate(30, (i) => eg.streamMessage(stream: channel, topic: 't')));
 
@@ -1685,6 +2215,99 @@ void main() {
       check(model).haveNewest.isTrue();
       checkHasMessageIds([...initialMessageIds, 2000]);
     }));
+
+    test('newer message with coverage enabled -> fetchNewer hits network for intervening messages', () async {
+      await prepare(narrow: narrow, stream: channel);
+      store.debugSetCoverageEnabled(true);
+      await prepareMessages(foundOldest: true, messages: [
+        for (final id in initialMessageIds)
+          eg.streamMessage(id: id, stream: channel, topic: 'topic')]);
+      check(model).haveNewest.isTrue();
+
+      final msg1999 = eg.streamMessage(id: 1999, stream: channel, topic: 'topic');
+      final msg2000 = eg.streamMessage(id: 2000, stream: channel, topic: 'topic');
+      store.reconcileMessages([msg2000]);
+      checkNotifiedOnce();
+      check(model).haveNewest.isFalse();
+
+      connection.prepare(json: newerResult(
+        anchor: initialMessageIds.last, foundNewest: true,
+        messages: [msg1999, msg2000]).toJson());
+      final fetchFuture = model.fetchNewer();
+      checkNotifiedOnce();
+      check(model).busyFetchingMore.isTrue();
+
+      await fetchFuture;
+      checkNotifiedOnce();
+      check(model)
+        ..haveNewest.isTrue()
+        ..busyFetchingMore.isFalse();
+      checkHasMessageIds([...initialMessageIds, 1999, 2000]);
+    });
+  });
+
+  group('reconcileMessages clobber', () {
+    test('same-conversation clobber swaps copy and reuses unchanged content', () async {
+      final stream = eg.stream();
+      // Leave [stream] unsubscribed so [reconcileMessages] marks its messages
+      // maybe-stale and clobbers them on the next fetch.
+      await prepare(narrow: TopicNarrow(stream.streamId, eg.t('topic')));
+      await store.addStream(stream);
+      final msg1 = eg.streamMessage(
+        id: 1, stream: stream, topic: 'topic', content: '<p>one</p>');
+      final msg2 = eg.streamMessage(
+        id: 2, stream: stream, topic: 'topic', content: '<p>two</p>');
+      await prepareMessages(foundOldest: true, messages: [msg1, msg2]);
+
+      final oldContent1 = model.contents[0];
+      final oldContent2 = model.contents[1];
+
+      final updated1 = eg.streamMessage(
+        id: 1, stream: stream, topic: 'topic', content: '<p>one</p>',
+        flags: [MessageFlag.read]);
+      final updated2 = eg.streamMessage(
+        id: 2, stream: stream, topic: 'topic', content: '<p>two edited</p>');
+      store.reconcileMessages([updated1, updated2]);
+      checkNotifiedOnce();
+
+      check(identical(model.messages[0], updated1)).isTrue();
+      check(identical(model.messages[1], updated2)).isTrue();
+      check(identical(model.contents[0], oldContent1)).isTrue();
+      check(identical(model.contents[1], oldContent2)).isFalse();
+      check(model.items.whereType<MessageListMessageItem>().map((i) => i.message))
+        .deepEquals([updated1, updated2]);
+    });
+
+    test('relocated clobber moves message out of topic view', () async {
+      final stream = eg.stream();
+      await prepare(narrow: TopicNarrow(stream.streamId, eg.t('topic')));
+      await store.addStream(stream);
+      final msg1 = eg.streamMessage(id: 1, stream: stream, topic: 'topic');
+      final msg2 = eg.streamMessage(id: 2, stream: stream, topic: 'topic');
+      await prepareMessages(foundOldest: true, messages: [msg1, msg2]);
+
+      final moved1 = eg.streamMessage(id: 1, stream: stream, topic: 'other');
+      store.reconcileMessages([moved1]);
+      checkNotifiedOnce();
+      checkHasMessageIds([2]);
+    });
+
+    test('relocated clobber into own fetchInitial does not reentrantly reset view', () async {
+      final stream = eg.stream();
+      await prepare(narrow: TopicNarrow(stream.streamId, eg.t('newTopic')));
+      await store.addStream(stream);
+      // Seed message 1 under oldTopic in an unsubscribed stream so it is marked maybe-stale.
+      final oldCopy = eg.streamMessage(id: 1, stream: stream, topic: 'oldTopic');
+      store.reconcileMessages([oldCopy]);
+
+      final newCopy = eg.streamMessage(id: 1, stream: stream, topic: 'newTopic');
+      connection.prepare(json: newestResult(foundOldest: true, messages: [newCopy]).toJson());
+      await model.fetchInitial();
+      checkNotifiedOnce();
+      check(connection.takeRequests()).single;
+      check(model).fetched.isTrue();
+      checkHasMessageIds([1]);
+    });
   });
 
   group('UserTopicEvent', () {
@@ -2078,6 +2701,292 @@ void main() {
       checkNotNotified();
       checkHasMessageIds([1]);
     });
+  });
+
+  group('SubscriptionEvent', () {
+    // ChannelStore.isTopicVisible has its own thorough unit tests.
+    // So these tests focus on the rest of the logic.
+
+    final channel = eg.stream();
+    final otherChannel = eg.stream();
+
+    /// Set up [model] on [narrow], subscribed to [channel] and [otherChannel],
+    /// with a topic in [channel] the user has unmuted and one they follow.
+    Future<void> prepareChannels(Narrow narrow, {List<int>? starredMessages}) async {
+      await prepare(narrow: narrow, stream: channel,
+        starredMessages: starredMessages);
+      await store.addStream(otherChannel);
+      await store.addSubscription(eg.subscription(otherChannel));
+      await store.setUserTopic(channel, 'unmuted', UserTopicVisibilityPolicy.unmuted);
+      await store.setUserTopic(channel, 'followed', UserTopicVisibilityPolicy.followed);
+    }
+
+    /// Messages in [channel] (in a topic with no policy, then the unmuted
+    /// and followed topics), then in [otherChannel], then a DM.
+    List<Message> combinedFeedMessages() => [
+      eg.streamMessage(id: 1, stream: channel, topic: 'plain'),
+      eg.streamMessage(id: 2, stream: channel, topic: 'unmuted'),
+      eg.streamMessage(id: 3, stream: channel, topic: 'followed'),
+      eg.streamMessage(id: 4, stream: otherChannel, topic: 'plain'),
+      eg.dmMessage(    id: 5, from: eg.otherUser, to: [eg.selfUser]),
+    ];
+
+    test('unsubscribe: remove its messages no longer visible', () => awaitFakeAsync((async) async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+
+      await prepareOutboxMessagesTo([
+        StreamDestination(channel.streamId, eg.t('plain')),
+        StreamDestination(channel.streamId, eg.t('followed')),
+        StreamDestination(otherChannel.streamId, eg.t('plain')),
+      ]);
+      async.elapse(kLocalEchoDebounceDuration);
+      checkNotified(count: 3);
+
+      await store.removeSubscription(channel.streamId);
+      checkNotifiedOnce();
+      checkHasMessageIds([2, 3, 4, 5]);
+      check(model).outboxMessages.deepEquals(<Condition<Object?>>[
+        (it) => it.isA<StreamOutboxMessage>().conversation
+                  ..streamId.equals(channel.streamId)
+                  ..topic.equals(eg.t('followed')),
+        (it) => it.isA<StreamOutboxMessage>().conversation
+                  ..streamId.equals(otherChannel.streamId)
+                  ..topic.equals(eg.t('plain')),
+      ]);
+    }));
+
+    test('unsubscribe, no messages affected: no notification', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true,
+        messages: combinedFeedMessages().sublist(1));
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      await store.removeSubscription(channel.streamId);
+      checkNotNotified();
+      checkHasMessageIds([2, 3, 4, 5]);
+    });
+
+    test('subscribe: refetch from scratch', () => awaitFakeAsync((async) async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await store.removeSubscription(channel.streamId);
+      final messages = combinedFeedMessages();
+      await prepareMessages(foundOldest: true, messages: messages);
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      connection.prepare(
+        json: newestResult(foundOldest: true, messages: messages).toJson());
+      await store.addSubscription(eg.subscription(channel));
+      checkNotifiedOnce();
+      check(model).fetched.isFalse();
+      checkHasMessageIds([]);
+
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    }));
+
+    test('subscribe before initial fetch completes: do nothing', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await store.removeSubscription(channel.streamId);
+      connection.prepare(json: newestResult(foundOldest: true,
+        messages: combinedFeedMessages()).toJson());
+      final fetchFuture = model.fetchInitial();
+
+      await store.addSubscription(eg.subscription(channel));
+      checkNotNotified();
+
+      // The new state does get applied when the fetch eventually completes.
+      await fetchFuture;
+      checkNotifiedOnce();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    });
+
+    test('subscribe muted: no effect', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await store.removeSubscription(channel.streamId);
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+      checkHasMessageIds([2, 3, 4, 5]);
+
+      await store.addSubscription(eg.subscription(channel, isMuted: true));
+      checkNotNotified();
+      check(model).fetched.isTrue();
+      checkHasMessageIds([2, 3, 4, 5]);
+    });
+
+    test('other subscription property: no effect', () async {
+      await prepareChannels(const CombinedFeedNarrow());
+      await prepareMessages(foundOldest: true, messages: combinedFeedMessages());
+
+      await store.updateSubscription(channel.streamId,
+        SubscriptionProperty.pinToTop, true);
+      checkNotNotified();
+      check(model).fetched.isTrue();
+      checkHasMessageIds([1, 2, 3, 4, 5]);
+    });
+
+    group('unsubscribe, in other narrows: no effect', () {
+      Future<void> checkNoEffect(Narrow narrow, List<Message> messages, {
+        List<int>? starredMessages,
+      }) async {
+        await prepareChannels(narrow, starredMessages: starredMessages);
+        await prepareMessages(foundOldest: true, messages: messages);
+        checkHasMessages(messages);
+
+        await store.removeSubscription(channel.streamId);
+        checkNotNotified();
+        check(model).fetched.isTrue();
+        checkHasMessages(messages);
+      }
+
+      test('ChannelNarrow', () => checkNoEffect(ChannelNarrow(channel.streamId),
+        [eg.streamMessage(stream: channel, topic: 'plain')]));
+
+      test('TopicNarrow', () => checkNoEffect(eg.topicNarrow(channel.streamId, 'plain'),
+        [eg.streamMessage(stream: channel, topic: 'plain')]));
+
+      test('MentionsNarrow', () => checkNoEffect(const MentionsNarrow(),
+        [eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.mentioned])]));
+
+      test('StarredMessagesNarrow', () {
+        final message = eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.starred]);
+        return checkNoEffect(const StarredMessagesNarrow(), [message],
+          starredMessages: [message.id]);
+      });
+
+      test('KeywordSearchNarrow', () => checkNoEffect(KeywordSearchNarrow('plain'),
+        [eg.streamMessage(stream: channel, topic: 'plain')]));
+    });
+
+    group('subscribe, in other narrows', () {
+      /// Check the effect on a view of [narrow] of subscribing to [channel]
+      /// while it shows [messages], with [fresh] as the result of any refetch.
+      Future<void> checkSubscribe(FakeAsync async, Narrow narrow, {
+        required List<Message> messages,
+        List<Message>? fresh,
+        List<int>? starredMessages,
+      }) async {
+        await prepareChannels(narrow, starredMessages: starredMessages);
+        await store.removeSubscription(channel.streamId);
+        await prepareMessages(foundOldest: true, messages: messages);
+        checkHasMessages(messages);
+
+        if (fresh != null) {
+          connection.prepare(
+            json: newestResult(foundOldest: true, messages: fresh).toJson());
+        }
+        await store.addSubscription(eg.subscription(channel));
+        if (fresh == null) {
+          checkNotNotified();
+          check(model).fetched.isTrue();
+          checkHasMessages(messages);
+          return;
+        }
+        checkNotifiedOnce();
+        check(model).fetched.isFalse();
+        checkHasMessages([]);
+
+        async.elapse(Duration.zero);
+        checkNotifiedOnce();
+        checkHasMessages(fresh);
+      }
+
+      // While unsubscribed, the event queue doesn't bring
+      // the channel's new messages, so the view may lack some.
+      test('ChannelNarrow: refetch from scratch', () => awaitFakeAsync((async) async {
+        final messages = [eg.streamMessage(stream: channel, topic: 'plain')];
+        await checkSubscribe(async, ChannelNarrow(channel.streamId),
+          messages: messages,
+          fresh: [...messages, eg.streamMessage(stream: channel, topic: 'other')]);
+      }));
+
+      test('TopicNarrow: refetch from scratch', () => awaitFakeAsync((async) async {
+        final messages = [eg.streamMessage(stream: channel, topic: 'plain')];
+        await checkSubscribe(async, eg.topicNarrow(channel.streamId, 'plain'),
+          messages: messages,
+          fresh: [...messages, eg.streamMessage(stream: channel, topic: 'plain')]);
+      }));
+
+      test('ChannelNarrow, other channel: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, ChannelNarrow(otherChannel.streamId),
+          messages: [eg.streamMessage(stream: otherChannel)]);
+      }));
+
+      test('TopicNarrow, other channel: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, eg.topicNarrow(otherChannel.streamId, 'plain'),
+          messages: [eg.streamMessage(stream: otherChannel, topic: 'plain')]);
+      }));
+
+      test('MentionsNarrow: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, const MentionsNarrow(),
+          messages: [eg.streamMessage(stream: channel, topic: 'plain',
+            flags: [MessageFlag.mentioned])]);
+      }));
+
+      test('StarredMessagesNarrow: no effect', () => awaitFakeAsync((async) async {
+        final message = eg.streamMessage(stream: channel, topic: 'plain',
+          flags: [MessageFlag.starred]);
+        await checkSubscribe(async, const StarredMessagesNarrow(),
+          messages: [message], starredMessages: [message.id]);
+      }));
+
+      test('KeywordSearchNarrow: no effect', () => awaitFakeAsync((async) async {
+        await checkSubscribe(async, KeywordSearchNarrow('plain'),
+          messages: [eg.streamMessage(stream: channel, topic: 'plain')]);
+      }));
+    });
+
+    test('channel subscribed during fetchInitial: none missing between messages', () => awaitFakeAsync((async) async {
+      final narrow = ChannelNarrow(channel.streamId);
+      await prepareChannels(narrow);
+      await store.removeSubscription(channel.streamId);
+      final message1 = eg.streamMessage(stream: channel);
+      // The server computes this response before the user subscribes.
+      connection.prepare(delay: const Duration(milliseconds: 500),
+        json: newestResult(foundOldest: true, messages: [message1]).toJson());
+      final fetchFuture = model.fetchInitial();
+      async.elapse(const Duration(milliseconds: 100));
+
+      // A message is sent while unsubscribed; no event brings it.
+      final message2 = eg.streamMessage(stream: channel);
+      connection.prepare(json: newestResult(foundOldest: true,
+        messages: [message1, message2]).toJson());
+      await store.addSubscription(eg.subscription(channel));
+      async.elapse(const Duration(milliseconds: 500));
+      await fetchFuture;
+      check(model).fetched.isTrue();
+
+      final message3 = eg.streamMessage(stream: channel);
+      await store.addMessage(message3);
+      checkHasMessages([message1, message2, message3]);
+    }));
+
+    test('channel resubscribed: none missing between messages', () => awaitFakeAsync((async) async {
+      final narrow = ChannelNarrow(channel.streamId);
+      await prepareChannels(narrow);
+      final message1 = eg.streamMessage(stream: channel);
+      await prepareMessages(foundOldest: true, messages: [message1]);
+
+      await store.removeSubscription(channel.streamId);
+      checkNotNotified();
+      // A message is sent while unsubscribed; no event brings it.
+      final message2 = eg.streamMessage(stream: channel);
+
+      connection.prepare(json: newestResult(foundOldest: true,
+        messages: [message1, message2]).toJson());
+      await store.addSubscription(eg.subscription(channel));
+      checkNotifiedOnce();
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+
+      final message3 = eg.streamMessage(stream: channel);
+      await store.addMessage(message3);
+      checkNotifiedOnce();
+      checkHasMessages([message1, message2, message3]);
+    }));
   });
 
   group('MutedUsersEvent', () {
@@ -2504,12 +3413,15 @@ void main() {
               checkHasMessages(notMovedMessages);
               checkNotifiedOnce();
             case .refetched:
-              check(model).fetched.isFalse();
-              checkHasMessages([]);
-              checkNotifiedOnce();
+              final localFirst = store.debugCoverageEnabled && coverageKey(narrow) != null;
+              check(model).fetched.equals(localFirst);
+              checkHasMessages(localFirst ? notMovedMessages + postMoveMessages : []);
+              checkNotified(count: localFirst ? 3 : 1);
               async.elapse(const Duration(seconds: 2));
               checkHasMessages(notMovedMessages + postMoveMessages);
-              checkNotifiedOnce();
+              final savedFallbackDuringElapse =
+                store.debugCoverageEnabled && narrow is CombinedFeedNarrow;
+              checkNotified(count: savedFallbackDuringElapse ? 2 : 1);
           }
         }));
       }
@@ -2603,7 +3515,7 @@ void main() {
 
         async.elapse(const Duration(seconds: 2));
         checkHasMessages(initialMessages + otherChannelMessages);
-        checkNotifiedOnce();
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
       }));
     });
 
@@ -2625,9 +3537,9 @@ void main() {
             origTopicStr: 'orig topic',
             origStreamId: otherStream.streamId,
             newMessages: movedMessages));
-          check(model).fetched.isFalse();
-          checkHasMessages([]);
-          checkNotifiedOnce();
+          check(model).fetched.equals(store.debugCoverageEnabled);
+          checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
+          checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
 
           async.elapse(const Duration(seconds: 2));
           checkHasMessages(initialMessages + movedMessages);
@@ -2771,9 +3683,9 @@ void main() {
               origTopicStr: origTopic,
               newMessages: movedMessages,
             ));
-            check(model).fetched.isFalse();
-            checkHasMessages([]);
-            checkNotifiedOnce();
+            check(model).fetched.equals(store.debugCoverageEnabled);
+            checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
+            checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
 
             async.elapse(const Duration(seconds: 2));
             checkHasMessages(initialMessages + movedMessages);
@@ -2863,7 +3775,10 @@ void main() {
         await prepareNarrow(narrow, initialMessages + movedMessages);
         connection.prepare(delay: const Duration(seconds: 1), json: newestResult(
           foundOldest: false,
-          messages: movedMessages,
+          messages: [
+            for (final m in movedMessages)
+              eg.streamMessage(id: m.id, stream: otherStream, topic: 'new'),
+          ],
         ).toJson());
         await store.handleEvent(eg.updateMessageEventMoveFrom(
           origMessages: movedMessages,
@@ -2957,11 +3872,11 @@ void main() {
           newMessages: movedMessages,
         ));
         check(model).busyFetchingMore.isFalse();
-        checkHasMessages([]);
-        checkNotifiedOnce();
+        checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
 
         await fetchFuture;
-        checkHasMessages([]);
+        checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
         checkNotNotified();
 
         async.elapse(const Duration(seconds: 1));
@@ -2991,9 +3906,9 @@ void main() {
           origStreamId: otherStream.streamId,
           newMessages: movedMessages,
         ));
-        checkHasMessages([]);
+        checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
         check(model).busyFetchingMore.isFalse();
-        checkNotifiedOnce();
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
 
         async.elapse(const Duration(seconds: 1));
         checkHasMessages(initialMessages + movedMessages);
@@ -3028,9 +3943,9 @@ void main() {
           newMessages: movedMessages,
         ));
         // Check that _reset was called.
-        check(model).fetched.isFalse();
-        checkHasMessages([]);
-        checkNotifiedOnce();
+        check(model).fetched.equals(store.debugCoverageEnabled);
+        checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
         check(model).busyFetchingMore.isFalse();
         check(backoffTimerA.isActive).isTrue();
 
@@ -3066,7 +3981,7 @@ void main() {
         checkNotifiedOnce();
       }));
 
-      test('fetchInitial, _reset, initial fetch finishes, move fetch finishes', () => awaitFakeAsync((async) async {
+      test('fetchInitial, _reset, initial fetch aborted, move fetch finishes', () => awaitFakeAsync((async) async {
         await prepareNarrow(narrow, null);
 
         connection.prepare(delay: const Duration(seconds: 1), json: newestResult(
@@ -3090,7 +4005,14 @@ void main() {
         check(model).fetched.isFalse();
         checkNotifiedOnce();
 
+        // The _reset aborted the initial fetch's request.
         await fetchFuture;
+        check(async.elapsed).equals(Duration.zero);
+        checkHasMessages([]);
+        check(model).fetched.isFalse();
+        checkNotNotified();
+
+        async.elapse(const Duration(seconds: 1));
         checkHasMessages([]);
         check(model).fetched.isFalse();
         checkNotNotified();
@@ -3154,9 +4076,9 @@ void main() {
           origStreamId: otherStream.streamId,
           newMessages: movedMessages,
         ));
-        checkHasMessages([]);
+        checkHasMessages(store.debugCoverageEnabled ? initialMessages : []);
         check(model).busyFetchingMore.isFalse();
-        checkNotifiedOnce();
+        checkNotified(count: store.debugCoverageEnabled ? 2 : 1);
 
         async.elapse(const Duration(seconds: 1));
         checkNotifiedOnce();
@@ -3221,7 +4143,7 @@ void main() {
         eg.reactionEvent(eg.unicodeEmojiReaction, ReactionOp.add, message.id));
 
       check(notifiedCount1).equals(3); // fetch, new-message event, reaction event
-      check(notifiedCount2).equals(3); // fetch, new-message event, reaction event
+      check(notifiedCount2).equals(store.debugCoverageEnabled ? 4 : 3);
 
       check(model1.messages.last)
         ..identicalTo(model2.messages.last)
@@ -4283,11 +5205,824 @@ void main() {
     doTest(time, '2021-01-02 00:30:00', false);
     doTest(time, '2021-01-01 01:30:00', false);
   });
+
+  test('I8 keyed view span agrees with store coverage', () async {
+    final stream = eg.stream();
+    await prepare(
+      stream: stream,
+      narrow: TopicNarrow(stream.streamId, eg.t('topic')),
+    );
+    store.debugSetCoverageEnabled(true);
+
+    connection.prepare(json: eg.newestGetMessagesResult(
+      foundOldest: false,
+      messages: [
+        eg.streamMessage(id: 20, stream: stream, topic: 'topic'),
+        eg.streamMessage(id: 30, stream: stream, topic: 'topic'),
+      ],
+    ).toJson());
+    await model.fetchInitial();
+    checkNotifiedOnce();
+
+    connection.prepare(json: eg.olderGetMessagesResult(
+      anchor: 20,
+      foundOldest: true,
+      messages: [
+        eg.streamMessage(id: 10, stream: stream, topic: 'topic'),
+      ],
+    ).toJson());
+    await model.fetchOlder();
+    checkNotified(count: 2);
+
+    await store.handleEvent(eg.messageEvent(
+      eg.streamMessage(id: 35, stream: stream, topic: 'topic'),
+    ));
+    checkNotifiedOnce();
+  });
+
+  group('outbox atKnownNewest', () {
+    Future<(Message, Message)> seedStaleNewestTopic(
+      FakeAsync async,
+      ZulipStream stream,
+      String topic,
+    ) async {
+      store.debugSetCoverageEnabled(true);
+      final m10 = eg.streamMessage(id: 10, stream: stream, topic: topic);
+      final m20 = eg.streamMessage(id: 20, stream: stream, topic: topic);
+      final warmView = MessageListView.init(
+        store: store,
+        narrow: TopicNarrow(stream.streamId, eg.t(topic)),
+        anchor: AnchorCode.newest,
+      );
+      connection.prepare(json: eg.newestGetMessagesResult(
+        foundOldest: true,
+        messages: [m10],
+      ).toJson());
+      final warmFuture = warmView.fetchInitial();
+      async.elapse(Duration.zero);
+      await warmFuture;
+      warmView.dispose();
+      // Advance eventHighWater to 20 so SubscriptionRemoveEvent closes [0..20] instead of dropping it.
+      await store.handleEvent(eg.messageEvent(m20));
+      await store.handleEvent(SubscriptionRemoveEvent(
+        id: 1, channelIds: [stream.streamId]));
+      await store.handleEvent(SubscriptionAddEvent(
+        id: 2, subscriptions: [eg.subscription(stream)]));
+      connection.takeRequests();
+      return (m10, m20);
+    }
+
+    test('shows failed and waiting outbox at atKnownNewest, hidden mid-history', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      final (m10, _) = await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+      check(model)
+        ..fetched.isTrue()
+        ..haveNewest.isFalse()
+        ..atKnownNewest.isTrue()
+        ..revalidation.equals(RevalidationState.failing);
+      checkNotified(count: 1);
+
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        httpException: SocketException('send failed'),
+      );
+      final sendFuture = store.sendMessage(
+        destination: StreamDestination(stream.streamId, eg.t('topic')),
+        content: 'hello offline');
+      final sendCheck = check(sendFuture).throws<Exception>();
+      async.elapse(kLocalEchoDebounceDuration);
+      check(model.outboxMessages).single.state.equals(OutboxMessageState.waiting);
+      checkNotified(count: 1);
+      async.elapse(const Duration(seconds: 1));
+      await sendCheck;
+      check(model.outboxMessages).single.state.equals(OutboxMessageState.failed);
+      checkNotified(count: 1);
+
+      // A mid-history view below atKnownNewest must NOT show the outbox.
+      final midModel = MessageListView.init(
+        store: store,
+        narrow: narrow,
+        anchor: const NumericAnchor(10),
+      );
+      addTearDown(midModel.dispose);
+      connection.prepare(json: eg.nearGetMessagesResult(
+        anchor: 10,
+        foundOldest: false,
+        foundNewest: false,
+        messages: [
+          eg.streamMessage(id: 5, stream: stream, topic: 'topic'),
+          m10,
+          eg.streamMessage(id: 15, stream: stream, topic: 'topic'),
+        ],
+      ).toJson());
+      final midFuture = midModel.fetchInitial();
+      async.elapse(Duration.zero);
+      await midFuture;
+      check(midModel)
+        ..haveNewest.isFalse()
+        ..atKnownNewest.isFalse()
+        ..outboxMessages.isEmpty();
+
+      model.dispose();
+    }));
+
+    test('MessageEvent for own send at atKnownNewest shows sent state, wakes revalidation, and dedupes on merge', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      final (m10, m20) = await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      check(model)
+        ..haveNewest.isFalse()
+        ..atKnownNewest.isTrue()
+        ..revalidation.equals(RevalidationState.failing);
+
+      // Prepare revalidation retry response with a gap message (25) plus the sent message (30).
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        json: SendMessageResult(id: 30).toJson(),
+      );
+      final sendFuture = store.sendMessage(
+        destination: StreamDestination(stream.streamId, eg.t('topic')),
+        content: 'sent while stale');
+      async.elapse(kLocalEchoDebounceDuration);
+      checkNotifiedOnce();
+      check(model.outboxMessages).single.state.equals(OutboxMessageState.waiting);
+      async.elapse(const Duration(seconds: 1));
+      await sendFuture;
+      final localId = model.outboxMessages.single.localMessageId;
+
+      // Event arrives before revalidation succeeds: item moves to sent state,
+      // message 30 is NOT appended past the gap, and revalidation backoff wakes.
+      connection.prepare(delay: const Duration(seconds: 1),
+        json: newestResult(foundOldest: true, messages: [
+          m10,
+          m20,
+          eg.streamMessage(id: 25, stream: stream, topic: 'topic'),
+          eg.streamMessage(id: 30, stream: stream, topic: 'topic'),
+        ]).toJson());
+      await store.handleEvent(eg.messageEvent(
+        eg.streamMessage(id: 30, stream: stream, topic: 'topic'),
+        localMessageId: localId,
+      ));
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      check(model)
+        ..haveNewest.isFalse()
+        ..atKnownNewest.isTrue()
+        ..revalidation.equals(RevalidationState.failing);
+      check(model.outboxMessages).single
+        ..state.equals(OutboxMessageState.sent)
+        ..messageId.equals(30);
+      checkHasMessageIds([10, 20]);
+
+      // When revalidation completes, 25 and 30 merge in and the sent outbox item is removed.
+      async.elapse(const Duration(seconds: 1));
+      checkNotified(count: 2);
+      check(model)
+        ..haveNewest.isTrue()
+        ..revalidation.equals(RevalidationState.none)
+        ..outboxMessages.isEmpty();
+      checkHasMessageIds([10, 20, 25, 30]);
+    }));
+
+    test('pre-debounce MessageEvent at atKnownNewest adds sent outbox item until merge', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      final (m10, m20) = await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+
+      connection.prepare(json: SendMessageResult(id: 31).toJson());
+      final sendFuture = store.sendMessage(
+        destination: StreamDestination(stream.streamId, eg.t('topic')),
+        content: 'fast send');
+      async.elapse(Duration.zero);
+      await sendFuture;
+      // Debounce timer has NOT fired yet; outbox message is still hidden.
+      final localId = store.outboxMessages.keys.single;
+      check(model.outboxMessages).isEmpty();
+
+      connection.prepare(delay: const Duration(seconds: 1),
+        json: newestResult(foundOldest: true, messages: [
+          m10,
+          m20,
+          eg.streamMessage(id: 31, stream: stream, topic: 'topic'),
+        ]).toJson());
+      await store.handleEvent(eg.messageEvent(
+        eg.streamMessage(id: 31, stream: stream, topic: 'topic'),
+        localMessageId: localId,
+      ));
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      check(model.outboxMessages).single
+        ..state.equals(OutboxMessageState.sent)
+        ..messageId.equals(31);
+      checkHasMessageIds([10, 20]);
+
+      async.elapse(const Duration(seconds: 1));
+      checkNotified(count: 2);
+      check(model)
+        ..haveNewest.isTrue()
+        ..outboxMessages.isEmpty();
+      checkHasMessageIds([10, 20, 31]);
+    }));
+
+    test('jumpToEnd while revalidating newest jumps locally without resetting revalidation', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      final (m10, m20) = await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+      checkNotifiedOnce();
+      final genBefore = model.generation;
+      final reqCountBefore = connection.takeRequests().length;
+      check(reqCountBefore).equals(1);
+
+      model.jumpToEnd();
+      checkNotifiedOnce();
+      check(model.generation).equals(genBefore);
+      check(model.revalidation).equals(RevalidationState.failing);
+      check(connection.takeRequests()).isEmpty();
+      checkHasMessageIds([10, 20]);
+
+      // Drain backoff retry cleanly before test ends.
+      connection.prepare(json: newestResult(foundOldest: true, messages: [
+        m10,
+        m20,
+      ]).toJson());
+      async.elapse(const Duration(seconds: 11));
+      checkNotified(count: 2);
+    }));
+
+    test('delayed failing retries keep RevalidationState.failing without extra notifications', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      final (m10, m20) = await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(
+        delay: const Duration(seconds: 1),
+        httpException: SocketException('offline'),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 500));
+      // After the 500ms stale grace timer, cached stale content is shown with
+      // revalidation in flight until the first failure lands at +500ms.
+      checkNotifiedOnce();
+      check(model.revalidation).equals(RevalidationState.inFlight);
+
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotifiedOnce();
+      check(model.revalidation).equals(RevalidationState.failing);
+      check(model.showStaleOfflineBanner).isTrue();
+      check(connection.takeRequests()).length.equals(1);
+
+      // Next delayed failure across BackoffMachine interval keeps failing state
+      // cleanly with no spurious notifications while in flight or after failing.
+      connection.prepare(
+        delay: const Duration(seconds: 4),
+        httpException: SocketException('offline'),
+      );
+      async.elapse(const Duration(seconds: 10));
+      checkNotified(count: 0);
+      check(model.revalidation).equals(RevalidationState.failing);
+      check(model.showStaleOfflineBanner).isTrue();
+      check(connection.takeRequests()).length.equals(1);
+
+      // Even past the stale banner threshold (3s) mid-retry, nothing flickers.
+      async.elapse(const Duration(seconds: 3));
+      checkNotified(count: 0);
+      check(model.revalidation).equals(RevalidationState.failing);
+      check(model.showStaleOfflineBanner).isTrue();
+
+      async.elapse(const Duration(seconds: 1));
+      checkNotified(count: 0);
+      check(model.revalidation).equals(RevalidationState.failing);
+      check(model.showStaleOfflineBanner).isTrue();
+
+      // Drain third retry cleanly before test ends.
+      connection.prepare(json: newestResult(foundOldest: true, messages: [
+        m10,
+        m20,
+      ]).toJson());
+      async.elapse(const Duration(seconds: 10));
+      check(model.revalidation).equals(RevalidationState.none);
+      check(model.showStaleOfflineBanner).isFalse();
+    }));
+
+    test('non-retryable error during revalidation resets view and clears revalidation', () => awaitFakeAsync((async) async {
+      final stream = eg.stream();
+      final narrow = TopicNarrow(stream.streamId, eg.t('topic'));
+      await prepare(narrow: narrow, stream: stream);
+      await seedStaleNewestTopic(async, stream, 'topic');
+
+      connection.prepare(
+        delay: const Duration(seconds: 4),
+        apiException: eg.apiBadRequest(),
+      );
+      final fetchCheck = check(model.fetchInitial()).throws<ZulipApiException>();
+      async.elapse(const Duration(milliseconds: 500));
+      checkNotifiedOnce();
+      check(model)
+        ..fetched.isTrue()
+        ..revalidation.equals(RevalidationState.inFlight);
+      check(model.showStaleRevalidatingBanner).isFalse();
+
+      async.elapse(const Duration(seconds: 3));
+      checkNotifiedOnce();
+      check(model.showStaleRevalidatingBanner).isTrue();
+
+      async.elapse(const Duration(seconds: 1));
+      await fetchCheck;
+      checkNotifiedOnce();
+      check(model)
+        ..fetched.isFalse()
+        ..messages.isEmpty()
+        ..revalidation.equals(RevalidationState.none);
+      check(model.showStaleRevalidatingBanner).isFalse();
+    }));
+  });
+
+  group('KeywordSearchNarrow offline fallback', () {
+    test('retryable error falls back to saved messages, then replaces results on recovery', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('espresso'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final localMatch = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Coffee', content: '<p>espresso tonic</p>');
+      final localNonMatch = eg.streamMessage(
+        id: 11, stream: stream, topic: 'Tea', content: '<p>green tea</p>');
+      await store.handleEvent(eg.messageEvent(localMatch));
+      await store.handleEvent(eg.messageEvent(localNonMatch));
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(model)
+        ..fetched.isTrue()
+        ..fetchInitialFailing.isFalse()
+        ..revalidation.equals(RevalidationState.failing)
+        ..haveOldest.isFalse()
+        ..haveNewest.isTrue();
+      check(model.showingSavedSearchResults).isTrue();
+      check(model.showStaleOfflineBanner).isFalse();
+      check(model.showStaleRevalidatingBanner).isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+
+      // On server recovery, saved results are completely replaced (not merged).
+      final serverOnly = eg.streamMessage(
+        id: 50, stream: stream, topic: 'Server', content: '<p>espresso server hit</p>');
+      connection.prepare(json: newestResult(foundOldest: true, messages: [
+        serverOnly,
+      ]).toJson());
+      async.elapse(const Duration(seconds: 10));
+
+      check(model)
+        ..revalidation.equals(RevalidationState.none)
+        ..haveOldest.isTrue()
+        ..haveNewest.isTrue();
+      check(model.showingSavedSearchResults).isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50]);
+    }));
+
+    test('immediate offline fast-path and zero local matches', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('nonexistent'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+      await store.handleEvent(eg.messageEvent(
+        eg.streamMessage(id: 5, stream: stream, topic: 'Hi', content: '<p>unrelated</p>'),
+      ));
+      async.elapse(Duration.zero);
+
+      connection.prepare(
+        delay: const Duration(seconds: 2),
+        httpException: SocketException('offline'),
+      );
+      unawaited(model.fetchInitial());
+      async.flushMicrotasks();
+
+      // Immediately shows saved-search state (0 matches) while request is in flight.
+      check(model)
+        ..fetched.isTrue()
+        ..fetchInitialFailing.isFalse()
+        ..revalidation.equals(RevalidationState.inFlight)
+        ..messages.isEmpty();
+      check(model.showingSavedSearchResults).isTrue();
+
+      async.elapse(const Duration(seconds: 2));
+      check(model)
+        ..revalidation.equals(RevalidationState.failing)
+        ..messages.isEmpty();
+      check(model.showingSavedSearchResults).isTrue();
+
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      async.elapse(const Duration(seconds: 10));
+      check(model.showingSavedSearchResults).isFalse();
+    }));
+
+    test('show saved search results after 500ms when request hangs', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('espresso'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final localMatch = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Coffee', content: '<p>espresso tonic</p>');
+      await store.handleEvent(eg.messageEvent(localMatch));
+
+      // Hung request while hasConnectivity is still true (e.g. dead Wi-Fi/VPN).
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 50, stream: stream, topic: 'Server', content: '<p>espresso server</p>'),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 400));
+      check(model.fetched).isFalse();
+
+      async.elapse(const Duration(milliseconds: 100));
+      check(model)
+        ..fetched.isTrue()
+        ..revalidation.equals(RevalidationState.inFlight);
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+      check(model.showingSavedSearchResults).isTrue();
+
+      async.elapse(const Duration(seconds: 30));
+      check(model).revalidation.equals(RevalidationState.none);
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50]);
+      check(model.showingSavedSearchResults).isFalse();
+    }));
+
+    test('paginates older saved search results offline until exhausted', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('match'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final total = kMessageListFetchBatchSize + 25;
+      for (var i = 1; i <= total; i++) {
+        await store.handleEvent(eg.messageEvent(eg.streamMessage(
+          id: i, stream: stream, topic: 'T', content: '<p>match $i</p>',
+        )));
+      }
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(model.showingSavedSearchResults).isTrue();
+      check(model.messages.length).equals(kMessageListFetchBatchSize);
+      check(model.messages.first.id).equals(26);
+      check(model.messages.last.id).equals(total);
+      check(model.showOfflineOlderNotice).isFalse();
+
+      await model.fetchOlder();
+      check(model.messages.length).equals(total);
+      check(model.messages.first.id).equals(1);
+      check(model.showOfflineOlderNotice).isTrue();
+
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      async.elapse(const Duration(seconds: 10));
+    }));
+
+    test('empty non-DB store with coverageEnabled still sets fetchInitialFailing', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: KeywordSearchNarrow('hello'), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(model)
+        ..fetched.isFalse()
+        ..fetchInitialFailing.isTrue();
+      check(model.showingSavedSearchResults).isFalse();
+
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      async.elapse(const Duration(seconds: 10));
+    }));
+  });
+
+  group('CombinedFeedNarrow, MentionsNarrow, and StarredMessagesNarrow offline synthesis', () {
+    test('CombinedFeedNarrow: saved channel and DM messages offline, paginate older', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      final mutedStream = eg.stream(streamId: 11, name: 'Muted');
+      final otherUser = eg.user(userId: 50);
+      final mutedUser = eg.user(userId: 51);
+      await prepare(
+        narrow: const CombinedFeedNarrow(),
+        stream: stream,
+        users: [otherUser, mutedUser],
+        mutedUserIds: [mutedUser.userId],
+      );
+      await store.addStream(mutedStream);
+      await store.addSubscription(eg.subscription(mutedStream, isMuted: true));
+      store.debugSetCoverageEnabled(true);
+
+      // Seed more than one batch of visible messages, plus muted channel/DM messages.
+      final totalVisible = kMessageListFetchBatchSize + 10;
+      for (var i = 1; i <= totalVisible; i++) {
+        await store.handleEvent(eg.messageEvent(i.isEven
+          ? eg.dmMessage(id: i, from: otherUser, to: [eg.selfUser], content: '<p>dm $i</p>')
+          : eg.streamMessage(id: i, stream: stream, topic: 'T', content: '<p>msg $i</p>')));
+      }
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(
+        id: totalVisible + 1, stream: mutedStream, topic: 'Mute', content: '<p>hidden</p>')));
+      await store.handleEvent(eg.messageEvent(eg.dmMessage(
+        id: totalVisible + 2, from: mutedUser, to: [eg.selfUser], content: '<p>muted dm</p>')));
+
+      connection.prepare(
+        delay: const Duration(seconds: 2),
+        httpException: SocketException('offline'),
+      );
+      unawaited(model.fetchInitial());
+      async.flushMicrotasks();
+
+      check(model)
+        ..fetched.isTrue()
+        ..fetchInitialFailing.isFalse()
+        ..revalidation.equals(RevalidationState.inFlight)
+        ..showingSavedMessages.isTrue()
+        ..showingSavedSearchResults.isFalse()
+        ..showStaleOfflineBanner.isFalse()
+        ..showOfflineOlderNotice.isFalse();
+      check(model.messages.length).equals(kMessageListFetchBatchSize);
+      check(model.messages.first.id).equals(11);
+      check(model.messages.last.id).equals(totalVisible);
+
+      async.elapse(const Duration(seconds: 2));
+      check(model)
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isFalse();
+
+      await model.fetchOlder();
+      check(model.messages.length).equals(totalVisible);
+      check(model.messages.first.id).equals(1);
+      check(model.showOfflineOlderNotice).isTrue();
+
+      // Recovery replaces synthesized results cleanly and clears stale/saved state.
+      final freshServerMsg = eg.streamMessage(
+        id: 500, stream: stream, topic: 'Fresh', content: '<p>fresh</p>');
+      connection.prepare(json: newestResult(foundOldest: true, messages: [
+        freshServerMsg,
+      ]).toJson());
+      async.elapse(const Duration(seconds: 10));
+      check(model)
+        ..revalidation.equals(RevalidationState.none)
+        ..showingSavedMessages.isFalse()
+        ..showStaleOfflineBanner.isFalse()
+        ..haveOldest.isTrue()
+        ..haveNewest.isTrue();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([500]);
+    }));
+
+    test('CombinedFeedNarrow: fall back after 500ms on hung fetch', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(), stream: stream);
+      store.debugSetCoverageEnabled(true);
+
+      final cached = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Cached', content: '<p>cached</p>');
+      await store.handleEvent(eg.messageEvent(cached));
+
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 50, stream: stream, topic: 'Live', content: '<p>live</p>'),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 400));
+      check(model.fetched).isFalse();
+
+      async.elapse(const Duration(milliseconds: 100));
+      check(model)
+        ..fetched.isTrue()
+        ..revalidation.equals(RevalidationState.inFlight)
+        ..showingSavedMessages.isTrue()
+        ..showingSavedSearchResults.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+
+      async.elapse(const Duration(seconds: 30));
+      check(model)
+        ..revalidation.equals(RevalidationState.none)
+        ..showingSavedMessages.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50]);
+    }));
+
+    test('CombinedFeedNarrow: keep messages arriving while saved messages show', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(), stream: stream);
+      store.debugSetCoverageEnabled(true);
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 10, stream: stream)));
+
+      // The server computes its response before message 60 is sent.
+      final live = eg.streamMessage(id: 50, stream: stream);
+      connection.prepare(
+        delay: const Duration(seconds: 30),
+        json: newestResult(foundOldest: true, messages: [live]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.elapse(const Duration(milliseconds: 500));
+      check(model).showingSavedMessages.isTrue();
+
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 60, stream: stream)));
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10, 60]);
+
+      async.elapse(const Duration(seconds: 30));
+      check(model).showingSavedMessages.isFalse();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([50, 60]);
+    }));
+
+    test('CombinedFeedNarrow: no saved-messages fallback when anchored at first unread', () => awaitFakeAsync((async) async {
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+      final stream = eg.stream(streamId: 10, name: 'General');
+      await prepare(narrow: const CombinedFeedNarrow(),
+        anchor: AnchorCode.firstUnread, stream: stream);
+      store.debugSetCoverageEnabled(true);
+      await store.handleEvent(eg.messageEvent(eg.streamMessage(id: 10, stream: stream)));
+
+      connection.prepare(
+        delay: const Duration(seconds: 2),
+        json: newestResult(foundOldest: true, messages: [
+          eg.streamMessage(id: 10, stream: stream),
+        ]).toJson(),
+      );
+      unawaited(model.fetchInitial());
+      async.flushMicrotasks();
+      check(model).showingSavedMessages.isFalse();
+
+      async.elapse(const Duration(seconds: 2));
+      check(model)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isFalse();
+    }));
+
+    test('MentionsNarrow and StarredMessagesNarrow: saved messages offline', () => awaitFakeAsync((async) async {
+      BackoffMachine.debugDuration = const Duration(seconds: 10);
+      addTearDown(() => BackoffMachine.debugDuration = null);
+      TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+      addTearDown(TestZulipBinding.instance.reset);
+
+      final stream = eg.stream(streamId: 10, name: 'General');
+      final otherUser = eg.user(userId: 50);
+      await prepare(
+        narrow: const MentionsNarrow(),
+        stream: stream,
+        users: [otherUser],
+        starredMessages: [20],
+      );
+      store.debugSetCoverageEnabled(true);
+
+      final mMention = eg.streamMessage(
+        id: 10, stream: stream, topic: 'Ping', sender: otherUser,
+        content: '<p>@self</p>', flags: [MessageFlag.read, MessageFlag.mentioned]);
+      final mStarred = eg.streamMessage(
+        id: 20, stream: stream, topic: 'Star', sender: otherUser,
+        content: '<p>star</p>', flags: [MessageFlag.read, MessageFlag.starred]);
+      final mPlain = eg.streamMessage(
+        id: 30, stream: stream, topic: 'Plain', sender: otherUser,
+        content: '<p>plain</p>', flags: [MessageFlag.read]);
+      for (final m in [mMention, mStarred, mPlain]) {
+        await store.handleEvent(eg.messageEvent(m));
+      }
+
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(model.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(model)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isTrue()
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isTrue();
+      check(model.messages.map((m) => m.id).toList()).deepEquals([10]);
+
+      final starredModel = MessageListView.init(
+        store: store,
+        narrow: const StarredMessagesNarrow(),
+        anchor: AnchorCode.newest,
+      );
+      addTearDown(starredModel.dispose);
+      connection.prepare(httpException: SocketException('offline'));
+      unawaited(starredModel.fetchInitial());
+      async.elapse(Duration.zero);
+
+      check(starredModel)
+        ..fetched.isTrue()
+        ..showingSavedMessages.isTrue()
+        ..revalidation.equals(RevalidationState.failing)
+        ..showStaleOfflineBanner.isTrue()
+        ..showOfflineOlderNotice.isTrue();
+      check(starredModel.messages.map((m) => m.id).toList()).deepEquals([20]);
+
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      connection.prepare(json: newestResult(foundOldest: true, messages: []).toJson());
+      async.elapse(const Duration(seconds: 10));
+    }));
+
+    test('CombinedFeedNarrow: keep channel coverage when fetch omits pre-subscription history', () => awaitFakeAsync((async) async {
+      final stream = eg.stream(streamId: 10, name: 'Public', inviteOnly: false);
+      final channelModel = (await () async {
+        await prepare(narrow: ChannelNarrow(stream.streamId), stream: stream);
+        return model;
+      }());
+      store.debugSetCoverageEnabled(true);
+
+      // Historical message 5 fetched in ChannelNarrow before recent message 20.
+      final m5 = eg.streamMessage(id: 5, stream: stream, topic: 'Old', content: '<p>old</p>');
+      final m20 = eg.streamMessage(id: 20, stream: stream, topic: 'New', content: '<p>new</p>');
+      await prepareMessages(foundOldest: true, messages: [m5, m20]);
+      check(store.messages[5]).isNotNull();
+
+      // CombinedFeedNarrow returns only m20 (omitting pre-subscription m5).
+      final combinedModel = MessageListView.init(
+        store: store,
+        narrow: const CombinedFeedNarrow(),
+        anchor: AnchorCode.newest,
+      );
+      addTearDown(combinedModel.dispose);
+      connection.prepare(json: newestResult(foundOldest: true, messages: [m20]).toJson());
+      await combinedModel.fetchInitial();
+
+      // m5 remains in store and channel coverage stays intact.
+      check(store.messages[5]).isNotNull();
+      final channelChains = store.debugCoverage.chains(CoverageKeys.channel(stream.streamId));
+      check(channelChains).single
+        ..has((c) => c.reachesOldest, 'reachesOldest').isTrue()
+        ..has((c) => c.isOpen, 'isOpen').isTrue();
+      check(channelModel.messages.map((m) => m.id).toList()).deepEquals([5, 20]);
+    }));
+  });
+}
+
+extension SavedMessagesFlagChecks on Subject<MessageListView> {
+  Subject<bool> get showingSavedMessages =>
+    has((x) => x.showingSavedMessages, 'showingSavedMessages');
+  Subject<bool> get showingSavedSearchResults =>
+    has((x) => x.showingSavedSearchResults, 'showingSavedSearchResults');
+  Subject<bool> get showStaleOfflineBanner =>
+    has((x) => x.showStaleOfflineBanner, 'showStaleOfflineBanner');
+  Subject<bool> get showOfflineOlderNotice =>
+    has((x) => x.showOfflineOlderNotice, 'showOfflineOlderNotice');
 }
 
 MessageListView? _lastModel;
 List<Message>? _lastMessages;
 int? _lastMiddleMessage;
+RevalidationState? _lastRevalidation;
 
 void checkInvariants(MessageListView model) {
   if (!model.fetched) {
@@ -4300,6 +6035,9 @@ void checkInvariants(MessageListView model) {
       ..haveNewest.isFalse()
       ..busyFetchingMore.isFalse();
   }
+  if (model.fetchInitialFailing) {
+    check(model).fetched.isFalse();
+  }
   if (model.haveOldest && model.haveNewest) {
     check(model).busyFetchingMore.isFalse();
   }
@@ -4308,11 +6046,17 @@ void checkInvariants(MessageListView model) {
     check(model.store.messages)[message.id].isNotNull().identicalTo(message);
   }
   if (model.outboxMessages.isNotEmpty) {
-    check(model.haveNewest).isTrue();
+    check(model.haveNewest || model.atKnownNewest).isTrue();
   }
   for (final message in model.outboxMessages) {
     check(message).hidden.isFalse();
-    check(model.store.outboxMessages)[message.localMessageId].isNotNull().identicalTo(message);
+    if (message.state == OutboxMessageState.sent) {
+      check(model.haveNewest).isFalse();
+      check(model.atKnownNewest).isTrue();
+      check(message.messageId).isNotNull();
+    } else {
+      check(model.store.outboxMessages)[message.localMessageId].isNotNull().identicalTo(message);
+    }
   }
 
   final allMessages = [...model.messages, ...model.outboxMessages];
@@ -4365,12 +6109,44 @@ void checkInvariants(MessageListView model) {
       .isGreaterOrEqual(model.messages.last.id);
   }
 
+  // I8: keyed views' spans agree with store coverage when coverageEnabled is on.
+  final key = coverageKey(model.narrow);
+  final isSubscribedChannel = switch (model.narrow) {
+    ChannelNarrow(:final channelId) || TopicNarrow(:final channelId) =>
+      model.store.subscriptions.containsKey(channelId),
+    _ => true,
+  };
+  if (model.store.debugCoverageEnabled && model.fetched && key != null && isSubscribedChannel) {
+    final chains = model.store.debugCoverage.chains(key);
+    if (model.messages.isNotEmpty) {
+      final first = model.messages.first.id;
+      final last = model.messages.last.id;
+      final matching = chains.where((c) => c.contains(first) && c.contains(last));
+      check(matching).isNotEmpty();
+      if (model.haveOldest) {
+        check(matching.any((c) => c.reachesOldest)).isTrue();
+      }
+      if (model.haveNewest) {
+        check(chains.any((c) => c.isOpen)).isTrue();
+      }
+    } else {
+      if (model.haveOldest) {
+        check(chains.any((c) => c.reachesOldest)).isTrue();
+      }
+      if (model.haveNewest) {
+        check(chains.any((c) => c.isOpen)).isTrue();
+      }
+    }
+  }
+
   check(model).middleMessage
     ..isGreaterOrEqual(0)
     ..isLessOrEqual(model.messages.length);
 
   if (identical(model, _lastModel)
-      && model.generation == _lastModel!.generation) {
+      && model.generation == _lastModel!.generation
+      && _lastRevalidation == RevalidationState.none
+      && model.revalidation == RevalidationState.none) {
     // All messages that were present, and still are, should be on the same side
     // of `middleMessage` (still top or bottom slice respectively) as they were.
     _checkNoIntersection(ListSlice(model.messages, 0, model.middleMessage),
@@ -4383,6 +6159,7 @@ void checkInvariants(MessageListView model) {
   _lastModel = model;
   _lastMessages = model.messages.toList();
   _lastMiddleMessage = model.middleMessage;
+  _lastRevalidation = model.revalidation;
 
   check(model).contents.length.equals(model.messages.length);
   for (int i = 0; i < model.contents.length; i++) {
@@ -4491,9 +6268,12 @@ extension MessageListViewChecks on Subject<MessageListView> {
   Subject<List<MessageListItem>> get items => has((x) => x.items, 'items');
   Subject<int> get middleItem => has((x) => x.middleItem, 'middleItem');
   Subject<bool> get fetched => has((x) => x.fetched, 'fetched');
+  Subject<bool> get fetchInitialFailing => has((x) => x.fetchInitialFailing, 'fetchInitialFailing');
   Subject<int?> get oldestFetchedMessageId => has((x) => x.oldestFetchedMessageId, 'oldestFetchedMessageId');
   Subject<int?> get newestFetchedMessageId => has((x) => x.newestFetchedMessageId, 'newestFetchedMessageId');
   Subject<bool> get haveOldest => has((x) => x.haveOldest, 'haveOldest');
   Subject<bool> get haveNewest => has((x) => x.haveNewest, 'haveNewest');
+  Subject<bool> get atKnownNewest => has((x) => x.atKnownNewest, 'atKnownNewest');
+  Subject<RevalidationState> get revalidation => has((x) => x.revalidation, 'revalidation');
   Subject<bool> get busyFetchingMore => has((x) => x.busyFetchingMore, 'busyFetchingMore');
 }

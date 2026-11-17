@@ -882,6 +882,10 @@
   "@emptyMessageListSearch": {
     "description": "Placeholder for the 'Search' page when there are no messages."
   },
+  "messageListCantConnectRetrying": "Can’t connect. Retrying…",
+  "@messageListCantConnectRetrying": {
+    "description": "Text shown with a loading indicator in the message list, or a channel's topic list, when loading messages or topics from the server keeps failing, as when the device is offline."
+  },
   "messageListGroupYouWithYourself": "Messages with yourself",
   "@messageListGroupYouWithYourself": {
     "description": "Message list recipient header for a DM group that only includes yourself."
@@ -1724,5 +1728,83 @@
   "topicListEmptyPlaceholderHeader": "There are no topics here yet.",
   "@topicListEmptyPlaceholderHeader": {
     "description": "Header text shown when a channel has no topics."
+  },
+  "messageListBannerUpdatingNoAge": "Updating… Showing messages saved on this device.",
+  "@messageListBannerUpdatingNoAge": {
+    "description": "Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, without a known age."
+  },
+  "messageListBannerUpdatingJustNow": "Updating… Showing messages saved on this device, last updated just now.",
+  "@messageListBannerUpdatingJustNow": {
+    "description": "Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified less than a minute ago."
+  },
+  "messageListBannerUpdatingMinutesAgo": "Updating… Showing messages saved on this device, last updated {minutes, plural, =1{1 minute} other{{minutes} minutes}} ago.",
+  "@messageListBannerUpdatingMinutesAgo": {
+    "description": "Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified minutes ago.",
+    "placeholders": {
+      "minutes": {"type": "int", "example": "5"}
+    }
+  },
+  "messageListBannerUpdatingHoursAgo": "Updating… Showing messages saved on this device, last updated {hours, plural, =1{1 hour} other{{hours} hours}} ago.",
+  "@messageListBannerUpdatingHoursAgo": {
+    "description": "Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified hours ago.",
+    "placeholders": {
+      "hours": {"type": "int", "example": "3"}
+    }
+  },
+  "messageListBannerUpdatingDaysAgo": "Updating… Showing messages saved on this device, last updated {days, plural, =1{1 day} other{{days} days}} ago.",
+  "@messageListBannerUpdatingDaysAgo": {
+    "description": "Banner shown when a message list has shown local data for at least 3 seconds while revalidating online, when saved messages were verified days ago.",
+    "placeholders": {
+      "days": {"type": "int", "example": "2"}
+    }
+  },
+  "messageListBannerOfflineNoAge": "Offline. Showing messages saved on this device.",
+  "@messageListBannerOfflineNoAge": {
+    "description": "Banner shown when revalidating a message list's local data fails offline, without a known age."
+  },
+  "messageListBannerOfflineJustNow": "Offline. Showing messages saved on this device, last updated just now.",
+  "@messageListBannerOfflineJustNow": {
+    "description": "Banner shown when revalidating a message list's local data fails offline, when saved messages were verified less than a minute ago."
+  },
+  "messageListBannerOfflineMinutesAgo": "Offline. Showing messages saved on this device, last updated {minutes, plural, =1{1 minute} other{{minutes} minutes}} ago.",
+  "@messageListBannerOfflineMinutesAgo": {
+    "description": "Banner shown when revalidating a message list's local data fails offline, when saved messages were verified minutes ago.",
+    "placeholders": {
+      "minutes": {"type": "int", "example": "5"}
+    }
+  },
+  "messageListBannerOfflineHoursAgo": "Offline. Showing messages saved on this device, last updated {hours, plural, =1{1 hour} other{{hours} hours}} ago.",
+  "@messageListBannerOfflineHoursAgo": {
+    "description": "Banner shown when revalidating a message list's local data fails offline, when saved messages were verified hours ago.",
+    "placeholders": {
+      "hours": {"type": "int", "example": "3"}
+    }
+  },
+  "messageListBannerOfflineDaysAgo": "Offline. Showing messages saved on this device, last updated {days, plural, =1{1 day} other{{days} days}} ago.",
+  "@messageListBannerOfflineDaysAgo": {
+    "description": "Banner shown when revalidating a message list's local data fails offline, when saved messages were verified days ago.",
+    "placeholders": {
+      "days": {"type": "int", "example": "2"}
+    }
+  },
+  "messageListCantLoadOlderOffline": "Can’t load older messages offline",
+  "@messageListCantLoadOlderOffline": {
+    "description": "Edge notice shown when older messages cannot be fetched while offline."
+  },
+  "messageListCantLoadNewerOffline": "Can’t load newer messages offline",
+  "@messageListCantLoadNewerOffline": {
+    "description": "Edge notice shown when newer messages cannot be fetched while offline."
+  },
+  "messageListAnchorFallbackOffline": "Newer messages, including the one you opened, aren’t available offline",
+  "@messageListAnchorFallbackOffline": {
+    "description": "Edge notice shown when opening a message offline fell back to an older saved window."
+  },
+  "topicListBannerLabelShowingSavedTopics": "Topics with messages saved on this device",
+  "@topicListBannerLabelShowingSavedTopics": {
+    "description": "Label text for a banner in a channel's topic list when it shows the topics that have messages saved on the device, because it has not yet been able to load the full topic list from the server."
+  },
+  "searchMessagesBannerLabelShowingSaved": "Results from messages saved on this device",
+  "@searchMessagesBannerLabelShowingSaved": {
+    "description": "Label text for a banner in search results when showing matches from messages saved on the device, because the server could not be reached."
   }
 }

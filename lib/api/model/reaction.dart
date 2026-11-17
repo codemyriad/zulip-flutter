@@ -33,13 +33,13 @@ class Reactions {
       current.userIds.add(reaction.userId);
     }
 
-    return Reactions._(
-      byReaction.values.sorted(
-        // Descending by number of votes
-        (a, b) => -a.userIds.length.compareTo(b.userIds.length),
-      ),
-      unaggregated.length,
-    );
+    final aggregated = byReaction.values.toList();
+    // A stable sort, so that ties keep their order;
+    // [List.sort] doesn't promise that.
+    mergeSort(aggregated,
+      // Descending by number of votes
+      compare: (a, b) => -a.userIds.length.compareTo(b.userIds.length));
+    return Reactions._(aggregated, unaggregated.length);
   }
 
   factory Reactions.fromJson(List<dynamic> json) {
@@ -71,7 +71,7 @@ class Reactions {
       aggregated.add(newItem);
     } else {
       final current = aggregated[currentIndex];
-      current.userIds.add(reaction.userId);
+      if (!current.userIds.add(reaction.userId)) return;
 
       // Reposition `current` in list to keep it sorted by number of votes
       final newIndex = 1 + aggregated.lastIndexWhere(
@@ -99,7 +99,7 @@ class Reactions {
       return;
     }
     final current = aggregated[currentIndex];
-    current.userIds.remove(userId);
+    if (!current.userIds.remove(userId)) return;
     if (current.userIds.isEmpty) {
       aggregated.removeAt(currentIndex);
     } else {

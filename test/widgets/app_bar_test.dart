@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/widgets/app_bar.dart';
 import 'package:zulip/widgets/profile.dart';
 
@@ -35,6 +36,55 @@ void main() {
 
     await tester.pump();
     check(tester.getRect(find.byType(ZulipAppBar))).equals(rectBefore);
+    check(finder.evaluate()).single;
+
+    // In airplane mode / no connectivity, the indicator hides while keeping bar height stable.
+    testBinding.notifyConnectivityChanged([ConnectivityResult.none]);
+    await tester.pump();
+    check(tester.getRect(find.byType(ZulipAppBar))).equals(rectBefore);
+    check(finder.evaluate()).isEmpty();
+
+    // When connectivity returns before failure, the indicator reappears.
+    testBinding.notifyConnectivityChanged([ConnectivityResult.wifi]);
+    await tester.pump();
+    check(finder.evaluate()).single;
+
+    // Once polling enters failing/backoff, the indicator hides even with connectivity.
+    store.isEventStreamFailing = true;
+    await tester.pump();
+    check(finder.evaluate()).isEmpty();
+
+    // Event stream recovery resets failing state and keeps indicator hidden.
+    store.isRecoveringEventStream = false;
+    await tester.pump();
+    check(store.isEventStreamFailing).isFalse();
+    check(finder.evaluate()).isEmpty();
+  });
+
+  testWidgets('hide progress indicator when recovering on initial airplane mode launch', (tester) async {
+    addTearDown(testBinding.reset);
+    testBinding.connectivityResult = const [ConnectivityResult.none];
+    await testBinding.globalStore.add(eg.selfAccount, eg.initialSnapshot());
+
+    final store = await testBinding.globalStore.perAccount(eg.selfAccount.id);
+    await store.addUser(eg.selfUser);
+    store.isRecoveringEventStream = true;
+
+    await tester.pumpWidget(TestZulipApp(accountId: eg.selfAccount.id,
+      child: ProfilePage(userId: eg.selfUser.userId)));
+
+    final finder = find.descendant(
+      of: find.byType(ZulipAppBar),
+      matching: find.byType(LinearProgressIndicator));
+
+    await tester.pump();
+    // Baseline checkConnectivity() completes asynchronously on first access;
+    // once it lands with [none], the indicator hides immediately.
+    await tester.pump();
+    check(finder.evaluate()).isEmpty();
+
+    testBinding.notifyConnectivityChanged([ConnectivityResult.wifi]);
+    await tester.pump();
     check(finder.evaluate()).single;
   });
 

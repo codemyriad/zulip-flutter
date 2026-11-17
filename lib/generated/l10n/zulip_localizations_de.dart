@@ -759,6 +759,9 @@ class ZulipLocalizationsDe extends ZulipLocalizations {
   String get emptyMessageListSearch => 'Keine Suchergebnisse.';
 
   @override
+  String get messageListCantConnectRetrying => 'Can’t connect. Retrying…';
+
+  @override
   String get messageListGroupYouWithYourself => 'Nachrichten mit dir selbst';
 
   @override
@@ -1473,4 +1476,106 @@ class ZulipLocalizationsDe extends ZulipLocalizations {
 
   @override
   String get topicListEmptyPlaceholderHeader => 'Es gibt noch keine Themen.';
+
+  @override
+  String get messageListBannerUpdatingNoAge =>
+      'Updating… Showing messages saved on this device.';
+
+  @override
+  String get messageListBannerUpdatingJustNow =>
+      'Updating… Showing messages saved on this device, last updated just now.';
+
+  @override
+  String messageListBannerUpdatingMinutesAgo(int minutes) {
+    String _temp0 = intl.Intl.pluralLogic(
+      minutes,
+      locale: localeName,
+      other: '$minutes minutes',
+      one: '1 minute',
+    );
+    return 'Updating… Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String messageListBannerUpdatingHoursAgo(int hours) {
+    String _temp0 = intl.Intl.pluralLogic(
+      hours,
+      locale: localeName,
+      other: '$hours hours',
+      one: '1 hour',
+    );
+    return 'Updating… Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String messageListBannerUpdatingDaysAgo(int days) {
+    String _temp0 = intl.Intl.pluralLogic(
+      days,
+      locale: localeName,
+      other: '$days days',
+      one: '1 day',
+    );
+    return 'Updating… Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String get messageListBannerOfflineNoAge =>
+      'Offline. Showing messages saved on this device.';
+
+  @override
+  String get messageListBannerOfflineJustNow =>
+      'Offline. Showing messages saved on this device, last updated just now.';
+
+  @override
+  String messageListBannerOfflineMinutesAgo(int minutes) {
+    String _temp0 = intl.Intl.pluralLogic(
+      minutes,
+      locale: localeName,
+      other: '$minutes minutes',
+      one: '1 minute',
+    );
+    return 'Offline. Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String messageListBannerOfflineHoursAgo(int hours) {
+    String _temp0 = intl.Intl.pluralLogic(
+      hours,
+      locale: localeName,
+      other: '$hours hours',
+      one: '1 hour',
+    );
+    return 'Offline. Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String messageListBannerOfflineDaysAgo(int days) {
+    String _temp0 = intl.Intl.pluralLogic(
+      days,
+      locale: localeName,
+      other: '$days days',
+      one: '1 day',
+    );
+    return 'Offline. Showing messages saved on this device, last updated $_temp0 ago.';
+  }
+
+  @override
+  String get messageListCantLoadOlderOffline =>
+      'Can’t load older messages offline';
+
+  @override
+  String get messageListCantLoadNewerOffline =>
+      'Can’t load newer messages offline';
+
+  @override
+  String get messageListAnchorFallbackOffline =>
+      'Newer messages, including the one you opened, aren’t available offline';
+
+  @override
+  String get topicListBannerLabelShowingSavedTopics =>
+      'Topics with messages saved on this device';
+
+  @override
+  String get searchMessagesBannerLabelShowingSaved =>
+      'Results from messages saved on this device';
 }

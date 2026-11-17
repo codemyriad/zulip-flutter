@@ -206,3 +206,30 @@ class MalformedServerResponseException extends ServerException {
             .errorMalformedResponseWithCause(
               httpStatus, causeException.toString()));
 }
+
+/// Whether a request that failed with [error] is worth retrying,
+/// as by a loop that retries with backoff until a request succeeds.
+///
+/// This is true for errors that may go away on their own:
+/// network failures, server errors, rate limiting,
+/// and non-JSON malformed responses (as from a captive portal on the network).
+/// It's false for other errors, like a 4xx error for a bad narrow,
+/// valid JSON that failed response parsing (`data != null`),
+/// which retrying won't fix,
+/// and errors from bugs in our code, which shouldn't be retried silently.
+bool isRetryableRequestError(Object error) {
+  switch (error) {
+    case NetworkException(:final cause):
+      // In tests, [FakeApiConnection] throws a [FlutterError]
+      // when a test forgot to prepare a response; don't hide that.
+      assert(cause is! FlutterError, 'Unexpected error in request: $cause');
+      return true;
+    case Server5xxException():
+    case MalformedServerResponseException(data: null):
+    case ZulipApiException(code: 'RATE_LIMIT_HIT'):
+    case HttpException(httpStatus: 429):
+      return true;
+    default:
+      return false;
+  }
+}

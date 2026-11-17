@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:checks/checks.dart';
 import 'package:http/http.dart' as http;
 import 'package:test_api/scaffolding.dart';
+import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/route/events.dart';
 
@@ -61,5 +63,47 @@ void main() {
       connection.prepare(json: eg.initialSnapshot().toJson());
       await checkRegisterQueue(connection, idleQueueTimeout: .mobile);
     }));
+
+    test('rawBody', () => FakeApiConnection.with_((connection) async {
+      final body = jsonEncode({
+        ...eg.initialSnapshot(queueId: 'queue1').toJson(),
+        'some_unknown_field': [1, 2],
+      });
+      connection.prepare(body: body);
+      final rawBody = BytesBuilder();
+      final result = await registerQueue(connection, rawBody: rawBody);
+      check(result.queueId).equals('queue1');
+      check(rawBody.takeBytes()).deepEquals(utf8.encode(body));
+    }));
+  });
+
+  group('getEvents', () {
+    test('rawEvents', () => FakeApiConnection.with_((connection) async {
+      final rawEvents = [
+        {
+          ...jsonDecode(jsonEncode(eg.messageEvent(eg.streamMessage())))
+            as Map<String, dynamic>,
+          'some_unknown_field': [1, 2],
+        },
+        {'id': 3, 'type': 'heartbeat'},
+      ];
+      connection.prepare(json: {
+        'result': 'success', 'msg': '',
+        'events': rawEvents,
+        'queue_id': 'queue1',
+      });
+      final result = await getEvents(connection, queueId: 'queue1');
+      check(result.events).deepEquals(<Condition<Object?>>[
+        (it) => it.isA<MessageEvent>(),
+        (it) => it.isA<HeartbeatEvent>(),
+      ]);
+      check(result.rawEvents).isNotNull().deepEquals(rawEvents);
+      check(result.toJson()).not((it) => it.containsKey('raw_events'));
+    }));
+
+    test('no rawEvents when constructed directly', () {
+      check(GetEventsResult(events: [HeartbeatEvent(id: 3)], queueId: null))
+        .has((x) => x.rawEvents, 'rawEvents').isNull();
+    });
   });
 }

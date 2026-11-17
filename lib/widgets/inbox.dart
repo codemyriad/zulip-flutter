@@ -581,7 +581,10 @@ class InboxTopicItem extends StatelessWidget {
         onLongPress: () => showTopicActionSheet(context,
           channelId: streamId,
           topic: topic,
-          someMessageIdInTopic: lastUnreadId),
+          someMessageIdInTopic:
+            store.confirmed && !store.isMessageMaybeStale(lastUnreadId)
+              ? lastUnreadId
+              : null),
         child: ConstrainedBox(constraints: const BoxConstraints(minHeight: 34),
           child: Padding(padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 12, 0),
             child: Center(

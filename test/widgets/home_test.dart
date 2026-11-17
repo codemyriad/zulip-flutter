@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:checks/checks.dart';
@@ -18,6 +19,7 @@ import 'package:zulip/widgets/app_bar.dart';
 import 'package:zulip/widgets/banner.dart';
 import 'package:zulip/widgets/home.dart';
 import 'package:zulip/widgets/icons.dart';
+import 'package:zulip/widgets/image.dart';
 import 'package:zulip/widgets/inbox.dart';
 import 'package:zulip/widgets/message_list.dart';
 import 'package:zulip/widgets/page.dart';
@@ -441,6 +443,59 @@ void main () {
       await tapButtonAndAwaitTransition(tester, find.byIcon(ZulipIcons.info));
       check(find.byType(AboutZulipPage)).findsOne();
       debugNetworkImageHttpClientProvider = null;
+    });
+
+    group('realm icon disk cache', () {
+      late FakeImageHttpClient httpClient;
+
+      /// Open the menu, with [realmIcon] as the icon and already on disk.
+      Future<void> prepareRealmIcon(WidgetTester tester, Uri realmIcon) async {
+        addTearDown(testBinding.reset);
+        addTearDown(imageCache.clear);
+        final account = eg.account(user: eg.selfUser, realmIcon: realmIcon);
+        await testBinding.globalStore.add(account,
+          eg.initialSnapshot(realmIconUrl: realmIcon));
+        store = await testBinding.globalStore.perAccount(account.id);
+        await store.addUser(eg.selfUser);
+        await testBinding.imageDiskCache.put(account.id, realmIcon,
+          Uint8List.fromList(kSolidBlueAvatar));
+
+        httpClient = prepareBoringImageHttpClient();
+        await tester.pumpWidget(TestZulipApp(accountId: account.id,
+          navigatorObservers: [testNavObserver],
+          child: const HomePage()));
+        await tester.pump();
+        await tapOpenMenuAndAwait(tester);
+
+        // Let the icon load, from the cache or network, and decode;
+        // decoding happens outside the test's fake async.
+        final findIcon = find.descendant(
+          of: find.byWidgetPredicate((w) =>
+            w is RealmContentNetworkImage && w.src == realmIcon),
+          matching: find.byType(RawImage));
+        for (int i = 0; i < 50; i++) {
+          if (tester.widget<RawImage>(findIcon).image != null) break;
+          await tester.runAsync(() => Future<void>.delayed(Duration(milliseconds: 10)));
+          await tester.pump();
+        }
+        check(tester.widget<RawImage>(findIcon).image).isNotNull();
+      }
+
+      testWidgets('uploaded off-realm: no request', (tester) async {
+        // As when the server keeps uploads in S3-style storage.
+        final realmIcon = Uri.parse('https://uploads.example/2/realm/icon.png?version=3');
+        await prepareRealmIcon(tester, realmIcon);
+        check(httpClient.requestedUrls).not((it) => it.contains(realmIcon));
+        debugNetworkImageHttpClientProvider = null;
+      });
+
+      testWidgets('Gravatar: fetch', (tester) async {
+        final realmIcon = Uri.parse(
+          'https://secure.gravatar.com/avatar/abc?d=identicon&version=3');
+        await prepareRealmIcon(tester, realmIcon);
+        check(httpClient.requestedUrls).contains(realmIcon);
+        debugNetworkImageHttpClientProvider = null;
+      });
     });
   });
 

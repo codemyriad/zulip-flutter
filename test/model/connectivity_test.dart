@@ -61,6 +61,30 @@ void main() {
       check(signalCount).equals(1);
     }));
 
+    test('vpn-only or empty connectivity counts as offline', () => awaitFakeAsync((async) async {
+      prepare(async, connectivity: [.wifi, .vpn]);
+      check(monitor.hasConnectivity).isTrue();
+
+      // Dropping to VPN-only (e.g. Tailscale active in airplane mode) has no
+      // underlying transport: hasConnectivity becomes false and no retry signal fires.
+      testBinding.notifyConnectivityChanged([.vpn]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(signalCount).equals(0);
+
+      // Empty result list also counts as offline.
+      testBinding.notifyConnectivityChanged([]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(signalCount).equals(0);
+
+      // Restoring an underlying transport brings hasConnectivity back and signals.
+      testBinding.notifyConnectivityChanged([.wifi, .vpn]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isTrue();
+      check(signalCount).equals(1);
+    }));
+
     test('pace signals: signal a change during cooldown at cooldown end', () => awaitFakeAsync((async) async {
       prepare(async);
 
@@ -277,6 +301,53 @@ void main() {
       monitor.dispose();
       async.elapse(const Duration(seconds: 2));
       check(signalCount).equals(0);
+    }));
+
+    test('hasConnectivity tracks state and notifies only on transitions', () => awaitFakeAsync((async) async {
+      addTearDown(testBinding.reset);
+      testBinding.connectivityResult = const [.none];
+      monitor = ConnectivityMonitor();
+      int notifyCount = 0;
+      monitor.addListener(() => notifyCount++);
+
+      // Before the baseline checkConnectivity completes, hasConnectivity is optimistically true.
+      check(monitor.hasConnectivity).isTrue();
+      check(notifyCount).equals(0);
+
+      // Baseline [none] flips hasConnectivity to false and notifies listeners.
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(notifyCount).equals(1);
+
+      // Same state again does not notify.
+      testBinding.notifyConnectivityChanged([.none]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(notifyCount).equals(1);
+
+      // Transitioning back online notifies.
+      testBinding.notifyConnectivityChanged([.wifi]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isTrue();
+      check(notifyCount).equals(2);
+
+      // Switching between online transports does not notify connectivity availability listeners.
+      testBinding.notifyConnectivityChanged([.mobile]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isTrue();
+      check(notifyCount).equals(2);
+
+      // Losing connectivity again notifies.
+      testBinding.notifyConnectivityChanged([.none]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isFalse();
+      check(notifyCount).equals(3);
+
+      // Restoring connectivity with multiple transports notifies.
+      testBinding.notifyConnectivityChanged([.wifi, .vpn]);
+      async.flushMicrotasks();
+      check(monitor.hasConnectivity).isTrue();
+      check(notifyCount).equals(4);
     }));
   });
 }

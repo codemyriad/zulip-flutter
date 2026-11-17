@@ -29,7 +29,7 @@ import 'binding.dart';
 /// (the set of [ConnectivityResult] values the platform reports).
 /// So a direct move from one Wi-Fi network to another goes unnoticed,
 /// and a consumer still needs its own timeout for that case.
-class ConnectivityMonitor {
+class ConnectivityMonitor with ChangeNotifier {
   ConnectivityMonitor() {
     _connectivitySubscription = ZulipBinding.instance.connectivityChanges
       .listen(_handleConnectivityUpdate,
@@ -54,6 +54,23 @@ class ConnectivityMonitor {
   /// The device's network connectivity, per the latest update we've seen,
   /// or null if we haven't seen one yet.
   Set<ConnectivityResult>? _lastResults;
+
+  /// Whether the device appears to have some network connectivity.
+  ///
+  /// Starts true before the first platform connectivity reading arrives,
+  /// so transient initial loads don't look offline prematurely; transitions
+  /// cleanly to false when a reading is empty, contains
+  /// [ConnectivityResult.none], or only has [ConnectivityResult.vpn] with no
+  /// underlying network transport.
+  bool get hasConnectivity =>
+    _lastResults == null || _resultsHaveConnectivity(_lastResults!);
+
+  static bool _resultsHaveConnectivity(Set<ConnectivityResult> results) {
+    if (results.isEmpty || results.contains(ConnectivityResult.none)) {
+      return false;
+    }
+    return results.any((r) => r != ConnectivityResult.vpn);
+  }
 
   /// The number of connectivity updates recorded so far,
   /// the first of them being a baseline rather than a change.
@@ -111,10 +128,14 @@ class ConnectivityMonitor {
     final resultSet = result.toSet();
     final previous = _lastResults;
     if (setEquals(previous, resultSet)) return;
+    final hadConnectivity = hasConnectivity;
     _lastResults = resultSet;
     _updateCount++;
+    if (hasConnectivity != hadConnectivity) {
+      notifyListeners();
+    }
     if (previous == null) return; // Just a baseline, not a change.
-    if (resultSet.contains(ConnectivityResult.none)) {
+    if (!_resultsHaveConnectivity(resultSet)) {
       // With no connectivity, a retry cannot succeed.  Signal nothing,
       // and act when connectivity comes back.
       return;
@@ -134,7 +155,7 @@ class ConnectivityMonitor {
       _cooldownTimer = null;
       if (!_retrySignalDeferred) return;
       _retrySignalDeferred = false;
-      if (_lastResults!.contains(ConnectivityResult.none)) return;
+      if (!_resultsHaveConnectivity(_lastResults!)) return;
       _emitRetrySignal();
     });
     _retrySignalsController.add(null);
@@ -173,6 +194,7 @@ class ConnectivityMonitor {
 
   bool _disposed = false;
 
+  @override
   void dispose() {
     assert(!_disposed);
     _connectivitySubscription?.cancel();
@@ -180,5 +202,6 @@ class ConnectivityMonitor {
     _cooldownTimer?.cancel();
     _retrySignalsController.close();
     _disposed = true;
+    super.dispose();
   }
 }

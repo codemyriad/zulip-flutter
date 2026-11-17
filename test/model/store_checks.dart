@@ -40,6 +40,33 @@ extension PushKeyChecks on Subject<PushKey> {
   Subject<int?> get supersededTimestamp => has((x) => x.supersededTimestamp, 'supersededTimestamp');
 }
 
+extension ServerSnapshotChecks on Subject<ServerSnapshot> {
+  Subject<int> get accountId => has((x) => x.accountId, 'accountId');
+  Subject<String> get queueId => has((x) => x.queueId, 'queueId');
+  Subject<int> get lastEventId => has((x) => x.lastEventId, 'lastEventId');
+  Subject<String> get appVersion => has((x) => x.appVersion, 'appVersion');
+  Subject<int> get timestamp => has((x) => x.timestamp, 'timestamp');
+  Subject<bool> get eventLogTruncated => has((x) => x.eventLogTruncated, 'eventLogTruncated');
+}
+
+extension ServerSnapshotBlobChecks on Subject<ServerSnapshotBlob> {
+  Subject<int> get accountId => has((x) => x.accountId, 'accountId');
+  Subject<Uint8List> get data => has((x) => x.data, 'data');
+}
+
+extension ServerEventBatchChecks on Subject<ServerEventBatch> {
+  Subject<int> get accountId => has((x) => x.accountId, 'accountId');
+  Subject<String> get queueId => has((x) => x.queueId, 'queueId');
+  Subject<int> get lastEventId => has((x) => x.lastEventId, 'lastEventId');
+  Subject<Uint8List> get data => has((x) => x.data, 'data');
+}
+
+extension ServerDataChecks on Subject<ServerData> {
+  Subject<ServerSnapshot> get snapshot => has((x) => x.snapshot, 'snapshot');
+  Subject<Uint8List> get snapshotData => has((x) => x.snapshotData, 'snapshotData');
+  Subject<List<ServerEventBatch>> get eventBatches => has((x) => x.eventBatches, 'eventBatches');
+}
+
 extension GlobalSettingsStoreChecks on Subject<GlobalSettingsStore> {
   Subject<ThemeSetting?> get themeSetting => has((x) => x.themeSetting, 'themeSetting');
   Subject<BrowserPreference?> get browserPreference => has((x) => x.browserPreference, 'browserPreference');
@@ -62,7 +89,10 @@ extension GlobalStoreChecks on Subject<GlobalStore> {
 
 extension PerAccountStoreChecks on Subject<PerAccountStore> {
   Subject<ApiConnection> get connection => has((x) => x.connection, 'connection');
+  Subject<bool> get disposed => has((x) => x.disposed, 'disposed');
   Subject<bool> get isRecoveringEventStream => has((x) => x.isRecoveringEventStream, 'isRecoveringEventStream');
+  Subject<bool> get isEventStreamFailing => has((x) => x.isEventStreamFailing, 'isEventStreamFailing');
+  Subject<String> get queueId => has((x) => x.queueId, 'queueId');
   Subject<Uri> get realmUrl => has((x) => x.realmUrl, 'realmUrl');
   Subject<String> get zulipVersion => has((x) => x.zulipVersion, 'zulipVersion');
   Subject<bool?> get realmMandatoryTopics => has((x) => x.realmMandatoryTopics, 'realmMandatoryTopics');

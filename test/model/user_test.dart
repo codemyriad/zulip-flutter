@@ -36,7 +36,9 @@ void main() {
       final store = eg.store();
       final user = eg.user(fullName: 'Old Name');
       await store.addUser(user);
-      final message = eg.streamMessage(sender: user);
+      final stream = eg.stream();
+      await store.addStream(stream);
+      final message = eg.streamMessage(sender: user, stream: stream);
       await store.addMessage(message);
       check(store.senderDisplayName(message)).equals('Old Name');
 
@@ -50,7 +52,9 @@ void main() {
 
     test('on an unknown user', () async {
       final store = eg.store();
-      final message = eg.streamMessage(sender: eg.user(fullName: 'Some User'));
+      final stream = eg.stream();
+      await store.addStream(stream);
+      final message = eg.streamMessage(sender: eg.user(fullName: 'Some User'), stream: stream);
       await store.addMessage(message);
       // If the user is unknown, `store.senderDisplayName` should fall back
       // to the name in the message...

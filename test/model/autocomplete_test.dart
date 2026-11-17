@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:checks/checks.dart';
 import 'package:flutter/widgets.dart';
@@ -10,6 +11,7 @@ import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/channels.dart';
 import 'package:zulip/generated/l10n/zulip_localizations.dart';
 import 'package:zulip/model/autocomplete.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/compose.dart';
 import 'package:zulip/model/emoji.dart';
 import 'package:zulip/model/localizations.dart';
@@ -1493,6 +1495,167 @@ void main() {
     check(done).isTrue();
     check(view2.results).single.which(isTopic(topic2.name));
   });
+
+  test('TopicAutocompleteView offline falls back to saved topics without poisoning cache', () async {
+    final channel = eg.stream(streamId: 1000, name: 'General');
+    final store = eg.store(initialSnapshot: eg.initialSnapshot(
+      streams: [channel],
+      subscriptions: [eg.subscription(channel)],
+    ));
+    store.debugSetCoverageEnabled(true);
+    final connection = store.connection as FakeApiConnection;
+
+    await store.handleEvent(eg.messageEvent(eg.streamMessage(
+      id: 1, stream: channel, topic: 'saved offline', content: '<p>hi</p>')));
+
+    connection.prepare(httpException: const SocketException('offline'));
+    final view = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(view.dispose);
+
+    for (int i = 0; i < 5; i++) {
+      await Future(() {});
+    }
+    check(view.results).single.which(isTopic(eg.t('saved offline')));
+    check(store.topics.channelTopics(channel.streamId)).isNull();
+
+    // When back online, a new view still fetches fresh topics from the server.
+    final serverTopic = eg.getChannelTopicsEntry(maxId: 20, name: 'saved online');
+    connection.prepare(
+      json: GetChannelTopicsResult(topics: [serverTopic]).toJson());
+    final view2 = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(view2.dispose);
+
+    for (int i = 0; i < 5; i++) {
+      await Future(() {});
+    }
+    check(view2.results).single.which(isTopic(serverTopic.name));
+  });
+
+  test('TopicAutocompleteView offline does not throw unhandled error when coverageEnabled is false', () async {
+    final channel = eg.stream(streamId: 1000, name: 'General');
+    final store = eg.store(initialSnapshot: eg.initialSnapshot(
+      streams: [channel],
+      subscriptions: [eg.subscription(channel)],
+    ));
+    store.debugSetCoverageEnabled(false);
+    final connection = store.connection as FakeApiConnection;
+
+    await store.handleEvent(eg.messageEvent(eg.streamMessage(
+      id: 1, stream: channel, topic: 'saved offline', content: '<p>hi</p>')));
+
+    connection.prepare(httpException: const SocketException('offline'));
+    final errors = <Object>[];
+    late TopicAutocompleteView view;
+    await runZonedGuarded(() async {
+      view = TopicAutocompleteView.init(
+        store: store,
+        channelId: channel.streamId,
+        query: TopicAutocompleteQuery('saved'),
+      );
+      for (int i = 0; i < 5; i++) {
+        await Future(() {});
+      }
+    }, (error, _) {
+      errors.add(error);
+    });
+    view.dispose();
+    check(errors).isEmpty();
+    check(view.results).isEmpty();
+  });
+
+  test('TopicAutocompleteView disposed during offline fetch does not start a search', () async {
+    final channel = eg.stream(streamId: 1000, name: 'General');
+    final store = eg.store(initialSnapshot: eg.initialSnapshot(
+      streams: [channel],
+      subscriptions: [eg.subscription(channel)],
+    ));
+    store.debugSetCoverageEnabled(true);
+    final connection = store.connection as FakeApiConnection;
+
+    await store.handleEvent(eg.messageEvent(eg.streamMessage(
+      id: 1, stream: channel, topic: 'saved offline', content: '<p>hi</p>')));
+
+    connection.prepare(httpException: const SocketException('offline'));
+    final view = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    var notified = false;
+    view.addListener(() { notified = true; });
+    view.dispose();
+
+    for (int i = 0; i < 10; i++) {
+      await Future(() {});
+    }
+    check(notified).isFalse();
+    check(view.results).isEmpty();
+  });
+
+  test('TopicAutocompleteView: saved topics immediately offline, after 500ms when hung online', () => awaitFakeAsync((async) async {
+    TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+    addTearDown(TestZulipBinding.instance.reset);
+
+    final channel = eg.stream(streamId: 1000, name: 'General');
+    final store = eg.store(initialSnapshot: eg.initialSnapshot(
+      streams: [channel],
+      subscriptions: [eg.subscription(channel)],
+    ));
+    store.debugSetCoverageEnabled(true);
+    final connection = store.connection as FakeApiConnection;
+    await store.handleEvent(eg.messageEvent(eg.streamMessage(
+      id: 1, stream: channel, topic: 'saved offline', content: '<p>hi</p>')));
+    // Ensure lazy ConnectivityMonitor has resolved its baseline [none] state.
+    store.connectivityMonitor;
+    async.elapse(Duration.zero);
+
+    // Offline with delayed HTTP: saved topic appears immediately before 500ms or HTTP.
+    connection.prepare(
+      delay: const Duration(seconds: 5),
+      httpException: const SocketException('offline'),
+    );
+    final offlineView = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(offlineView.dispose);
+    async.elapse(const Duration(milliseconds: 50));
+    check(offlineView.results).single.which(isTopic(eg.t('saved offline')));
+    async.elapse(const Duration(seconds: 5));
+
+    // Online but hung HTTP: saved topic appears at 500ms, then live result replaces it.
+    TestZulipBinding.instance.notifyConnectivityChanged(const [ConnectivityResult.wifi]);
+    async.flushMicrotasks();
+    connection.prepare(
+      delay: const Duration(seconds: 5),
+      json: GetChannelTopicsResult(topics: [
+        eg.getChannelTopicsEntry(maxId: 20, name: 'saved online'),
+      ]).toJson(),
+    );
+    final hungView = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(hungView.dispose);
+    async.elapse(const Duration(milliseconds: 400));
+    check(hungView.results).isEmpty();
+
+    async.elapse(const Duration(milliseconds: 100));
+    check(hungView.results).single.which(isTopic(eg.t('saved offline')));
+
+    async.elapse(const Duration(seconds: 5));
+    check(hungView.results).single.which(isTopic(eg.t('saved online')));
+  }));
 
   group('TopicAutocompleteQuery.testTopic', () {
     final store = eg.store();

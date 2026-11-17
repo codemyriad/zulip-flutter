@@ -46,6 +46,22 @@ void main() {
         ..total.equals(9);
     });
 
+    test('ties keep their order, even beyond 32 emoji', () {
+      // [List.sort] is unstable for lists longer than 32.
+      final reactions = [
+        for (int i = 0; i < 40; i++)
+          for (int userId = 1; userId <= (i.isOdd ? 2 : 1); userId++)
+            Reaction(reactionType: ReactionType.realmEmoji,
+              emojiCode: '$i', emojiName: 'emoji$i', userId: userId),
+      ];
+      check(Reactions(reactions))
+        .aggregated.has((list) => list.map((r) => r.emojiCode), 'emojiCodes')
+          .deepEquals([
+            for (int i = 1; i < 40; i += 2) '$i',
+            for (int i = 0; i < 40; i += 2) '$i',
+          ]);
+    });
+
     test('add', () {
       final reaction0 = Reaction(
         reactionType: ReactionType.unicodeEmoji, emojiCode: '1f44d', emojiName: 'thumbs_up', userId: 1);
@@ -201,6 +217,41 @@ void main() {
       check(reactions)
         ..aggregated.deepEquals([])
         ..total.equals(0);
+    });
+
+    test('add and remove are idempotent per user and emoji', () {
+      final r1 = Reaction(emojiName: 'thumbs_up', emojiCode: '1f44d', reactionType: ReactionType.unicodeEmoji, userId: 1);
+      final r1Alias = Reaction(emojiName: '+1', emojiCode: '1f44d', reactionType: ReactionType.unicodeEmoji, userId: 1);
+      final r2 = Reaction(emojiName: 'thumbs_up', emojiCode: '1f44d', reactionType: ReactionType.unicodeEmoji, userId: 2);
+
+      final reactions = Reactions([r1]);
+      check(reactions)
+        ..aggregated.deepEquals([matchesReactions([r1])])
+        ..total.equals(1);
+
+      reactions.add(r1);
+      reactions.add(r1Alias);
+      check(reactions)
+        ..aggregated.deepEquals([matchesReactions([r1])])
+        ..total.equals(1);
+
+      reactions.add(r2);
+      check(reactions)
+        ..aggregated.deepEquals([matchesReactions([r1, r2])])
+        ..total.equals(2);
+
+      // Removing a user who has not reacted (either absent emoji or absent user) is a no-op.
+      reactions.remove(reactionType: ReactionType.unicodeEmoji, emojiCode: '1f44d', userId: 99);
+      reactions.remove(reactionType: ReactionType.unicodeEmoji, emojiCode: '2764', userId: 1);
+      check(reactions)
+        ..aggregated.deepEquals([matchesReactions([r1, r2])])
+        ..total.equals(2);
+
+      reactions.remove(reactionType: r1.reactionType, emojiCode: r1.emojiCode, userId: r1.userId);
+      reactions.remove(reactionType: r1.reactionType, emojiCode: r1.emojiCode, userId: r1.userId);
+      check(reactions)
+        ..aggregated.deepEquals([matchesReactions([r2])])
+        ..total.equals(1);
     });
   });
 }

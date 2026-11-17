@@ -470,6 +470,45 @@ PushKey pushKey({
   );
 }
 
+/// A [ServerSnapshot], stored by the app version of the default [packageInfo].
+///
+/// For its data, see [serverSnapshotData].
+ServerSnapshot serverSnapshot({
+  required Account account,
+  String? realmUrl,
+  int? userId,
+  String? queueId,
+  int? lastEventId,
+  String? appVersion,
+  int? timestamp,
+  bool? eventLogTruncated,
+}) {
+  return ServerSnapshot(
+    accountId: account.id,
+    realmUrl: realmUrl ?? account.realmUrl.toString(),
+    userId: userId ?? account.userId,
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
+    appVersion: appVersion ?? '1.0.0+1',
+    timestamp: timestamp ?? 1771389742,
+    eventLogTruncated: eventLogTruncated ?? false,
+  );
+}
+
+const _defaultServerSnapshotQueueId = '1:2345';
+const _defaultServerSnapshotLastEventId = -1;
+
+/// Data for a [ServerSnapshot]: an [initialSnapshot], as UTF-8 JSON,
+/// with the given [queueId] and [lastEventId].
+///
+/// The defaults match those of [serverSnapshot].
+Uint8List serverSnapshotData({String? queueId, int? lastEventId}) {
+  return utf8.encode(jsonEncode(initialSnapshot(
+    queueId: queueId ?? _defaultServerSnapshotQueueId,
+    lastEventId: lastEventId ?? _defaultServerSnapshotLastEventId,
+  ).toJson()));
+}
+
 int _nextSavedSnippetId() => _lastSavedSnippetId++;
 int _lastSavedSnippetId = 1;
 
@@ -1009,12 +1048,17 @@ PollWidgetData pollWidgetData({
     extraData: PollWidgetExtraData(question: question, options: options));
 }
 
+int _lastSubmessageId = 100;
+int _nextSubmessageId() => _lastSubmessageId++;
+
 Submessage submessage({
+  int? id,
   SubmessageType? msgType,
   required SubmessageData? content,
   int? senderId,
 }) {
   return Submessage(
+    id: id ?? _nextSubmessageId(),
     msgType: msgType ?? SubmessageType.widget,
     content: jsonEncode(content),
     senderId: senderId ?? selfUser.userId,
@@ -1277,6 +1321,7 @@ UpdateMessageFlagsRemoveEvent updateMessageFlagsRemoveEvent(
 SubmessageEvent submessageEvent(
   int messageId,
   int senderId, {
+  int? submessageId,
   required SubmessageData? content,
 }) {
   return SubmessageEvent(
@@ -1285,7 +1330,7 @@ SubmessageEvent submessageEvent(
     content: jsonEncode(content),
     messageId: messageId,
     senderId: senderId,
-    submessageId: 100,
+    submessageId: submessageId ?? _nextSubmessageId(),
   );
 }
 
@@ -1406,6 +1451,7 @@ const _userSettings = userSettings;
 InitialSnapshot initialSnapshot({
   String? queueId,
   int? lastEventId,
+  int? maxMessageId = -1,
   int? zulipFeatureLevel,
   String? zulipVersion,
   String? zulipMergeBase,
@@ -1440,6 +1486,7 @@ InitialSnapshot initialSnapshot({
   RealmWildcardMentionPolicy? realmWildcardMentionPolicy,
   RealmTopicsPolicy? realmTopicsPolicy,
   bool? realmMandatoryTopics,
+  int? realmMessageRetentionDays = -1,
   String? realmName,
   int? realmWaitingPeriodThreshold,
   int? realmMessageContentDeleteLimitSeconds,
@@ -1470,6 +1517,7 @@ InitialSnapshot initialSnapshot({
   return InitialSnapshot(
     queueId: queueId ?? '1:2345',
     lastEventId: lastEventId ?? -1,
+    maxMessageId: maxMessageId,
     zulipFeatureLevel: zulipFeatureLevel ?? recentZulipFeatureLevel,
     zulipVersion: zulipVersion ?? recentZulipVersion,
     zulipMergeBase: zulipMergeBase ?? recentZulipVersion,
@@ -1509,6 +1557,7 @@ InitialSnapshot initialSnapshot({
     // no default; allow `null` to simulate servers without this
     realmTopicsPolicy: realmTopicsPolicy,
     realmMandatoryTopics: realmMandatoryTopics ?? true,
+    realmMessageRetentionDays: realmMessageRetentionDays,
     realmName: realmName ?? 'Example Zulip organization',
     realmWaitingPeriodThreshold: realmWaitingPeriodThreshold ?? 0,
     realmMessageContentDeleteLimitSeconds: realmMessageContentDeleteLimitSeconds,
@@ -1538,6 +1587,7 @@ PerAccountStore store({
   User? selfUser,
   Account? account,
   InitialSnapshot? initialSnapshot,
+  bool startPushDevices = true,
 }) {
   assert(!(account != null && selfUser != null));
   final effectiveAccount = account
@@ -1546,6 +1596,7 @@ PerAccountStore store({
     globalStore: globalStore ?? _globalStore(accounts: [effectiveAccount]),
     accountId: effectiveAccount.id,
     initialSnapshot: initialSnapshot ?? _initialSnapshot(),
+    startPushDevices: startPushDevices,
   );
 }
 const _store = store;
