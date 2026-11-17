@@ -395,7 +395,9 @@ class _ChooseAccountForShareModalState extends State<ChooseAccountForShareModal>
                     resolvedRealmIconUrl,
                     account: account,
                     versionTracksContent:
-                      !GravatarUrl.isGravatarUrl(resolvedRealmIconUrl)),
+                      !GravatarUrl.isGravatarUrl(resolvedRealmIconUrl),
+                    hasConnectivity: () =>
+                      globalStore.connectivityMonitor.hasConnectivity),
                   filterQuality: FilterQuality.medium,
                   fit: BoxFit.cover)),
           title: Text(account.realmName ?? account.realmUrl.toString()),

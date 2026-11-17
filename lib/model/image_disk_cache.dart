@@ -60,7 +60,7 @@ abstract class ImageDiskCache {
 /// An [ImageDiskCache] storing one file per entry,
 /// in a directory per account under [getRootDirectory].
 ///
-/// Entries larger than [maxEntryBytes] (default 2 MiB) are not stored.
+/// Entries larger than [maxEntryBytes] (default 10 MiB) are not stored.
 /// When an account's entries exceed [maxAccountBytes] (default 100 MiB)
 /// in total, the least recently used are evicted,
 /// in the background after a [put].
@@ -72,7 +72,7 @@ class FileImageDiskCache implements ImageDiskCache {
     this.maxAccountBytes = 100 * 1024 * 1024,
   });
 
-  static const defaultMaxEntryBytes = 2 * 1024 * 1024;
+  static const defaultMaxEntryBytes = 10 * 1024 * 1024;
 
   /// The directory holding the cache, typically in the platform's cache area.
   ///

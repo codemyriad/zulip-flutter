@@ -99,11 +99,14 @@ class RealmContentNetworkImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = PerAccountStoreWidget.of(context);
+    // The provider outlives this store in [ImageCache], so don't capture it.
+    final connectivityMonitor = store.connectivityMonitor;
     final provider = RealmImageProvider.forAccount(
       src,
       account: store.account,
       contentImmutable: contentImmutable,
       versionTracksContent: versionTracksContent,
+      hasConnectivity: () => connectivityMonitor.hasConnectivity,
       scale: scale,
     );
 

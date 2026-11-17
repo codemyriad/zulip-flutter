@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_checks/flutter_checks.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/widgets/image.dart';
 import 'package:zulip/widgets/realm_image_provider.dart';
 import 'package:zulip/widgets/store.dart';
@@ -356,6 +357,21 @@ void main() {
       await removeFuture;
       check(testBinding.clearMemoryImageCacheCalls).equals(1);
       check(cachedEntries()).isNull();
+    });
+
+    testWidgets('network-first: use disk cache without HTTP when offline', (tester) async {
+      testBinding.connectivityResult = const [ConnectivityResult.none];
+      await prepare();
+      // Ensure lazy ConnectivityMonitor has resolved its baseline [none] state.
+      testBinding.globalStore.connectivityMonitor;
+      await tester.pump(Duration.zero);
+
+      prepareImageHttpClient();
+      await putCached(networkFirstUrl, imageBytes);
+      await pumpImage(tester, networkFirstUrl);
+      checkImageShown(tester);
+      check(httpClient.requestedUrls).isEmpty();
+      debugNetworkImageHttpClientProvider = null;
     });
   });
 }

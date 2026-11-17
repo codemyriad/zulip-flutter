@@ -59,9 +59,9 @@ void main() {
       .single.not((it) => it.endsWith('.tmp'));
   });
 
-  test('no store larger than 2 MiB, and remove any superseded entry', () async {
+  test('no store larger than maxEntryBytes, and remove any superseded entry', () async {
     await prepare();
-    const maxEntryBytes = 2 * 1024 * 1024;
+    const maxEntryBytes = FileImageDiskCache.defaultMaxEntryBytes;
     await cache.put(accountId, urlN(1), Uint8List(maxEntryBytes));
     await cache.put(accountId, urlN(2), Uint8List.fromList([1, 2, 3]));
     await cache.put(accountId, urlN(2), Uint8List(maxEntryBytes + 1));
