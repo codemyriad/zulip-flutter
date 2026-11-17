@@ -102,6 +102,7 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
     required this.accountId,
     required this.headers,
     required this.policy,
+    this.hasConnectivity,
     this.scale = 1.0,
   });
 
@@ -112,6 +113,7 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
     required Account account,
     bool contentImmutable = false,
     bool versionTracksContent = false,
+    bool Function()? hasConnectivity,
     double scale = 1.0,
   }) {
     return RealmImageProvider(
@@ -126,6 +128,7 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
       policy: ImageDiskCachePolicy.forUrl(url, realmUrl: account.realmUrl,
         contentImmutable: contentImmutable,
         versionTracksContent: versionTracksContent),
+      hasConnectivity: hasConnectivity,
       scale: scale,
     );
   }
@@ -153,6 +156,13 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
   /// and [ImageDiskCachePolicy.cacheFirst] is chosen only for a URL
   /// whose content never changes, wherever it is shown.
   final ImageDiskCachePolicy policy;
+
+  /// Optional connectivity check; when provided and returning `false`,
+  /// [ImageDiskCachePolicy.networkFirst] serves a cached copy immediately
+  /// without waiting for a network request to fail.
+  ///
+  /// Not part of the [ImageCache] key (`==` / [hashCode]).
+  final bool Function()? hasConnectivity;
 
   final double scale;
 
@@ -187,6 +197,16 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
       if (policy == ImageDiskCachePolicy.cacheFirst) {
         final codec = await _tryDecodeFromCache(decode);
         if (codec != null) return codec;
+      } else if (hasConnectivity != null && !hasConnectivity!()) {
+        final cached = await _tryDecodeFromCache(decode);
+        if (cached != null) {
+          // Don't keep an unvalidated fallback in the in-memory cache
+          // once nothing is displaying it, so a later mount can revalidate.
+          scheduleMicrotask(() {
+            PaintingBinding.instance.imageCache.evict(key, includeLive: false);
+          });
+          return cached;
+        }
       }
 
       final Uint8List bytes;
@@ -261,7 +281,9 @@ class RealmImageProvider extends ImageProvider<RealmImageProvider> {
   // Like [NetworkImage]'s client: with `autoUncompress` false
   // we can trust the `Content-Length` header,
   // and [consolidateHttpClientResponseBytes] does the uncompressing.
-  static final HttpClient _sharedHttpClient = HttpClient()..autoUncompress = false;
+  static final HttpClient _sharedHttpClient = HttpClient()
+    ..autoUncompress = false
+    ..connectionTimeout = const Duration(seconds: 10);
 
   static HttpClient get _httpClient {
     HttpClient? client;

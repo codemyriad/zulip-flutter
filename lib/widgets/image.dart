@@ -104,6 +104,7 @@ class RealmContentNetworkImage extends StatelessWidget {
       account: store.account,
       contentImmutable: contentImmutable,
       versionTracksContent: versionTracksContent,
+      hasConnectivity: () => store.connectivityMonitor.hasConnectivity,
       scale: scale,
     );
 
