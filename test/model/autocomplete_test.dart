@@ -11,6 +11,7 @@ import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/channels.dart';
 import 'package:zulip/generated/l10n/zulip_localizations.dart';
 import 'package:zulip/model/autocomplete.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/compose.dart';
 import 'package:zulip/model/emoji.dart';
 import 'package:zulip/model/localizations.dart';
@@ -1598,6 +1599,63 @@ void main() {
     check(notified).isFalse();
     check(view.results).isEmpty();
   });
+
+  test('TopicAutocompleteView: saved topics immediately offline, after 500ms when hung online', () => awaitFakeAsync((async) async {
+    TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+    addTearDown(TestZulipBinding.instance.reset);
+
+    final channel = eg.stream(streamId: 1000, name: 'General');
+    final store = eg.store(initialSnapshot: eg.initialSnapshot(
+      streams: [channel],
+      subscriptions: [eg.subscription(channel)],
+    ));
+    store.debugSetCoverageEnabled(true);
+    final connection = store.connection as FakeApiConnection;
+    await store.handleEvent(eg.messageEvent(eg.streamMessage(
+      id: 1, stream: channel, topic: 'saved offline', content: '<p>hi</p>')));
+    // Ensure lazy ConnectivityMonitor has resolved its baseline [none] state.
+    store.connectivityMonitor;
+    async.elapse(Duration.zero);
+
+    // Offline with delayed HTTP: saved topic appears immediately before 500ms or HTTP.
+    connection.prepare(
+      delay: const Duration(seconds: 5),
+      httpException: const SocketException('offline'),
+    );
+    final offlineView = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(offlineView.dispose);
+    async.elapse(const Duration(milliseconds: 50));
+    check(offlineView.results).single.which(isTopic(eg.t('saved offline')));
+    async.elapse(const Duration(seconds: 5));
+
+    // Online but hung HTTP: saved topic appears at 500ms, then live result replaces it.
+    TestZulipBinding.instance.notifyConnectivityChanged(const [ConnectivityResult.wifi]);
+    async.flushMicrotasks();
+    connection.prepare(
+      delay: const Duration(seconds: 5),
+      json: GetChannelTopicsResult(topics: [
+        eg.getChannelTopicsEntry(maxId: 20, name: 'saved online'),
+      ]).toJson(),
+    );
+    final hungView = TopicAutocompleteView.init(
+      store: store,
+      channelId: channel.streamId,
+      query: TopicAutocompleteQuery('saved'),
+    );
+    addTearDown(hungView.dispose);
+    async.elapse(const Duration(milliseconds: 400));
+    check(hungView.results).isEmpty();
+
+    async.elapse(const Duration(milliseconds: 100));
+    check(hungView.results).single.which(isTopic(eg.t('saved offline')));
+
+    async.elapse(const Duration(seconds: 5));
+    check(hungView.results).single.which(isTopic(eg.t('saved online')));
+  }));
 
   group('TopicAutocompleteQuery.testTopic', () {
     final store = eg.store();

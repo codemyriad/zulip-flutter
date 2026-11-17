@@ -102,9 +102,74 @@ Future<void> applyMessageEffectToDb(
       :final newTopic,
       :final untrack,
       :final markMoved,
+      :final propagateMode,
     ):
       if (messageIds.isEmpty) return;
       final origTopicKey = serverTopicFold(origTopic.apiName);
+      final movedIdsJson = jsonEncode(messageIds);
+      final origTopicRowExists = (await db.customSelect(
+        'SELECT 1 FROM stored_channel_topics '
+        'WHERE account_id = ? AND channel_id = ? AND topic_key = ?',
+        variables: [
+          Variable.withInt(accountId),
+          Variable.withInt(origChannelId),
+          Variable.withString(origTopicKey),
+        ],
+      ).get()).isNotEmpty;
+      if (propagateMode == PropagateMode.changeAll) {
+        await db.customUpdate(
+          'DELETE FROM stored_channel_topics '
+          'WHERE account_id = ? AND channel_id = ? AND topic_key = ?',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(origChannelId),
+            Variable.withString(origTopicKey),
+          ],
+        );
+      } else {
+        // Older messages remain in the original topic, so keep it,
+        // like [Topics.handleUpdateMessageEvent] does.
+        await db.customUpdate(
+          'UPDATE stored_channel_topics SET max_id = COALESCE('
+          '  (SELECT MAX(id) FROM stored_messages '
+          '   WHERE account_id = ? AND channel_id = ? AND topic_key = ? '
+          '     AND id NOT IN (SELECT value FROM json_each(?))), '
+          '  max_id) '
+          'WHERE account_id = ? AND channel_id = ? AND topic_key = ? '
+          '  AND max_id IN (SELECT value FROM json_each(?))',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(origChannelId),
+            Variable.withString(origTopicKey),
+            Variable.withString(movedIdsJson),
+            Variable.withInt(accountId),
+            Variable.withInt(origChannelId),
+            Variable.withString(origTopicKey),
+            Variable.withString(movedIdsJson),
+          ],
+        );
+      }
+      if (!untrack && origTopicRowExists) {
+        final maxMovedId = messageIds.reduce((a, b) => a > b ? a : b);
+        final destTopicName = newTopic.apiName;
+        final destTopicKey = serverTopicFold(destTopicName);
+        await db.customInsert(
+          'INSERT INTO stored_channel_topics '
+          '(account_id, channel_id, topic_key, topic, max_id) '
+          'VALUES (?, ?, ?, ?, ?) '
+          'ON CONFLICT (account_id, channel_id, topic_key) DO UPDATE SET '
+          'topic = CASE WHEN excluded.max_id >= stored_channel_topics.max_id '
+          '  THEN excluded.topic ELSE stored_channel_topics.topic END, '
+          'max_id = MAX(stored_channel_topics.max_id, excluded.max_id)',
+          variables: [
+            Variable.withInt(accountId),
+            Variable.withInt(newChannelId),
+            Variable.withString(destTopicKey),
+            Variable.withString(destTopicName),
+            Variable.withInt(maxMovedId),
+          ],
+        );
+      }
       final matchedRows = await db.customSelect(
         'SELECT id FROM stored_messages '
         'WHERE account_id = ? AND channel_id = ? AND topic_key = ? '
@@ -113,7 +178,7 @@ Future<void> applyMessageEffectToDb(
           Variable.withInt(accountId),
           Variable.withInt(origChannelId),
           Variable.withString(origTopicKey),
-          Variable.withString(jsonEncode(messageIds)),
+          Variable.withString(movedIdsJson),
         ],
       ).get();
       if (matchedRows.isEmpty) return;
@@ -482,6 +547,17 @@ Future<void> deleteMessagesFromDb(
     'WHERE account_id = ? AND id IN (SELECT value FROM json_each(?))',
     variables: [Variable.withInt(accountId), Variable.withString(idsJson)],
     updates: {db.storedMessages},
+  );
+  // Keep the topic, which may have older messages, like [Topics] does.
+  await db.customUpdate(
+    'UPDATE stored_channel_topics SET max_id = COALESCE('
+    '  (SELECT MAX(m.id) FROM stored_messages m '
+    '   WHERE m.account_id = stored_channel_topics.account_id '
+    '     AND m.channel_id = stored_channel_topics.channel_id '
+    '     AND m.topic_key = stored_channel_topics.topic_key), '
+    '  max_id) '
+    'WHERE account_id = ? AND max_id IN (SELECT value FROM json_each(?))',
+    variables: [Variable.withInt(accountId), Variable.withString(idsJson)],
   );
   if (removedBytes != 0) {
     await _adjustTotalBodyBytes(db, accountId: accountId, delta: -removedBytes);

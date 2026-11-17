@@ -11,6 +11,7 @@ import 'package:zulip/api/model/events.dart';
 import 'package:zulip/api/model/initial_snapshot.dart';
 import 'package:zulip/api/model/model.dart';
 import 'package:zulip/api/route/channels.dart';
+import 'package:zulip/model/binding.dart';
 import 'package:zulip/model/message.dart';
 import 'package:zulip/model/message_coverage.dart';
 import 'package:zulip/model/narrow.dart';
@@ -640,6 +641,9 @@ void main() {
     group('saved topics fallback', () {
       Future<({TestGlobalStore global, UpdateMachine um, FakeApiConnection conn})>
           startDbStore({
+        TestGlobalStore? existingGlobal,
+        bool allowPersisted = false,
+        bool autoDispose = true,
         required List<ZulipStream> streams,
         List<Subscription> subscriptions = const [],
         List<UnreadChannelSnapshot> unreadChannels = const [],
@@ -647,10 +651,17 @@ void main() {
         driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
         Presence.debugEnable = false;
         UpdateMachine.debugEnableFetchEmojiData = false;
-        final global = eg.globalStore();
-        await global.settings.setBool(BoolGlobalSetting.messageDatabase, true);
-        await global.insertAccount(eg.selfAccount.toCompanion(false));
-        global.useCachedApiConnections = true;
+        final global = existingGlobal ?? eg.globalStore();
+        if (existingGlobal == null) {
+          await global.settings.setBool(BoolGlobalSetting.messageDatabase, true);
+          await global.insertAccount(eg.selfAccount.toCompanion(false));
+          global.useCachedApiConnections = true;
+          addTearDown(() async {
+            await global.backend.closeMessageDb();
+          });
+        } else {
+          global.clearCachedApiConnections();
+        }
         final conn = global.apiConnectionFromAccount(eg.selfAccount) as FakeApiConnection;
         final snap = eg.initialSnapshot(
           queueId: 'q1',
@@ -661,17 +672,19 @@ void main() {
           subscriptions: subscriptions,
           unreadMsgs: eg.unreadMsgs(channels: unreadChannels),
         );
-        final snapJson = jsonDecode(jsonEncode(snap)) as Map<String, dynamic>;
-        final subs = snapJson['subscriptions'];
-        if (subs is List) {
-          for (final sub in subs) {
-            if (sub is Map<String, dynamic> && sub['color'] is int) {
-              final color = sub['color'] as int;
-              sub['color'] = '#${(color & 0xffffff).toRadixString(16).padLeft(6, '0')}';
+        if (!allowPersisted) {
+          final snapJson = jsonDecode(jsonEncode(snap)) as Map<String, dynamic>;
+          final subs = snapJson['subscriptions'];
+          if (subs is List) {
+            for (final sub in subs) {
+              if (sub is Map<String, dynamic> && sub['color'] is int) {
+                final color = sub['color'] as int;
+                sub['color'] = '#${(color & 0xffffff).toRadixString(16).padLeft(6, '0')}';
+              }
             }
           }
+          conn.prepare(json: snapJson);
         }
-        conn.prepare(json: snapJson);
         conn.prepare(
           delay: Duration.zero,
           json: {
@@ -681,12 +694,11 @@ void main() {
             'queue_id': 'q1',
           },
         );
-        final um = await UpdateMachine.load(global, eg.selfAccount.id, allowPersisted: false);
+        final um = await UpdateMachine.load(global, eg.selfAccount.id, allowPersisted: allowPersisted);
         um.debugPauseLoop();
-        addTearDown(() async {
-          um.dispose();
-          await global.backend.debugMessageDatabase?.close();
-        });
+        if (autoDispose) {
+          addTearDown(um.dispose);
+        }
         return (global: global, um: um, conn: conn);
       }
 
@@ -973,6 +985,168 @@ void main() {
 
         final topics = await dbStore.loadSavedTopics(channel.streamId);
         check(topics).isNotNull().single.which(isChannelTopicsEntry('KeptTopic', 506));
+      }));
+
+      test('persist fetched topics across restart, rename, and access purge', () => awaitFakeAsync((async) async {
+        final priv = eg.stream(streamId: 70, name: 'Priv', inviteOnly: true);
+        final setup1 = await startDbStore(
+          autoDispose: false,
+          streams: [channel, priv],
+          subscriptions: [eg.subscription(channel), eg.subscription(priv)],
+        );
+        async.elapse(Duration.zero);
+        final writer = setup1.global.backend.messageDbWriterForAccount(eg.selfAccount.id);
+        await writer.drainForTesting();
+
+        setup1.conn.prepare(json: GetChannelTopicsResult(topics: [
+          eg.getChannelTopicsEntry(name: 'Alpha', maxId: 100),
+          eg.getChannelTopicsEntry(name: 'Beta', maxId: 90),
+        ]).toJson());
+        await setup1.um.store.topics.getChannelTopics(channel.streamId);
+        setup1.conn.prepare(json: GetChannelTopicsResult(topics: [
+          eg.getChannelTopicsEntry(name: 'SecretTopic', maxId: 200),
+        ]).toJson());
+        await setup1.um.store.topics.getChannelTopics(priv.streamId);
+        await writer.drainForTesting();
+
+        // Simulate app restart while offline: stored_channel_topics survives even
+        // though stored_messages has zero rows for `channel`, and rename updates it.
+        setup1.um.dispose();
+        final setup2 = await startDbStore(
+          existingGlobal: setup1.global,
+          allowPersisted: true,
+          autoDispose: false,
+          streams: [channel, priv],
+          subscriptions: [eg.subscription(channel), eg.subscription(priv)],
+        );
+        async.elapse(Duration.zero);
+        await writer.drainForTesting();
+
+        final store2 = setup2.um.store;
+        check(await store2.loadSavedTopics(channel.streamId))
+          .isNotNull()
+          .deepEquals([
+            isChannelTopicsEntry('Alpha', 100),
+            isChannelTopicsEntry('Beta', 90),
+          ]);
+
+        // Topic rename via PropagateMode.changeAll replaces 'Alpha' with 'Renamed'.
+        await store2.handleEvent(eg.updateMessageEventMoveFrom(
+          origMessages: [eg.streamMessage(id: 100, stream: channel, topic: 'Alpha')],
+          newTopicStr: 'Renamed',
+          propagateMode: PropagateMode.changeAll,
+        ));
+        await writer.drainForTesting();
+        check(await store2.loadSavedTopics(channel.streamId))
+          .isNotNull()
+          .deepEquals([
+            isChannelTopicsEntry('Renamed', 100),
+            isChannelTopicsEntry('Beta', 90),
+          ]);
+
+        // Unsubscribing from private channel purges persisted topics on restart.
+        setup2.um.dispose();
+        final setup3 = await startDbStore(
+          existingGlobal: setup1.global,
+          allowPersisted: false,
+          streams: [channel, priv],
+          subscriptions: [eg.subscription(channel)],
+        );
+        async.elapse(Duration.zero);
+        await writer.drainForTesting();
+        check(await setup3.um.store.loadSavedTopics(priv.streamId)).isNull();
+        // Verify raw table row for priv was purged too.
+        final db = setup1.global.backend.debugMessageDatabase!;
+        final remaining = await db.queryStoredChannelTopics(eg.selfAccount.id, priv.streamId);
+        check(remaining.isEmpty).isTrue();
+      }));
+
+      test('keep persisted topic when its latest message is deleted or moved alone', () => awaitFakeAsync((async) async {
+        final setup1 = await startDbStore(
+          autoDispose: false,
+          streams: [channel],
+          subscriptions: [eg.subscription(channel)],
+        );
+        async.elapse(Duration.zero);
+        final writer = setup1.global.backend.messageDbWriterForAccount(eg.selfAccount.id);
+        await writer.drainForTesting();
+
+        setup1.conn.prepare(json: GetChannelTopicsResult(topics: [
+          eg.getChannelTopicsEntry(name: 'Alpha', maxId: 100),
+          eg.getChannelTopicsEntry(name: 'Beta', maxId: 90),
+        ]).toJson());
+        final store1 = setup1.um.store;
+        await store1.topics.getChannelTopics(channel.streamId);
+        await store1.handleEvent(eg.deleteMessageEvent([
+          eg.streamMessage(id: 100, stream: channel, topic: 'Alpha'),
+        ]));
+        await store1.handleEvent(eg.updateMessageEventMoveFrom(
+          origMessages: [eg.streamMessage(id: 90, stream: channel, topic: 'Beta')],
+          newTopicStr: 'Gamma',
+          propagateMode: PropagateMode.changeOne,
+        ));
+        await writer.drainForTesting();
+
+        setup1.um.dispose();
+        final setup2 = await startDbStore(
+          existingGlobal: setup1.global,
+          allowPersisted: true,
+          streams: [channel],
+          subscriptions: [eg.subscription(channel)],
+        );
+        async.elapse(Duration.zero);
+        await writer.drainForTesting();
+        check(await setup2.um.store.loadSavedTopics(channel.streamId))
+          .isNotNull()
+          .unorderedMatches([
+            isChannelTopicsEntry('Alpha', 100),
+            isChannelTopicsEntry('Beta', 90),
+            isChannelTopicsEntry('Gamma', 90),
+          ]);
+      }));
+
+      test('show saved topics immediately when offline', () => awaitFakeAsync((async) async {
+        TestZulipBinding.instance.connectivityResult = const [ConnectivityResult.none];
+        addTearDown(TestZulipBinding.instance.reset);
+
+        final setup = await startDbStore(
+          streams: [channel],
+          subscriptions: [eg.subscription(channel)],
+        );
+        async.elapse(Duration.zero);
+        final dbStore = setup.um.store;
+        final conn = setup.conn;
+        final writer = setup.global.backend.messageDbWriterForAccount(eg.selfAccount.id);
+
+        await dbStore.handleEvent(MessageEvent(
+          id: 11,
+          localMessageId: null,
+          message: eg.streamMessage(id: 25, stream: channel, topic: 'instant topic', sender: eg.selfUser),
+        ));
+        await writer.drainForTesting();
+
+        // Request still in flight (delayed), but hasConnectivity == false shows saved topics immediately.
+        conn.prepare(
+          delay: const Duration(seconds: 2),
+          json: GetChannelTopicsResult(topics: [
+            eg.getChannelTopicsEntry(name: 'live topic', maxId: 30),
+          ]).toJson(),
+        );
+        final dbView = TopicListView.init(store: dbStore, channelId: channel.streamId);
+        final fetchFuture = dbView.fetch();
+        async.flushMicrotasks();
+
+        check(dbView)
+          ..showingSavedTopics.isTrue()
+          ..fetchFailing.isFalse()
+          ..topics.isNotNull().single.which(isChannelTopicsEntry('instant topic', 25));
+
+        async.elapse(const Duration(seconds: 2));
+        await fetchFuture;
+        check(dbView)
+          ..showingSavedTopics.isFalse()
+          ..topics.isNotNull().single.which(isChannelTopicsEntry('live topic', 30));
+        dbView.dispose();
       }));
     });
   });

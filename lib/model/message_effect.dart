@@ -141,6 +141,7 @@ final class MoveEffect extends MessageEffect {
     required this.newTopic,
     required this.untrack,
     required this.markMoved,
+    this.propagateMode,
   });
 
   final List<int> messageIds;
@@ -150,6 +151,7 @@ final class MoveEffect extends MessageEffect {
   final TopicName newTopic;
   final bool untrack;
   final bool markMoved;
+  final PropagateMode? propagateMode;
 
   @override
   void applyToMessage(Message message) {
